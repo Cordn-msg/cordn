@@ -1,0 +1,19 @@
+[package]
+name = "mls-ds-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bincode.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+openmls.workspace = true
+tls_codec.workspace = true
+
+[dev-dependencies]
+openmls_basic_credential.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_traits.workspace = true

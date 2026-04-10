@@ -1,0 +1,12 @@
+[submodule "hermetic-mls"]
+	path = hermetic-mls
+	url = https://github.com/jdbohrman-tech/hermetic-mls.git
+[submodule "marmot"]
+	path = marmot
+	url = https://github.com/marmot-protocol/marmot.git
+[submodule "openmls"]
+	path = openmls
+	url = https://github.com/openmls/openmls.git
+[submodule "ts-mls"]
+	path = ts-mls
+	url = https://github.com/LukaJCB/ts-mls.git

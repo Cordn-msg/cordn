@@ -1,0 +1,46 @@
+# Build artifacts
+/target/
+**/target/
+
+# Cargo.lock is typically committed for libraries but some projects exclude it
+# Uncomment the next line if you want to exclude Cargo.lock
+# Cargo.lock
+
+# IDE and editor directories
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.fleet/
+.envrc
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Rust-specific
+**/*.rs.bk
+*.pdb
+
+# Agent/tooling directories that shouldn't be committed
+.agent/
+.roo/
+.env
+**/node_modules/**
+dist/
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Coverage output
+*.profraw
+*.prof
+coverage/
+
+# WASM build outputs (if any)
+**/*.wasm
+**/*.wat

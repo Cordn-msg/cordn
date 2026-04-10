@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "mls-ds-core",
+    "mls-ds-server",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+bincode = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tls_codec = { version = "0.4.2", features = ["derive", "serde", "mls"] }
+
+openmls = { version = "0.8.1", path = "openmls/openmls" }
+openmls_traits = { version = "0.5.0", path = "openmls/traits" }
+openmls_test = { version = "0.2.1", path = "openmls/openmls_test" }
+openmls_basic_credential = { version = "0.5.0", path = "openmls/basic_credential" }
+openmls_rust_crypto = { version = "0.5.1", path = "openmls/openmls_rust_crypto" }
+openmls_libcrux_crypto = { version = "0.3.1", path = "openmls/libcrux_crypto" }
+openmls_memory_storage = { version = "0.5.0", path = "openmls/memory_storage" }
+openmls_sqlite_storage = { version = "0.2.0", path = "openmls/sqlite_storage" }
