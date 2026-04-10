@@ -1,0 +1,9 @@
+{
+  "source": "src/ctxcn",
+  "relays": [
+    "wss://relay.contextvm.org"
+  ],
+  "addedClients": [
+    "dcc005ba656ef7b70a12463d0a8abc733a733388900fd5b1ec1284f1fde2ea0f"
+  ]
+}
