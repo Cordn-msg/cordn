@@ -1,0 +1,26 @@
+{
+  "name": "cvm-mls",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm run server:start",
+    "build": "pnpm build ./src/index.ts --outdir ./dist --target pnpm",
+    "client:cli": "node --experimental-strip-types ./src/client/cli/main.ts",
+    "server:start": "node --experimental-strip-types ./src/server/main.ts",
+    "test": "vitest run ./src",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.17"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@contextvm/sdk": "^0.8.0",
+    "commander": "^14.0.3",
+    "nostr-tools": "^2.23.3",
+    "ts-mls": "^2.0.0-rc.10"
+  }
+}

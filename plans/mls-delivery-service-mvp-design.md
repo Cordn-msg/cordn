@@ -2,27 +2,73 @@
 
 ## Status
 
-`draft` `architectural`
+`draft` `architectural` `typescript-first`
 
 ## Goal
 
-Define a simple, elegant MVP for an MLS delivery service exposed through ContextVM, using Nostr identities for discovery and attribution while minimizing what the coordinator can learn about senders and group relationships.
+Define a simple MVP for an MLS delivery service exposed through ContextVM, implemented entirely in TypeScript with [`ts-mls`](../ts-mls/README.md) and run with pnpm, while keeping the coordinator blind, queue-oriented, and small.
 
-## Design Summary
+## Decision
 
-The MVP should combine four ideas:
+The MVP should **not** use a split Rust delivery service plus TypeScript ContextVM bridge.
+
+The MVP should instead be:
+
+- one TypeScript codebase
+- one ContextVM server
+- one queue-oriented coordinator implementation
+- one MLS implementation based on [`ts-mls`](../ts-mls/README.md)
+- one runtime stack based on pnpm
+
+This is the main architectural correction from the earlier direction.
+
+## Why the Earlier Direction Became Too Complex
+
+The failed path introduced an unnecessary internal boundary:
+
+- Rust owned the delivery service logic
+- TypeScript owned the ContextVM server layer
+- both sides needed an explicit contract
+- debugging required tracing across two implementations and two runtimes
+
+That produced avoidable complexity in:
+
+- API contract definition
+- binary and message boundary debugging
+- duplicated domain modeling
+- slower iteration during MVP development
+
+For this MVP, that split should be removed.
+
+## Feasibility Assessment
+
+Implementing the delivery service in TypeScript is feasible.
+
+The reason is that [`ts-mls`](../ts-mls/README.md) already provides the MLS operations the clients need:
+
+- key package generation in [`generateKeyPackage()`](../ts-mls/src/keyPackage.ts:184)
+- key reuse for stable identity semantics in [`generateKeyPackageWithKey()`](../ts-mls/src/keyPackage.ts:135)
+- group creation in [`createGroup()`](../ts-mls/src/clientState.ts:1124)
+- join from welcome in [`joinGroup()`](../ts-mls/src/clientState.ts:921)
+- commit generation in [`createCommitInternal()`](../ts-mls/src/createCommit.ts:89)
+- application message generation in [`createApplicationMessage()`](../ts-mls/src/createMessage.ts:102)
+- message processing in [`processMessage()`](../ts-mls/src/processMessages.ts:484)
+- credential validation hooks through [`AuthenticationService`](../ts-mls/src/authenticationService.ts:4)
+- full client state persistence via the serialization flow documented in [`ts-mls/docs/15-client-state-serialization.md`](../ts-mls/docs/15-client-state-serialization.md)
+
+This means the coordinator does **not** need to implement MLS cryptography or group-state logic itself.
+
+It only needs to provide delivery-service behavior.
+
+## Core Design Summary
+
+The MVP combines five ideas:
 
 - **OpenMLS DS simplicity** from [`openmls/delivery-service/ds/src/main.rs`](../openmls/delivery-service/ds/src/main.rs:1)
-- **Nostr identity and discoverability** inspired by Marmot, especially group metadata ideas from [`marmot/01.md`](../marmot/01.md:1)
-- **Blind delivery-service semantics** described in [`mls-ds.md`](../mls-ds.md)
-- **ContextVM transport exposure** using a server pattern consistent with [`server-dev`](../.roo/skills/server-dev/SKILL.md)
-
-The core architectural decision is to separate the system into two privacy domains:
-
-- **Identity and invitation domain** using stable Nostr public keys
-- **Post-welcome delivery domain** using ephemeral delivery public keys
-
-This avoids using public-relay transport for all MLS traffic, which is one of the main concerns identified in [`marmot-viability.md`](../marmot-viability.md).
+- **TypeScript-only implementation** using [`ts-mls`](../ts-mls/README.md)
+- **Blind coordinator semantics** described in [`mls-ds.md`](../mls-ds.md)
+- **Stable identity plus ephemeral delivery separation** from the earlier privacy-first design
+- **ContextVM exposure** using a direct TypeScript server rather than a bridge, consistent with [`server-dev`](../.agents/skills/server-dev/SKILL.md)
 
 ## Problem Statement
 
@@ -35,61 +81,80 @@ The system needs to support real MLS text messaging with:
 - message queueing and fetch
 - user-visible sender attribution
 
-At the same time, the coordinator should learn as little as possible.
+At the same time, the coordinator should learn as little as possible and remain implementation-light.
 
 The MVP should therefore avoid:
 
-- durable transport linkage between long-term Nostr identities and post-welcome group traffic
-- rich server-side membership modeling when not strictly necessary
-- heavy RPC surfaces modeled after full delivery platforms such as [`hermetic-mls/proto/mls_service.proto`](../hermetic-mls/proto/mls_service.proto:1)
+- a Rust and TypeScript split for core delivery behavior
+- durable transport linkage between long-term identity and routine group traffic
+- heavy server-side group semantics
+- large RPC surfaces modeled after richer platforms such as [`hermetic-mls/proto/mls_service.proto`](../hermetic-mls/proto/mls_service.proto:1)
 
 ## Architectural Principles
 
-### 1. Stable identity is for discovery, not routine delivery
+### 1. TypeScript should own the full MVP stack
+
+The coordinator, ContextVM exposure layer, and integration logic should live in one TypeScript codebase.
+
+This gives:
+
+- one language
+- one debugger story
+- one set of types
+- one serialization boundary at the external protocol edge only
+
+### 2. [`ts-mls`](../ts-mls/README.md) should own MLS behavior
+
+Clients should use [`ts-mls`](../ts-mls/src/index.ts:1) for:
+
+- key package generation
+- group creation
+- commit generation
+- welcome processing
+- application message creation
+- message verification and state transitions
+
+The coordinator should not reimplement these concerns.
+
+### 3. Stable identity is for discovery, not routine delivery
 
 Stable Nostr public keys should be used for:
 
 - publishing key packages
 - discovering invite targets
-- associating MLS credentials with human-recognizable identities
-- locating welcome material for newly invited users
+- associating MLS credentials with user-facing identity
+- locating welcome material for invited users
 
-Stable Nostr public keys should **not** be required for ordinary post-welcome message submission.
+Stable Nostr public keys should **not** be required for normal post-welcome traffic.
 
-### 2. Post-welcome transport should be unlinkable by default
+### 4. Post-welcome transport should be unlinkable by default
 
-After a member joins a group, ordinary traffic should be sent through ephemeral delivery keys.
+After joining, ordinary traffic should be sent through ephemeral delivery keys.
 
-This means the coordinator sees:
+That means the coordinator sees:
 
 - group routing metadata
-- epoch-related metadata
+- epoch metadata
 - opaque message blobs
 - short-lived delivery sender keys
 
 But the coordinator should not automatically learn:
 
-- which stable Nostr identity authored a message
+- which stable identity authored a message
 - durable sender history across groups
-- a complete social graph of group membership
+- a complete membership graph
 
-### 3. Sender attribution belongs in MLS-authenticated identity, not transport
+### 5. Sender attribution belongs in MLS-authenticated identity, not transport
 
-Users still need messages to appear as authored by stable identities.
+Messages should appear as authored by stable identities because recipients verify MLS credentials, not because the coordinator trusts transport metadata.
 
-That attribution should come from MLS credentials or authenticated group state, not from the coordinator-facing envelope.
+This follows naturally from [`AuthenticationService`](../ts-mls/src/authenticationService.ts:4) and member inspection patterns such as [`getGroupMembers()`](../ts-mls/src/clientState.ts:262).
 
-This implies:
+### 6. Coordinator should stay blind and queue-oriented
 
-- stable Nostr pubkey is bound to MLS credential semantics
-- recipients verify author identity from MLS-authenticated data
-- coordinator transport metadata is not trusted for authorship
+The coordinator should behave much more like the minimal OpenMLS delivery service in [`openmls/delivery-service/ds/src/main.rs`](../openmls/delivery-service/ds/src/main.rs:1) than like a feature-rich service.
 
-### 4. Coordinator should stay blind and small
-
-The coordinator should behave much more like the OpenMLS DS in [`openmls/delivery-service/ds/src/main.rs`](../openmls/delivery-service/ds/src/main.rs:1) than the richer service in [`hermetic-mls/README.md`](../hermetic-mls/README.md).
-
-It should only manage what is needed for delivery:
+It should only manage:
 
 - published key packages
 - welcome queues
@@ -104,12 +169,10 @@ This plane uses stable public identity.
 
 Responsibilities:
 
-- publish key packages under stable Nostr identity
+- publish key packages under stable identity
 - discover recipients by stable identity
-- target welcome delivery to a stable discoverable identifier
-- optionally show stable user profile information in clients
-
-This leaks some relationship metadata during the invitation and onboarding stage, but keeps the user experience straightforward.
+- target welcomes to stable discoverable identifiers
+- allow clients to map MLS credentials to recognizable user identity
 
 ### Delivery plane
 
@@ -119,20 +182,34 @@ Responsibilities:
 
 - post proposal, commit, and application traffic after join
 - fetch queued messages
-- move group traffic without revealing stable author identity to the coordinator
-
-This reduces long-term linkage after the welcome phase.
+- route group traffic without revealing stable author identity to the coordinator
 
 ```mermaid
 flowchart TD
-    A[Stable Nostr identity] --> B[Publish key packages]
-    A --> C[Invite and welcome targeting]
-    C --> D[Join MLS group locally]
-    D --> E[Bind stable identity to MLS credential]
+    A[Stable identity] --> B[Publish key packages]
+    A --> C[Invite target discovery]
+    C --> D[Welcome delivery]
+    D --> E[Join group with ts-mls]
     E --> F[Rotate to ephemeral delivery keys]
-    F --> G[Post opaque group traffic to coordinator]
-    G --> H[Members fetch and verify sender identity from MLS state]
+    F --> G[Post opaque group traffic]
+    G --> H[Fetch and verify authors from MLS state]
 ```
+
+## What [`ts-mls`](../ts-mls/README.md) Makes Easier
+
+[`ts-mls`](../ts-mls/README.md) already demonstrates the lifecycle needed for the MVP.
+
+From the existing docs and source:
+
+- group creation and member addition are shown in [`ts-mls/docs/03-three-party-join.md`](../ts-mls/docs/03-three-party-join.md)
+- stable credential reuse is shown in [`ts-mls/docs/14-group-state-inspection.md`](../ts-mls/docs/14-group-state-inspection.md)
+- binary state persistence is shown in [`ts-mls/docs/15-client-state-serialization.md`](../ts-mls/docs/15-client-state-serialization.md)
+
+This is enough to support an MVP where:
+
+- clients keep authoritative MLS state locally
+- clients serialize and persist their own state
+- the coordinator only forwards opaque MLS artifacts
 
 ## What to Borrow and What to Avoid
 
@@ -140,13 +217,13 @@ flowchart TD
 
 Borrow selectively from [`marmot/01.md`](../marmot/01.md:1):
 
-- use stable Nostr identities as user-facing identifiers
-- use simple credential mapping from stable identity to MLS member identity
-- use a small subset of group metadata such as:
-  - group name
-  - group description
+- stable Nostr identities as user-facing identifiers
+- simple credential mapping from stable identity to MLS member identity
+- a very small subset of group metadata:
+  - `name`
+  - `description`
 
-This metadata should live in authenticated MLS state, not in coordinator-controlled mutable records.
+This metadata should live in authenticated MLS state, not in mutable coordinator-controlled records.
 
 ### Do not borrow from Marmot for MVP core
 
@@ -154,38 +231,37 @@ Avoid bringing in:
 
 - public-relay-first delivery for all traffic
 - relay agreement as a core group requirement
-- broad transport coupling to Nostr event semantics
-- advanced media or image metadata flows
-- assumptions that public Nostr dissemination is the main coordination layer
+- advanced Nostr event semantics as the main coordination layer
+- media and richer metadata flows
 
 ### Borrow from OpenMLS DS
 
-Use the OpenMLS DS as the main simplicity reference from [`openmls/delivery-service/ds/src/main.rs`](../openmls/delivery-service/ds/src/main.rs:1) and [`openmls/delivery-service/ds-lib/src/lib.rs`](../openmls/delivery-service/ds-lib/src/lib.rs:1):
+Use the OpenMLS delivery service as the main simplicity reference from [`openmls/delivery-service/ds/src/main.rs`](../openmls/delivery-service/ds/src/main.rs:1) and [`openmls/delivery-service/ds-lib/src/lib.rs`](../openmls/delivery-service/ds-lib/src/lib.rs:1):
 
 - small API surface
 - minimal coordinator state
 - opaque message storage and forwarding
 - limited epoch tracking
-- no rich group object model required for the first cut
+- no rich server-owned group model
 
 ### Use Hermetic-MLS only as a trimming reference
 
-[`hermetic-mls/proto/mls_service.proto`](../hermetic-mls/proto/mls_service.proto:1) is useful for understanding the broader operations a production-style service might expose, but it is too rich for the MVP baseline.
+[`hermetic-mls/proto/mls_service.proto`](../hermetic-mls/proto/mls_service.proto:1) is useful mostly as a warning against starting too large.
 
-The MVP should not start with:
+The MVP should not begin with:
 
-- explicit server-owned client lifecycle records
-- durable membership tables as the primary truth source
-- heavy server-managed group state
-- detailed per-message semantic typing beyond what routing requires
+- heavy membership tables
+- rich server lifecycle modeling
+- a broad RPC contract
+- server interpretation of decrypted group semantics
 
 ## Coordinator Responsibilities
 
-The MVP coordinator should support only the minimum required capabilities.
+The TypeScript coordinator should support only the minimum required capabilities.
 
 ### Required responsibilities
 
-- register published key packages under a stable Nostr identity
+- register published key packages under a stable identity
 - fetch or consume key packages for invitations
 - store and deliver welcome messages to invited users
 - accept opaque group messages using ephemeral delivery keys
@@ -196,26 +272,26 @@ The MVP coordinator should support only the minimum required capabilities.
 
 - spam mitigation and abuse controls
 - payments or quotas
-- rich moderation tools
+- rich moderation
 - complex relay policy modeling
-- durable rich social graph storage
-- server-side interpretation of decrypted group semantics
+- server-side interpretation of decrypted content
+- server-owned authoritative group membership
 
 ## Minimal Data Model
 
-The coordinator data model should remain intentionally small.
+The coordinator data model should stay intentionally small.
 
 ### Stable identity records
 
 - `stable_pubkey`
 - `published_key_packages`
-- optional lightweight profile reference
+- optional lightweight profile pointer
 
 ### Group routing records
 
 - `group_id`
 - `latest_handshake_epoch`
-- optional minimal delivery cursor state
+- optional delivery cursor state
 
 ### Welcome queue records
 
@@ -230,37 +306,41 @@ The coordinator data model should remain intentionally small.
 - `message_id`
 - `group_id`
 - `epoch`
-- `message_class` such as application or handshake
+- `message_class`
 - `ephemeral_sender_pubkey`
 - `opaque_message_blob`
 - `created_at`
 
-This model intentionally avoids storing a durable mapping from `ephemeral_sender_pubkey` to `stable_pubkey`.
+This model intentionally avoids durable linkage from `ephemeral_sender_pubkey` to `stable_pubkey`.
 
-## Identity Model
+## Protocol Boundary
 
-The MVP identity model should be:
+The clean boundary should be:
 
-- stable Nostr pubkey for user identity and discoverability
-- MLS credential binds member identity to that stable pubkey
-- ephemeral delivery pubkey used only for transport-facing writes after join
+### Client owns
 
-This allows the recipient to render a message as authored by the stable identity while the coordinator only sees the ephemeral transport identity.
+- all MLS cryptographic operations via [`ts-mls`](../ts-mls/src/index.ts:1)
+- credential construction and validation logic
+- group creation and mutation decisions
+- welcome processing and local state advancement
+- local state persistence using serialization facilities documented in [`ts-mls/docs/15-client-state-serialization.md`](../ts-mls/docs/15-client-state-serialization.md)
 
-## Group Metadata Model
+### Coordinator owns
 
-The MVP may borrow a minimal subset of Marmot-style metadata, but this metadata should be small and authenticated.
+- key package publication and retrieval
+- welcome storage and delivery
+- message queue append and fetch
+- epoch gatekeeping for handshake freshness
+- ContextVM tool exposure
 
-Recommended fields:
+### Coordinator does not own
 
-- `name`
-- `description`
+- authoritative decrypted group state
+- member identity resolution beyond published key package records
+- authorship truth for post-welcome messages
+- cryptographic validation of full group semantics beyond minimal routing checks
 
-Avoid including relay lists or transport directives in the MVP group metadata.
-
-The coordinator should not be the canonical owner of this metadata. The metadata should be derived from group state that members verify through MLS.
-
-## MVP RPC Surface
+## MVP Tool Surface
 
 The ContextVM server should expose a narrow tool surface.
 
@@ -285,102 +365,98 @@ The ContextVM server should expose a narrow tool surface.
 - `put_group_metadata`
 - `get_group_metadata`
 
-These metadata tools should only exist if they map directly to authenticated MLS group state handling rather than server-owned mutable group records.
+These should only exist if they map directly to authenticated MLS group-state handling and not to mutable coordinator-owned truth.
+
+## Runtime and Stack
+
+The implementation stack should be:
+
+- pnpm as the JavaScript runtime and package manager
+- TypeScript for the delivery service and ContextVM server
+- [`ts-mls`](../ts-mls/README.md) for MLS operations
+- ContextVM TypeScript SDK for Nostr exposure
+
+This replaces the earlier Rust core plus TypeScript wrapper model.
 
 ## ContextVM Exposure
 
-The coordinator should be exposed through a ContextVM server using the model described in [`server-dev`](../.roo/skills/server-dev/SKILL.md).
+The coordinator should be exposed through a direct TypeScript ContextVM server following the pattern in [`server-dev`](../.agents/skills/server-dev/SKILL.md).
 
 Recommended pattern:
 
-- implement the coordinator core in Rust
-- implement a thin ContextVM server interface that maps tool calls to coordinator operations
-- keep ContextVM as the external transport and discovery interface, not as the place where coordinator semantics are embedded
+- implement coordinator core in TypeScript
+- implement ContextVM tools in the same codebase
+- keep the server blind and queue-oriented
+- use structured outputs for machine-readable tool responses
 
-That means the architecture becomes:
+The architecture becomes:
 
 ```mermaid
 flowchart TD
-    A[Client with stable Nostr identity] --> B[ContextVM server interface]
-    B --> C[Rust blind coordinator]
+    A[Client] --> B[ContextVM TypeScript server]
+    B --> C[Blind coordinator core]
     C --> D[Key package store]
     C --> E[Welcome queue]
     C --> F[Message queue]
     C --> G[Epoch tracking]
+    H[Client local ts-mls state] -. separate from .-> C
 ```
 
-## Why This Is Simpler Than Marmot
+## Why This Is Better Than the Rust Plus TypeScript Split
 
-This MVP reduces complexity because it does not ask public relays to be:
+This plan is better for the MVP because it removes:
 
-- the universal delivery channel
-- the main coordination layer
-- the long-term metadata surface for all group activity
+- the internal bridge contract
+- duplicated transport and message modeling
+- cross-language debugging
+- mismatched runtime assumptions
 
-Instead:
+It preserves the right modular boundary:
 
-- Nostr remains useful for identity and discoverability
-- ContextVM exposes the service over Nostr
-- the coordinator handles queueing and serialization
-- MLS continues to provide end-to-end security and authenticated sender semantics
-
-## Why This Is Simpler Than Hermetic-MLS
-
-This MVP is lighter than Hermetic-MLS because it does not start with:
-
-- a full server-owned group lifecycle model
-- a rich membership database
-- a broad RPC contract
-- a coordinator that knows too much about clients
-
-The initial implementation should look much closer in spirit to the OpenMLS DS than to a production-grade MLS platform.
+- clients own MLS state and crypto
+- server owns delivery queues and routing
 
 ## Known Trade-offs
 
 ### What this improves
 
-- reduces long-term sender linkage at the coordinator
-- keeps stable Nostr identity for UX and discovery
-- keeps the server simple
-- aligns well with a blind MLS delivery-service model
+- much flatter implementation path
+- better debugging ergonomics
+- fewer moving parts
+- direct integration with ContextVM
+- easier iteration on the MVP protocol surface
 
 ### What this does not solve
 
 - invitation and welcome targeting still reveal some relationship metadata
-- coordinator still sees group activity timing and epoch movement
-- no claim of strong metadata privacy should be made
-- abuse prevention is intentionally out of scope for the MVP
-
-## MVP Recommendation
-
-Implement the first version with the following bias:
-
-- **Marmot for identity ideas only**
-- **OpenMLS DS for service shape and simplicity**
-- **ContextVM for exposure over Nostr**
-- **Hermetic-MLS only as a reference for future expansion**
+- coordinator still sees activity timing and epoch movement
+- pnpm plus TypeScript does not magically reduce protocol complexity if the server scope grows too much
+- strong metadata privacy claims should still be avoided
 
 ## Implementation Direction
 
 The implementation should proceed in this order:
 
-1. Rust blind coordinator core
-2. key package publish and consume flow
-3. welcome storage and fetch flow
-4. message queue and fetch flow with epoch tracking
-5. stable identity to MLS credential mapping
-6. ephemeral post-welcome delivery path
-7. thin ContextVM server wrapper around the coordinator
+1. create the TypeScript coordinator core
+2. implement key package publish and consume flow
+3. implement welcome storage and fetch flow
+4. implement message queue and fetch flow with epoch tracking
+5. implement stable identity to MLS credential mapping conventions
+6. implement ephemeral post-welcome delivery path
+7. expose the coordinator as a ContextVM server in the same TypeScript codebase
+8. run and test the stack with pnpm end to end
 
 ## Final Position
 
-The MVP should be a privacy-aware MLS delivery service, not a full Marmot transport implementation and not a full Hermetic-style platform.
+The MVP should be a privacy-aware MLS delivery service implemented entirely in TypeScript.
 
 The clean boundary is:
 
-- stable Nostr identity for discovery and attribution
+- stable identity for discovery and attribution
 - ephemeral transport identity for post-welcome delivery
-- blind coordinator for storage, queueing, and epoch checks
-- ContextVM as the exposure layer over Nostr
+- blind queue-oriented coordinator for storage and epoch checks
+- [`ts-mls`](../ts-mls/README.md) for MLS behavior
+- ContextVM as the external Nostr-facing interface
+- pnpm as the runtime for the MVP stack
 
-That gives the project a design that is feasible, elegant, privacy-improving, and small enough to prototype without importing unnecessary protocol complexity.
+That is the most feasible, elegant, and debuggable path for the prototype.
