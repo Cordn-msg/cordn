@@ -76,6 +76,13 @@ function formatCredentialLabel(sender: string): string {
   return colorize(trimmed, `\u001b[38;2;${red};${green};${blue}m`)
 }
 
+function formatFullCredentialLabel(sender: string): string {
+  const red = Number.parseInt(sender.slice(0, 2), 16)
+  const green = Number.parseInt(sender.slice(2, 4), 16)
+  const blue = Number.parseInt(sender.slice(4, 6), 16)
+  return colorize(sender, `\u001b[38;2;${red};${green};${blue}m`)
+}
+
 function formatCursor(cursor: number): string {
   return colorize(`[${cursor}]`, ansi.dim)
 }
@@ -110,6 +117,14 @@ function formatChatHistory(session: CliSession, groupAlias: string): string {
   return formatList(session.listMessages(groupAlias).map((message) => formatChatLine(message.direction, message.cursor, message.sender, message.plaintext)))
 }
 
+function formatSyncResult(session: CliSession, groupAlias: string, messages: Awaited<ReturnType<CliSession["syncGroup"]>>): string {
+  if (messages.length > 0) {
+    return formatList(messages.map((message) => formatChatLine(message.direction, message.cursor, message.sender, message.plaintext)))
+  }
+
+  return formatChatHistory(session, groupAlias)
+}
+
 export async function startCliRepl(session: CliSession): Promise<void> {
   const rl = createInterface({ input, output })
   let selectedGroupAlias: string | undefined
@@ -125,7 +140,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
         if (selectedGroupAlias) {
           try {
             const messages = await session.syncGroup(selectedGroupAlias)
-            output.write(`${formatList(messages.map((message) => formatChatLine(message.direction, message.cursor, message.sender, message.plaintext)))}\n`)
+            output.write(`${formatSyncResult(session, selectedGroupAlias, messages)}\n`)
           } catch (error) {
             output.write(`${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`)
           }
@@ -181,7 +196,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
           case "status": {
             const status = session.getStatus()
             output.write([
-              `${colorize("stablePubkey", ansi.cyan)}: ${formatCredentialLabel(status.stablePubkey)}`,
+              `${colorize("stablePubkey", ansi.cyan)}: ${formatFullCredentialLabel(status.stablePubkey)}`,
               `${colorize("keyPackageCount", ansi.cyan)}: ${formatStatusValue(status.keyPackageCount)}`,
               `${colorize("welcomeCount", ansi.cyan)}: ${formatStatusValue(status.welcomeCount)}`,
               `${colorize("groupCount", ansi.cyan)}: ${formatStatusValue(status.groupCount)}`,
@@ -189,7 +204,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
             break
           }
           case "whoami": {
-            output.write(`stablePubkey: ${formatCredentialLabel(session.stablePubkey)}\nprivateKey: ${colorize(session.privateKey, ansi.dim)}\n`)
+            output.write(`stablePubkey: ${formatFullCredentialLabel(session.stablePubkey)}\nprivateKey: ${colorize(session.privateKey, ansi.dim)}\n`)
             break
           }
           case "gen-kp": {
@@ -209,7 +224,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
           }
           case "available-kps": {
             const keyPackages = await session.listAvailableKeyPackages()
-            output.write(`${formatList(keyPackages.map((entry) => `${formatCredentialLabel(entry.stablePubkey)} ref=${formatKeyPackageRef(entry.keyPackageRef)} published=${formatTimestamp(entry.publishedAt)}`))}\n`)
+            output.write(`${formatList(keyPackages.map((entry) => `${formatFullCredentialLabel(entry.stablePubkey)} ref=${formatKeyPackageRef(entry.keyPackageRef)} published=${formatTimestamp(entry.publishedAt)}`))}\n`)
             break
           }
           case "create-group": {
@@ -275,7 +290,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
             const alias = args[0] ?? selectedGroupAlias
             if (!alias) throw new Error("Usage: sync <groupAlias>")
             const messages = await session.syncGroup(alias)
-            output.write(`${formatList(messages.map((message) => formatChatLine(message.direction, message.cursor, message.sender, message.plaintext)))}\n`)
+            output.write(`${formatSyncResult(session, alias, messages)}\n`)
             break
           }
           case "sync-all": {
