@@ -9,18 +9,22 @@
     "client:cli": "node --experimental-strip-types ./src/client/cli/main.ts",
     "server:start": "node --experimental-strip-types ./src/server/main.ts",
     "test": "vitest run ./src",
-    "test:watch": "vitest"
+    "format": "prettier --write ./src"
   },
   "devDependencies": {
+    "@types/node": "^25.6.0",
+    "prettier": "^3.8.3",
     "vitest": "^4.0.17"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
-    "@contextvm/sdk": "^0.8.0",
+    "@contextvm/sdk": "^0.9.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^14.0.3",
     "nostr-tools": "^2.23.3",
-    "ts-mls": "^2.0.0-rc.10"
+    "ts-mls": "^2.0.0-rc.10",
+    "zod": "^4.3.6"
   }
 }

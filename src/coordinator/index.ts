@@ -1,5 +1,5 @@
-export { DeliveryServiceCoordinator } from "./deliveryServiceCoordinator"
-export { createDeliveryServiceCoordinator } from "./factory"
+export { DeliveryServiceCoordinator } from "./deliveryServiceCoordinator";
+export { createDeliveryServiceCoordinator } from "./factory";
 export type {
   DeliveryPublicKey,
   DeliveryServiceSnapshot,
@@ -12,4 +12,4 @@ export type {
   StablePublicKey,
   StoreWelcomeInput,
   WelcomeQueueRecord,
-} from "./types"
+} from "./types";
