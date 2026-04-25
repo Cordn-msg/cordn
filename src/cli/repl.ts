@@ -46,10 +46,10 @@ function printHelp(): void {
       "  group <groupAlias>",
       "  use <groupAlias>",
       "  leave",
-      "  add-member <groupAlias> <targetStablePubkey>",
+      "  add-member <groupAlias> <stablePubkeyOrKeyPackageRef>",
       "  fetch-welcomes",
       "  welcomes",
-      "  accept-welcome <welcomeId> [groupAlias]",
+      "  accept-welcome <keyPackageReference> [groupAlias]",
       "  send <message...>    (uses selected group)",
       "  send-to <groupAlias> <message...>",
       "  sync [groupAlias]",
@@ -101,8 +101,8 @@ function formatGroupAlias(alias: string): string {
   return colorize(alias, ansi.cyan);
 }
 
-function formatWelcomeId(welcomeId: string): string {
-  return colorize(welcomeId, ansi.magenta);
+function formatWelcomeKeyPackageReference(keyPackageReference: string): string {
+  return colorize(keyPackageReference, ansi.magenta);
 }
 
 function formatStatusValue(value: string | number): string {
@@ -315,30 +315,32 @@ export async function startCliRepl(session: CliSession): Promise<void> {
           case "add-member": {
             if (!args[0] || !args[1])
               throw new Error(
-                "Usage: add-member <groupAlias> <targetStablePubkey>",
+                "Usage: add-member <groupAlias> <stablePubkeyOrKeyPackageRef>",
               );
             const result = await session.addMember(args[0], args[1]);
             output.write(
-              `${colorize("stored welcome", ansi.green)} ${colorize(result.welcomeId, ansi.dim)}\n`,
+              `${colorize("stored welcome", ansi.green)} ${colorize(result.keyPackageReference, ansi.dim)}\n`,
             );
             break;
           }
           case "fetch-welcomes": {
             const welcomes = await session.fetchWelcomes();
             output.write(
-              `${formatList(welcomes.map((welcome) => `${formatWelcomeId(welcome.welcomeId)} keyPackageRef=${formatKeyPackageRef(welcome.keyPackageReference)}`))}\n`,
+              `${formatList(welcomes.map((welcome) => `${formatWelcomeKeyPackageReference(welcome.keyPackageReference)} keyPackageRef=${formatKeyPackageRef(welcome.keyPackageReference)}`))}\n`,
             );
             break;
           }
           case "welcomes": {
             output.write(
-              `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeId(welcome.welcomeId)} keyPackageRef=${formatKeyPackageRef(welcome.keyPackageReference)}`))}\n`,
+              `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeKeyPackageReference(welcome.keyPackageReference)} keyPackageRef=${formatKeyPackageRef(welcome.keyPackageReference)}`))}\n`,
             );
             break;
           }
           case "accept-welcome": {
             if (!args[0])
-              throw new Error("Usage: accept-welcome <welcomeId> [groupAlias]");
+              throw new Error(
+                "Usage: accept-welcome <keyPackageReference> [groupAlias]",
+              );
             const group = await session.acceptWelcome(args[0], args[1]);
             selectedGroupAlias = group.alias;
             output.write(

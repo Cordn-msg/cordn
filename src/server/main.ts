@@ -1,9 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { ApplesauceRelayPool, PrivateKeySigner } from "@contextvm/sdk";
-import {
-  connectContextVmCoordinatorServer,
-  getDefaultRelayUrls,
-} from "./contextvmCoordinatorServer.ts";
+import { connectServer, getDefaultRelayUrls } from "./coordinatorServer.ts";
 
 function parseEnvAssignment(line: string): [string, string] | null {
   const trimmed = line.trim();
@@ -81,9 +78,9 @@ function readOptionalBooleanEnv(name: string): boolean | undefined {
   throw new Error(`Invalid boolean environment variable: ${name}`);
 }
 
-function readOptionalSigner(): PrivateKeySigner | undefined {
+function readOptionalSigner(): PrivateKeySigner | string {
   const privateKey = readOptionalStringEnv("CVM_MLS_SERVER_PRIVATE_KEY");
-  return privateKey ? new PrivateKeySigner(privateKey) : undefined;
+  return privateKey ?? new PrivateKeySigner(privateKey);
 }
 
 function readRelayUrls(): string[] {
@@ -112,7 +109,7 @@ async function main(): Promise<void> {
     website: readOptionalStringEnv("CVM_MLS_SERVER_WEBSITE"),
   };
 
-  await connectContextVmCoordinatorServer({
+  await connectServer({
     signer: readOptionalSigner(),
     relayHandler: new ApplesauceRelayPool(relayUrls),
     serverInfo,

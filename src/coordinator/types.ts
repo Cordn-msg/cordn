@@ -1,19 +1,14 @@
 import type { KeyPackage, Welcome } from "ts-mls";
 
-export type StablePublicKey = string;
-export type DeliveryPublicKey = string;
-
 export interface PublishedKeyPackageRecord {
-  id: string;
-  stablePubkey: StablePublicKey;
+  stablePubkey: string;
   keyPackage: KeyPackage;
   keyPackageRef: string;
   publishedAt: number;
 }
 
 export interface WelcomeQueueRecord {
-  id: string;
-  targetStablePubkey: StablePublicKey;
+  targetStablePubkey: string;
   keyPackageReference: string;
   welcome: Welcome;
   createdAt: number;
@@ -22,31 +17,31 @@ export interface WelcomeQueueRecord {
 export interface GroupRoutingRecord {
   groupId: string;
   latestHandshakeEpoch: bigint;
-  lastMessageCursor?: number;
+  lastMessageCursor: number;
 }
 
 export interface GroupMessageRecord {
   cursor: number;
   groupId: string;
-  ephemeralSenderPubkey: DeliveryPublicKey;
+  ephemeralSenderPubkey: string;
   opaqueMessage: Uint8Array;
   createdAt: number;
 }
 
 export interface PublishKeyPackageInput {
-  stablePubkey: StablePublicKey;
+  stablePubkey: string;
   keyPackage: KeyPackage;
   keyPackageRef: string;
 }
 
 export interface StoreWelcomeInput {
-  targetStablePubkey: StablePublicKey;
+  targetStablePubkey: string;
   keyPackageReference: string;
   welcome: Welcome;
 }
 
 export interface PostGroupMessageInput {
-  ephemeralSenderPubkey: DeliveryPublicKey;
+  ephemeralSenderPubkey: string;
   opaqueMessage: Uint8Array;
 }
 

@@ -1,11 +1,12 @@
 {
-  "name": "cvm-mls",
+  "name": "cordn",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "pnpm run server:start",
-    "build": "pnpm build ./src/index.ts --outdir ./dist --target pnpm",
+    "build": "npx esbuild ./src/server/main.ts --bundle --outdir=./dist --target=node20 --format=esm --packages=external",
+    "typecheck": "tsc --noEmit",
     "client:cli": "node --experimental-strip-types ./src/client/cli/main.ts",
     "server:start": "node --experimental-strip-types ./src/server/main.ts",
     "test": "vitest run ./src",

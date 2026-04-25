@@ -3,7 +3,7 @@ import { z } from "zod";
 export const CONTEXTVM_COORDINATOR_TOOLS = {
   publishKeyPackage: "publish_key_package",
   listAvailableKeyPackages: "list_available_key_packages",
-  consumeKeyPackageForIdentity: "consume_key_package_for_identity",
+  consumeKeyPackage: "consume_key_package",
   fetchPendingWelcomes: "fetch_pending_welcomes",
   storeWelcome: "store_welcome",
   postGroupMessage: "post_group_message",
@@ -18,29 +18,26 @@ export const publishKeyPackageInputSchema = z.object({
 });
 
 export const publishKeyPackageOutputSchema = z.object({
-  keyPackageId: z.string(),
   keyPackageRef: z.string(),
   publishedAt: z.number(),
 });
 
-export const consumeKeyPackageForIdentityInputSchema = z.object({
-  stablePubkey: z.string().min(1),
+export const consumeKeyPackageInputSchema = z.object({
+  identifier: z.string().min(1),
 });
 
 export const consumedKeyPackageSchema = z.object({
-  keyPackageId: z.string(),
   stablePubkey: z.string(),
   keyPackageRef: z.string(),
   keyPackageBase64: z.string(),
   publishedAt: z.number(),
 });
 
-export const consumeKeyPackageForIdentityOutputSchema = z.object({
+export const consumeKeyPackageOutputSchema = z.object({
   keyPackage: consumedKeyPackageSchema.nullable(),
 });
 
 export const availableKeyPackageSchema = z.object({
-  keyPackageId: z.string(),
   stablePubkey: z.string(),
   keyPackageRef: z.string(),
   publishedAt: z.number(),
@@ -53,7 +50,6 @@ export const listAvailableKeyPackagesOutputSchema = z.object({
 });
 
 export const pendingWelcomeSchema = z.object({
-  welcomeId: z.string(),
   keyPackageReference: z.string(),
   welcomeBase64: z.string(),
   createdAt: z.number(),
@@ -72,7 +68,6 @@ export const storeWelcomeInputSchema = z.object({
 });
 
 export const storeWelcomeOutputSchema = z.object({
-  welcomeId: z.string(),
   createdAt: z.number(),
 });
 
@@ -108,11 +103,11 @@ export type PublishKeyPackageInput = z.infer<
 export type PublishKeyPackageOutput = z.infer<
   typeof publishKeyPackageOutputSchema
 >;
-export type ConsumeKeyPackageForIdentityInput = z.infer<
-  typeof consumeKeyPackageForIdentityInputSchema
+export type ConsumeKeyPackageInput = z.infer<
+  typeof consumeKeyPackageInputSchema
 >;
-export type ConsumeKeyPackageForIdentityOutput = z.infer<
-  typeof consumeKeyPackageForIdentityOutputSchema
+export type ConsumeKeyPackageOutput = z.infer<
+  typeof consumeKeyPackageOutputSchema
 >;
 export type ListAvailableKeyPackagesInput = z.infer<
   typeof listAvailableKeyPackagesInputSchema

@@ -17,10 +17,10 @@ import {
   type Welcome,
 } from "ts-mls";
 
-import { DeliveryServiceCoordinator } from "../coordinator/deliveryServiceCoordinator.ts";
+import { Coordinator } from "../coordinator/coordinator.ts";
 import {
-  consumeKeyPackageForIdentityInputSchema,
-  consumeKeyPackageForIdentityOutputSchema,
+  consumeKeyPackageInputSchema,
+  consumeKeyPackageOutputSchema,
   CONTEXTVM_COORDINATOR_TOOLS,
   fetchGroupMessagesInputSchema,
   fetchGroupMessagesOutputSchema,
@@ -34,7 +34,7 @@ import {
   publishKeyPackageOutputSchema,
   storeWelcomeInputSchema,
   storeWelcomeOutputSchema,
-} from "../contracts/contextvmCoordinator.ts";
+} from "../contracts/index.ts";
 import { assertNonEmptyBase64, encodeBase64 } from "./base64.ts";
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
@@ -119,10 +119,10 @@ function requireClientPubkey(extra: ToolExtra): string {
   return clientPubkey;
 }
 
-export class ContextVmCoordinatorAdapter {
-  private readonly coordinator: DeliveryServiceCoordinator;
+export class CoordinatorAdapter {
+  private readonly coordinator: Coordinator;
 
-  constructor(coordinator: DeliveryServiceCoordinator) {
+  constructor(coordinator: Coordinator) {
     this.coordinator = coordinator;
   }
 
@@ -139,26 +139,20 @@ export class ContextVmCoordinatorAdapter {
     return {
       content: [],
       structuredContent: {
-        keyPackageId: record.id,
         keyPackageRef: record.keyPackageRef,
         publishedAt: record.publishedAt,
       },
     };
   }
 
-  consumeKeyPackageForIdentity(
-    input: z.infer<typeof consumeKeyPackageForIdentityInputSchema>,
-  ) {
-    const record = this.coordinator.consumeKeyPackageForIdentity(
-      input.stablePubkey,
-    );
+  consumeKeyPackage(input: z.infer<typeof consumeKeyPackageInputSchema>) {
+    const record = this.coordinator.consumeKeyPackage(input.identifier);
 
     return {
       content: [],
       structuredContent: {
         keyPackage: record
           ? {
-              keyPackageId: record.id,
               stablePubkey: record.stablePubkey,
               keyPackageRef: record.keyPackageRef,
               keyPackageBase64: encodeBase64(
@@ -180,7 +174,6 @@ export class ContextVmCoordinatorAdapter {
       content: [],
       structuredContent: {
         keyPackages: records.map((record) => ({
-          keyPackageId: record.id,
           stablePubkey: record.stablePubkey,
           keyPackageRef: record.keyPackageRef,
           publishedAt: record.publishedAt,
@@ -201,7 +194,6 @@ export class ContextVmCoordinatorAdapter {
       content: [],
       structuredContent: {
         welcomes: records.map((record) => ({
-          welcomeId: record.id,
           keyPackageReference: record.keyPackageReference,
           welcomeBase64: encodeWelcomeBase64(record.welcome),
           createdAt: record.createdAt,
@@ -220,7 +212,6 @@ export class ContextVmCoordinatorAdapter {
     return {
       content: [],
       structuredContent: {
-        welcomeId: record.id,
         createdAt: record.createdAt,
       },
     };
@@ -264,7 +255,7 @@ export class ContextVmCoordinatorAdapter {
 
 export function registerCoordinatorContextVmTools(
   server: McpServer,
-  adapter: ContextVmCoordinatorAdapter,
+  adapter: CoordinatorAdapter,
 ): void {
   server.registerTool(
     CONTEXTVM_COORDINATOR_TOOLS.publishKeyPackage,
@@ -289,14 +280,14 @@ export function registerCoordinatorContextVmTools(
   );
 
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.consumeKeyPackageForIdentity,
+    CONTEXTVM_COORDINATOR_TOOLS.consumeKeyPackage,
     {
       description:
-        "Consume the next published MLS key package for a target stable identity.",
-      inputSchema: consumeKeyPackageForIdentityInputSchema,
-      outputSchema: consumeKeyPackageForIdentityOutputSchema,
+        "Consume the next published MLS key package by stable identity or exact key package ref.",
+      inputSchema: consumeKeyPackageInputSchema,
+      outputSchema: consumeKeyPackageOutputSchema,
     },
-    (input) => adapter.consumeKeyPackageForIdentity(input),
+    (input) => adapter.consumeKeyPackage(input),
   );
 
   server.registerTool(

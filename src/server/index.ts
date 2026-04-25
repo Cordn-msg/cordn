@@ -1,10 +1,10 @@
 export {
-  ContextVmCoordinatorAdapter,
+  CoordinatorAdapter,
   registerCoordinatorContextVmTools,
-} from "./contextvmCoordinatorAdapter";
+} from "./coordinatorMethods";
 export {
-  consumeKeyPackageForIdentityInputSchema,
-  consumeKeyPackageForIdentityOutputSchema,
+  consumeKeyPackageInputSchema,
+  consumeKeyPackageOutputSchema,
   fetchGroupMessagesInputSchema,
   fetchGroupMessagesOutputSchema,
   fetchPendingWelcomesInputSchema,
@@ -15,11 +15,10 @@ export {
   publishKeyPackageOutputSchema,
   storeWelcomeInputSchema,
   storeWelcomeOutputSchema,
-} from "../contracts/contextvmCoordinator";
+} from "../contracts";
 export {
-  connectContextVmCoordinatorServer,
-  createContextVmCoordinatorServer,
-  createDefaultServerSigner,
+  connectServer,
+  createServer,
   getDefaultRelayUrls,
-} from "./contextvmCoordinatorServer";
+} from "./coordinatorServer";
 export { decodeBase64, encodeBase64 } from "./base64";

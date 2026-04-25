@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { encode, mlsMessageEncoder, wireformats } from "ts-mls";
 
-import { DeliveryServiceCoordinator } from "./deliveryServiceCoordinator";
+import { Coordinator } from "./coordinator";
 import {
   createActor,
   createKeyPackageRef,
@@ -34,9 +34,9 @@ function createPrivateMessage(params: {
   });
 }
 
-describe("DeliveryServiceCoordinator key package flow", () => {
+describe("Coordinator key package flow", () => {
   test("publishes, lists, consumes, and snapshots key packages in FIFO order", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
+    const coordinator = new Coordinator();
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const stablePubkey = alice.actor.stablePubkey;
     const firstKeyPackageRef = await createKeyPackageRef(alice.keyPackage);
@@ -58,22 +58,19 @@ describe("DeliveryServiceCoordinator key package flow", () => {
     const listed = coordinator.listKeyPackagesForIdentity(stablePubkey);
 
     expect(listed).toHaveLength(2);
-    expect(listed[0]?.id).toBe(firstRecord.id);
-    expect(listed[1]?.id).toBe(secondRecord.id);
+    expect(listed[0]?.keyPackageRef).toBe(firstRecord.keyPackageRef);
+    expect(listed[1]?.keyPackageRef).toBe(secondRecord.keyPackageRef);
     expect(coordinator.snapshot()).toMatchObject({
       stableIdentities: 1,
       publishedKeyPackages: 2,
     });
 
-    const consumedFirst =
-      coordinator.consumeKeyPackageForIdentity(stablePubkey);
-    const consumedSecond =
-      coordinator.consumeKeyPackageForIdentity(stablePubkey);
-    const consumedEmpty =
-      coordinator.consumeKeyPackageForIdentity(stablePubkey);
+    const consumedFirst = coordinator.consumeKeyPackage(stablePubkey);
+    const consumedSecond = coordinator.consumeKeyPackage(stablePubkey);
+    const consumedEmpty = coordinator.consumeKeyPackage(stablePubkey);
 
-    expect(consumedFirst?.id).toBe(firstRecord.id);
-    expect(consumedSecond?.id).toBe(secondRecord.id);
+    expect(consumedFirst?.keyPackageRef).toBe(firstRecord.keyPackageRef);
+    expect(consumedSecond?.keyPackageRef).toBe(secondRecord.keyPackageRef);
     expect(consumedEmpty).toBeNull();
     expect(coordinator.listKeyPackagesForIdentity(stablePubkey)).toEqual([]);
     expect(coordinator.snapshot()).toMatchObject({
@@ -82,8 +79,38 @@ describe("DeliveryServiceCoordinator key package flow", () => {
     });
   });
 
+  test("consumes an exact published key package by key package ref", async () => {
+    const coordinator = new Coordinator();
+    const alice = await createMemberArtifacts(createActor("alice-ref"));
+    const stablePubkey = alice.actor.stablePubkey;
+    const firstKeyPackageRef = await createKeyPackageRef(alice.keyPackage);
+    const second = await createMemberArtifacts(createActor("alice-ref-next"));
+    const secondKeyPackageRef = await createKeyPackageRef(second.keyPackage);
+
+    coordinator.publishKeyPackage({
+      stablePubkey,
+      keyPackage: alice.keyPackage,
+      keyPackageRef: firstKeyPackageRef,
+    });
+
+    coordinator.publishKeyPackage({
+      stablePubkey,
+      keyPackage: second.keyPackage,
+      keyPackageRef: secondKeyPackageRef,
+    });
+
+    const consumed = coordinator.consumeKeyPackage(secondKeyPackageRef);
+
+    expect(consumed?.keyPackageRef).toBe(secondKeyPackageRef);
+    expect(
+      coordinator
+        .listKeyPackagesForIdentity(stablePubkey)
+        .map((record) => record.keyPackageRef),
+    ).toEqual([firstKeyPackageRef]);
+  });
+
   test("lists all available key packages across identities", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
+    const coordinator = new Coordinator();
     const alice = await createMemberArtifacts(createActor("alice-global"));
     const bob = await createMemberArtifacts(createActor("bob-global"));
     const aliceKeyPackageRef = await createKeyPackageRef(alice.keyPackage);
@@ -101,15 +128,15 @@ describe("DeliveryServiceCoordinator key package flow", () => {
       keyPackageRef: bobKeyPackageRef,
     });
 
-    expect(coordinator.listAllKeyPackages().map((record) => record.id)).toEqual(
-      [aliceRecord.id, bobRecord.id],
-    );
+    expect(
+      coordinator.listAllKeyPackages().map((record) => record.keyPackageRef),
+    ).toEqual([aliceRecord.keyPackageRef, bobRecord.keyPackageRef]);
   });
 });
 
-describe("DeliveryServiceCoordinator welcome flow", () => {
+describe("Coordinator welcome flow", () => {
   test("stores and drains queued welcomes per target identity", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
+    const coordinator = new Coordinator();
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const bob = await createMemberArtifacts(createActor("bob-unit"));
     const carol = await createMemberArtifacts(createActor("carol-unit"));
@@ -130,13 +157,13 @@ describe("DeliveryServiceCoordinator welcome flow", () => {
       member: carol,
     });
 
-    const firstWelcome = coordinator.storeWelcome({
+    coordinator.storeWelcome({
       targetStablePubkey: bob.actor.stablePubkey,
       keyPackageReference: firstFixture.keyPackageRefHex,
       welcome: firstFixture.welcome,
     });
 
-    const secondWelcome = coordinator.storeWelcome({
+    coordinator.storeWelcome({
       targetStablePubkey: carol.actor.stablePubkey,
       keyPackageReference: secondFixture.keyPackageRefHex,
       welcome: secondFixture.welcome,
@@ -152,9 +179,13 @@ describe("DeliveryServiceCoordinator welcome flow", () => {
     );
 
     expect(fetchedBob).toHaveLength(1);
-    expect(fetchedBob[0]?.id).toBe(firstWelcome.id);
+    expect(fetchedBob[0]?.keyPackageReference).toBe(
+      firstFixture.keyPackageRefHex,
+    );
     expect(fetchedCarol).toHaveLength(1);
-    expect(fetchedCarol[0]?.id).toBe(secondWelcome.id);
+    expect(fetchedCarol[0]?.keyPackageReference).toBe(
+      secondFixture.keyPackageRefHex,
+    );
     expect(coordinator.fetchPendingWelcomes(bob.actor.stablePubkey)).toEqual(
       [],
     );
@@ -167,22 +198,18 @@ describe("DeliveryServiceCoordinator welcome flow", () => {
   });
 });
 
-describe("DeliveryServiceCoordinator group message flow", () => {
-  test("stores defensive byte copies and supports cursor-based fetches", () => {
-    const coordinator = new DeliveryServiceCoordinator();
-    const originalPayload = createBytes([1, 2, 3]);
+describe("Coordinator group message flow", () => {
+  test("stores message references and supports cursor-based fetches", () => {
+    const coordinator = new Coordinator();
 
     const firstMessage = coordinator.postGroupMessage({
       ephemeralSenderPubkey: "alice-ephemeral-1",
       opaqueMessage: createPrivateMessage({
         epoch: 1n,
         contentType: 1,
-        bytes: Array.from(originalPayload),
+        bytes: Array.from(createBytes([1, 2, 3])),
       }),
     });
-
-    originalPayload[0] = 99;
-    firstMessage.opaqueMessage[1] = 77;
 
     const secondMessage = coordinator.postGroupMessage({
       ephemeralSenderPubkey: "bob-ephemeral-1",
@@ -211,22 +238,11 @@ describe("DeliveryServiceCoordinator group message flow", () => {
         createPrivateMessage({ epoch: 1n, contentType: 1, bytes: [4, 5, 6] }),
       ),
     );
-
-    fetchedAll[0]?.opaqueMessage.set([8, 8, 8]);
-
-    const fetchedAgain = coordinator.fetchGroupMessages({
-      groupId: "group-local",
-    });
     const fetchedAfterCursor = coordinator.fetchGroupMessages({
       groupId: "group-local",
       afterCursor: firstMessage.cursor,
     });
 
-    expect(Array.from(fetchedAgain[0]?.opaqueMessage ?? [])).toEqual(
-      Array.from(
-        createPrivateMessage({ epoch: 1n, contentType: 1, bytes: [1, 2, 3] }),
-      ),
-    );
     expect(fetchedAfterCursor).toHaveLength(1);
     expect(fetchedAfterCursor[0]?.cursor).toBe(secondMessage.cursor);
     expect(coordinator.snapshot()).toMatchObject({
@@ -236,7 +252,7 @@ describe("DeliveryServiceCoordinator group message flow", () => {
   });
 
   test("tracks handshake epochs and rejects stale handshake traffic", () => {
-    const coordinator = new DeliveryServiceCoordinator();
+    const coordinator = new Coordinator();
 
     coordinator.postGroupMessage({
       ephemeralSenderPubkey: "alice-ephemeral-2",

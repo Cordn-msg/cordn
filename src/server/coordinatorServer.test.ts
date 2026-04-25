@@ -9,7 +9,7 @@ import {
   wireformats,
 } from "ts-mls";
 
-import { DeliveryServiceCoordinator } from "../coordinator/deliveryServiceCoordinator";
+import { Coordinator } from "../coordinator/coordinator";
 import {
   createApplicationMessageBytes,
   createMemberArtifacts,
@@ -17,7 +17,7 @@ import {
   createActor,
   getTestCiphersuite,
 } from "../coordinator/testUtils";
-import { ContextVmCoordinatorAdapter } from "./contextvmCoordinatorAdapter";
+import { CoordinatorAdapter } from "./coordinatorMethods";
 import { encodeBase64 } from "./base64";
 
 function encodeWelcomeAsBase64(
@@ -48,10 +48,10 @@ function createExtra(clientPubkey?: string) {
   } as never;
 }
 
-describe("ContextVmCoordinatorAdapter", () => {
+describe("CoordinatorAdapter", () => {
   test("maps injected client identity into self-scoped operations", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
-    const adapter = new ContextVmCoordinatorAdapter(coordinator);
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
 
     const published = adapter.publishKeyPackage(
@@ -67,8 +67,8 @@ describe("ContextVmCoordinatorAdapter", () => {
     expect(published.content).toEqual([]);
     expect(published.structuredContent.keyPackageRef).toBe("kp-ref-alice");
 
-    const consumed = adapter.consumeKeyPackageForIdentity({
-      stablePubkey: alice.actor.stablePubkey,
+    const consumed = adapter.consumeKeyPackage({
+      identifier: alice.actor.stablePubkey,
     });
 
     expect(consumed.content).toEqual([]);
@@ -81,8 +81,8 @@ describe("ContextVmCoordinatorAdapter", () => {
   });
 
   test("lists available key packages without consuming them", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
-    const adapter = new ContextVmCoordinatorAdapter(coordinator);
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
     const bob = await createMemberArtifacts(createActor("bob"));
 
@@ -114,8 +114,8 @@ describe("ContextVmCoordinatorAdapter", () => {
       listed.structuredContent.keyPackages.map((entry) => entry.stablePubkey),
     ).toEqual([alice.actor.stablePubkey, bob.actor.stablePubkey]);
 
-    const consumed = adapter.consumeKeyPackageForIdentity({
-      stablePubkey: alice.actor.stablePubkey,
+    const consumed = adapter.consumeKeyPackage({
+      identifier: alice.actor.stablePubkey,
     });
     expect(consumed.structuredContent.keyPackage?.stablePubkey).toBe(
       alice.actor.stablePubkey,
@@ -123,8 +123,8 @@ describe("ContextVmCoordinatorAdapter", () => {
   });
 
   test("rejects missing injected client pubkey on self-scoped operations", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
-    const adapter = new ContextVmCoordinatorAdapter(coordinator);
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
 
     expect(() =>
@@ -141,8 +141,8 @@ describe("ContextVmCoordinatorAdapter", () => {
   });
 
   test("rejects invalid base64 and malformed payloads", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
-    const adapter = new ContextVmCoordinatorAdapter(coordinator);
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
 
     expect(() =>
@@ -166,8 +166,8 @@ describe("ContextVmCoordinatorAdapter", () => {
   });
 
   test("round-trips welcomes and queued group messages as base64 structured outputs", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
-    const adapter = new ContextVmCoordinatorAdapter(coordinator);
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
     const bob = await createMemberArtifacts(createActor("bob"));
     const cipherSuite = await getTestCiphersuite();
@@ -190,7 +190,7 @@ describe("ContextVmCoordinatorAdapter", () => {
     });
 
     expect(stored.content).toEqual([]);
-    expect(stored.structuredContent.welcomeId).toBeTypeOf("string");
+    expect(stored.structuredContent.createdAt).toBeTypeOf("number");
 
     const fetchedWelcomes = adapter.fetchPendingWelcomes(
       {},

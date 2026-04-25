@@ -1,7 +1,5 @@
-export { DeliveryServiceCoordinator } from "./deliveryServiceCoordinator";
-export { createDeliveryServiceCoordinator } from "./factory";
+export { Coordinator, createCoordinator } from "./coordinator";
 export type {
-  DeliveryPublicKey,
   DeliveryServiceSnapshot,
   FetchGroupMessagesInput,
   GroupMessageRecord,
@@ -9,7 +7,6 @@ export type {
   PostGroupMessageInput,
   PublishedKeyPackageRecord,
   PublishKeyPackageInput,
-  StablePublicKey,
   StoreWelcomeInput,
   WelcomeQueueRecord,
 } from "./types";

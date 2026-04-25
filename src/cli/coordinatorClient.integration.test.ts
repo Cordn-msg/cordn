@@ -10,12 +10,8 @@ import {
   mlsMessageEncoder,
 } from "ts-mls";
 
-import { CvmMlsDeliveryServiceClient } from "./CvmMlsDeliveryServiceClient.ts";
-import {
-  connectContextVmCoordinatorServer,
-  createDefaultServerSigner,
-} from "../../server/contextvmCoordinatorServer.ts";
-import { MockRelayHub } from "../../test/mockRelay.ts";
+import { connectServer } from "../server/coordinatorServer.ts";
+import { MockRelayHub } from "../test/mockRelay.ts";
 import {
   createApplicationMessageBytes,
   createCommitMessageBytes,
@@ -24,29 +20,18 @@ import {
   decodeMlsFramedMessage,
   getTestCiphersuite,
   processMessageBytes,
-} from "../../coordinator/testUtils.ts";
-import type { RelayHandler } from "@contextvm/sdk";
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(
-    "",
-  );
-}
-
-function encodeBase64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("base64");
-}
-
-function decodeBase64(value: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(value, "base64"));
-}
+} from "../coordinator/testUtils.ts";
+import { PrivateKeySigner, type RelayHandler } from "@contextvm/sdk";
+import { bytesToHex } from "nostr-tools/utils";
+import { decodeBase64, encodeBase64 } from "../server/base64.ts";
+import { cvmCoordinatorClient } from "./coordinatorClient.js";
 
 async function createClient(params: {
   privateKey: Uint8Array;
   serverPubkey: string;
   relayHandler: RelayHandler;
-}): Promise<CvmMlsDeliveryServiceClient> {
-  return new CvmMlsDeliveryServiceClient({
+}): Promise<cvmCoordinatorClient> {
+  return new cvmCoordinatorClient({
     privateKey: bytesToHex(params.privateKey),
     serverPubkey: params.serverPubkey,
     relayHandler: params.relayHandler,
@@ -54,7 +39,7 @@ async function createClient(params: {
 }
 
 describe("CvmMlsDeliveryServiceClient integration flow", () => {
-  const clients: CvmMlsDeliveryServiceClient[] = [];
+  const clients: cvmCoordinatorClient[] = [];
 
   afterEach(async () => {
     await Promise.allSettled(
@@ -64,9 +49,9 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
 
   test("supports an alice, bob, and carol invitation and delivery scenario through the real ContextVM interface", async () => {
     const relayHub = new MockRelayHub();
-    const serverSigner = createDefaultServerSigner();
+    const serverSigner = new PrivateKeySigner();
     const serverPubkey = await serverSigner.getPublicKey();
-    const server = await connectContextVmCoordinatorServer({
+    const server = await connectServer({
       signer: serverSigner,
       relayHandler: relayHub.createRelayHandler(),
     });
@@ -106,21 +91,21 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         ),
       });
 
-      const consumedBob = await aliceClient.ConsumeKeyPackageForIdentity({
-        stablePubkey: bob.actor.stablePubkey,
+      const consumedBob = await aliceClient.ConsumeKeyPackage({
+        identifier: bob.actor.stablePubkey,
       });
-      const consumedCarol = await aliceClient.ConsumeKeyPackageForIdentity({
-        stablePubkey: carol.actor.stablePubkey,
+      const consumedCarol = await aliceClient.ConsumeKeyPackage({
+        identifier: carol.actor.stablePubkey,
       });
 
-      expect(consumedBob.keyPackage?.keyPackageId).toBe(
-        bobPublished.keyPackageId,
+      expect(consumedBob.keyPackage?.keyPackageRef).toBe(
+        bobPublished.keyPackageRef,
       );
-      expect(consumedCarol.keyPackage?.keyPackageId).toBe(
-        carolPublished.keyPackageId,
+      expect(consumedCarol.keyPackage?.keyPackageRef).toBe(
+        carolPublished.keyPackageRef,
       );
 
-      const bobStoredWelcome = await aliceClient.StoreWelcome({
+      await aliceClient.StoreWelcome({
         targetStablePubkey: bob.actor.stablePubkey,
         keyPackageReference: scenario.bobKeyPackageRef,
         welcomeBase64: encodeBase64(
@@ -131,7 +116,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
           }),
         ),
       });
-      const carolStoredWelcome = await aliceClient.StoreWelcome({
+      await aliceClient.StoreWelcome({
         targetStablePubkey: carol.actor.stablePubkey,
         keyPackageReference: scenario.carolKeyPackageRef,
         welcomeBase64: encodeBase64(
@@ -148,11 +133,11 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
 
       expect(bobWelcomes.welcomes).toHaveLength(1);
       expect(carolWelcomes.welcomes).toHaveLength(1);
-      expect(bobWelcomes.welcomes[0]?.welcomeId).toBe(
-        bobStoredWelcome.welcomeId,
+      expect(bobWelcomes.welcomes[0]?.keyPackageReference).toBe(
+        scenario.bobKeyPackageRef,
       );
-      expect(carolWelcomes.welcomes[0]?.welcomeId).toBe(
-        carolStoredWelcome.welcomeId,
+      expect(carolWelcomes.welcomes[0]?.keyPackageReference).toBe(
+        scenario.carolKeyPackageRef,
       );
       expect((await bobClient.FetchPendingWelcomes({})).welcomes).toEqual([]);
       expect((await carolClient.FetchPendingWelcomes({})).welcomes).toEqual([]);
@@ -194,9 +179,9 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
 
   test("round-trips queued application messages through the real ContextVM interface", async () => {
     const relayHub = new MockRelayHub();
-    const serverSigner = createDefaultServerSigner();
+    const serverSigner = new PrivateKeySigner();
     const serverPubkey = await serverSigner.getPublicKey();
-    const server = await connectContextVmCoordinatorServer({
+    const server = await connectServer({
       signer: serverSigner,
       relayHandler: relayHub.createRelayHandler(),
     });
@@ -263,9 +248,9 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
 
   test("preserves ordered queue semantics across proposal, commit, and application traffic through the real ContextVM interface", async () => {
     const relayHub = new MockRelayHub();
-    const serverSigner = createDefaultServerSigner();
+    const serverSigner = new PrivateKeySigner();
     const serverPubkey = await serverSigner.getPublicKey();
-    const server = await connectContextVmCoordinatorServer({
+    const server = await connectServer({
       signer: serverSigner,
       relayHandler: relayHub.createRelayHandler(),
     });

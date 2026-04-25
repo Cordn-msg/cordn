@@ -5,7 +5,7 @@ import {
   unsafeTestingAuthenticationService,
 } from "ts-mls";
 
-import { DeliveryServiceCoordinator } from "./deliveryServiceCoordinator";
+import { Coordinator } from "./coordinator";
 import {
   createActor,
   createApplicationMessageBytes,
@@ -19,9 +19,9 @@ import {
   processMessageBytes,
 } from "./testUtils";
 
-describe("DeliveryServiceCoordinator integration flow", () => {
+describe("Coordinator integration flow", () => {
   test("supports an alice, bob, and carol invitation and delivery scenario", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
+    const coordinator = new Coordinator();
     const scenario = await createThreeActorGroupScenario();
     const { alice, bob, carol } = scenario;
 
@@ -48,11 +48,11 @@ describe("DeliveryServiceCoordinator integration flow", () => {
     ).toHaveLength(1);
 
     expect(
-      coordinator.consumeKeyPackageForIdentity(bob.actor.stablePubkey)?.id,
-    ).toBe(bobKeyPackage.id);
+      coordinator.consumeKeyPackage(bob.actor.stablePubkey)?.keyPackageRef,
+    ).toBe(bobKeyPackage.keyPackageRef);
     expect(
-      coordinator.consumeKeyPackageForIdentity(carol.actor.stablePubkey)?.id,
-    ).toBe(carolKeyPackage.id);
+      coordinator.consumeKeyPackage(carol.actor.stablePubkey)?.keyPackageRef,
+    ).toBe(carolKeyPackage.keyPackageRef);
 
     coordinator.storeWelcome({
       targetStablePubkey: bob.actor.stablePubkey,
@@ -136,7 +136,7 @@ describe("DeliveryServiceCoordinator integration flow", () => {
   });
 
   test("round-trips queued application messages through coordinator fetch and MLS processing", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
+    const coordinator = new Coordinator();
     const scenario = await createThreeActorGroupScenario();
 
     const posted = coordinator.postGroupMessage({
@@ -176,7 +176,7 @@ describe("DeliveryServiceCoordinator integration flow", () => {
   });
 
   test("supports commit propagation and post-commit state convergence through the coordinator", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
+    const coordinator = new Coordinator();
     const scenario = await createThreeActorGroupScenario();
 
     const extraMember = await createMemberArtifacts(createActor("dave"));
@@ -258,7 +258,7 @@ describe("DeliveryServiceCoordinator integration flow", () => {
   });
 
   test("preserves ordered queue semantics across proposal, commit, and application traffic", async () => {
-    const coordinator = new DeliveryServiceCoordinator();
+    const coordinator = new Coordinator();
     const scenario = await createThreeActorGroupScenario();
     const cipherSuite = await getTestCiphersuite();
 

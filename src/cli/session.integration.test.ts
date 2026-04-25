@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, test } from "vitest";
 
 import { CliSession } from "./session.ts";
-import {
-  connectContextVmCoordinatorServer,
-  createDefaultServerSigner,
-} from "../../server/contextvmCoordinatorServer.ts";
-import { MockRelayHub } from "../../test/mockRelay.ts";
+import { connectServer } from "../server/coordinatorServer.ts";
+import { MockRelayHub } from "../test/mockRelay.ts";
+import { PrivateKeySigner } from "@contextvm/sdk";
 
 describe("CliSession", () => {
   const sessions: CliSession[] = [];
@@ -18,9 +16,9 @@ describe("CliSession", () => {
 
   test("creates key packages, invites a member, accepts the welcome, and exchanges chat messages", async () => {
     const relayHub = new MockRelayHub();
-    const serverSigner = createDefaultServerSigner();
+    const serverSigner = new PrivateKeySigner();
     const serverPubkey = await serverSigner.getPublicKey();
-    const server = await connectContextVmCoordinatorServer({
+    const server = await connectServer({
       signer: serverSigner,
       relayHandler: relayHub.createRelayHandler(),
     });
@@ -44,7 +42,7 @@ describe("CliSession", () => {
       const invitation = await alice.addMember("demo", bob.stablePubkey);
 
       await bob.fetchWelcomes();
-      await bob.acceptWelcome(invitation.welcomeId, "demo");
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
 
       await alice.sendMessage("demo", "hello bob");
       const synced = await bob.syncGroup("demo");
@@ -64,11 +62,54 @@ describe("CliSession", () => {
     }
   });
 
+  test("allows inviting by exact published key package ref", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-old");
+      await bob.generateKeyPackage("bob-new");
+      await bob.publishKeyPackage("bob-old");
+      const published = await bob.publishKeyPackage("bob-new");
+
+      await alice.createGroup("demo", "alice-main");
+      const invitation = await alice.addMember("demo", published.keyPackageRef);
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await alice.sendMessage("demo", "hello exact key package");
+      const synced = await bob.syncGroup("demo");
+
+      expect(invitation.keyPackageReference).toBe(published.keyPackageRef);
+      expect(synced).toHaveLength(1);
+      expect(synced[0]?.plaintext).toBe("hello exact key package");
+    } finally {
+      await server.transport.close();
+    }
+  });
+
   test("retains complete in-memory history and skips stale self commits during sync", async () => {
     const relayHub = new MockRelayHub();
-    const serverSigner = createDefaultServerSigner();
+    const serverSigner = new PrivateKeySigner();
     const serverPubkey = await serverSigner.getPublicKey();
-    const server = await connectContextVmCoordinatorServer({
+    const server = await connectServer({
       signer: serverSigner,
       relayHandler: relayHub.createRelayHandler(),
     });
@@ -98,7 +139,7 @@ describe("CliSession", () => {
       const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
 
       await bob.fetchWelcomes();
-      await bob.acceptWelcome(bobInvitation.welcomeId, "demo");
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
 
       await alice.sendMessage("demo", "hello bob");
       await bob.syncGroup("demo");
@@ -116,7 +157,7 @@ describe("CliSession", () => {
       ]);
 
       await carol.fetchWelcomes();
-      await carol.acceptWelcome(carolInvitation.welcomeId, "demo");
+      await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
 
       await carol.sendMessage("demo", "hello everyone");
       const aliceReceived = await alice.syncGroup("demo");
@@ -140,9 +181,9 @@ describe("CliSession", () => {
 
   test("builds a full conversation view by syncing first and then returning in-memory history", async () => {
     const relayHub = new MockRelayHub();
-    const serverSigner = createDefaultServerSigner();
+    const serverSigner = new PrivateKeySigner();
     const serverPubkey = await serverSigner.getPublicKey();
-    const server = await connectContextVmCoordinatorServer({
+    const server = await connectServer({
       signer: serverSigner,
       relayHandler: relayHub.createRelayHandler(),
     });
@@ -172,7 +213,7 @@ describe("CliSession", () => {
       const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
 
       await bob.fetchWelcomes();
-      await bob.acceptWelcome(bobInvitation.welcomeId, "demo");
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
 
       await alice.sendMessage("demo", "hello bob");
       await bob.syncGroup("demo");
@@ -183,7 +224,7 @@ describe("CliSession", () => {
       await alice.syncGroup("demo");
 
       await carol.fetchWelcomes();
-      await carol.acceptWelcome(carolInvitation.welcomeId, "demo");
+      await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
 
       await alice.sendMessage("demo", "welcome carol");
       await bob.syncGroup("demo");

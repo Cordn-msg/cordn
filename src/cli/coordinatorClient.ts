@@ -8,8 +8,8 @@ import {
 } from "@contextvm/sdk";
 import type { ZodType } from "zod";
 import {
-  type ConsumeKeyPackageForIdentityInput,
-  consumeKeyPackageForIdentityOutputSchema,
+  type ConsumeKeyPackageInput,
+  consumeKeyPackageOutputSchema,
   CONTEXTVM_COORDINATOR_TOOLS,
   type FetchGroupMessagesInput,
   fetchGroupMessagesOutputSchema,
@@ -20,7 +20,7 @@ import {
   type PublishKeyPackageInput,
   publishKeyPackageOutputSchema,
   storeWelcomeOutputSchema,
-  type ConsumeKeyPackageForIdentityOutput,
+  type ConsumeKeyPackageOutput,
   type FetchGroupMessagesOutput,
   type FetchPendingWelcomesInput,
   type FetchPendingWelcomesOutput,
@@ -30,18 +30,18 @@ import {
   type PublishKeyPackageOutput,
   type StoreWelcomeInput,
   type StoreWelcomeOutput,
-} from "../../contracts/contextvmCoordinator.ts";
+} from "../contracts/index.ts";
 
-export type CvmMlsDeliveryService = {
+export type coordinatorClient = {
   PublishKeyPackage: (
     input: PublishKeyPackageInput,
   ) => Promise<PublishKeyPackageOutput>;
   ListAvailableKeyPackages: (
     args: ListAvailableKeyPackagesInput,
   ) => Promise<ListAvailableKeyPackagesOutput>;
-  ConsumeKeyPackageForIdentity: (
-    input: ConsumeKeyPackageForIdentityInput,
-  ) => Promise<ConsumeKeyPackageForIdentityOutput>;
+  ConsumeKeyPackage: (
+    input: ConsumeKeyPackageInput,
+  ) => Promise<ConsumeKeyPackageOutput>;
   FetchPendingWelcomes: (
     args: FetchPendingWelcomesInput,
   ) => Promise<FetchPendingWelcomesOutput>;
@@ -54,9 +54,9 @@ export type CvmMlsDeliveryService = {
   ) => Promise<FetchGroupMessagesOutput>;
 };
 
-export class CvmMlsDeliveryServiceClient implements CvmMlsDeliveryService {
+export class cvmCoordinatorClient implements coordinatorClient {
   static readonly SERVER_PUBKEY =
-    "22944dad40d5a314377d90f39d0f63cc54b6866777b8186a69c4921742d88399";
+    "24f092697f908abd8b950438ea01055b43d2cb84757474dca395c4be20329257";
   static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
   private client: Client;
   private transport: Transport;
@@ -79,12 +79,12 @@ export class CvmMlsDeliveryServiceClient implements CvmMlsDeliveryService {
     // Use options.signer if provided, otherwise create from resolved private key
     const signer = options.signer || new PrivateKeySigner(resolvedPrivateKey);
     // Use options.relays if provided, otherwise use class DEFAULT_RELAYS
-    const relays = options.relays || CvmMlsDeliveryServiceClient.DEFAULT_RELAYS;
+    const relays = options.relays || cvmCoordinatorClient.DEFAULT_RELAYS;
     // Use options.relayHandler if provided, otherwise create from relays
     const relayHandler =
       options.relayHandler || new ApplesauceRelayPool(relays);
     const serverPubkey =
-      options.serverPubkey ?? CvmMlsDeliveryServiceClient.SERVER_PUBKEY;
+      options.serverPubkey ?? cvmCoordinatorClient.SERVER_PUBKEY;
     const { privateKey: _, serverPubkey: __, relays: ___, ...rest } = options;
 
     this.transport = new NostrClientTransport({
@@ -140,17 +140,17 @@ export class CvmMlsDeliveryServiceClient implements CvmMlsDeliveryService {
   }
 
   /**
-   * Consume the next published MLS key package for a target stable identity.
-   * @param {string} stablePubkey The stable pubkey parameter
-   * @returns {Promise<ConsumeKeyPackageForIdentityOutput>} The result of the consume_key_package_for_identity operation
+   * Consume the next published MLS key package by stable identity or exact key package ref.
+   * @param {string} identifier The stable pubkey or key package ref parameter
+   * @returns {Promise<ConsumeKeyPackageOutput>} The result of the consume_key_package operation
    */
-  async ConsumeKeyPackageForIdentity(
-    input: ConsumeKeyPackageForIdentityInput,
-  ): Promise<ConsumeKeyPackageForIdentityOutput> {
+  async ConsumeKeyPackage(
+    input: ConsumeKeyPackageInput,
+  ): Promise<ConsumeKeyPackageOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.consumeKeyPackageForIdentity,
+      CONTEXTVM_COORDINATOR_TOOLS.consumeKeyPackage,
       input,
-      consumeKeyPackageForIdentityOutputSchema,
+      consumeKeyPackageOutputSchema,
     );
   }
 

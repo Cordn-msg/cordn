@@ -27,9 +27,9 @@ import {
   type FetchGroupMessagesOutput,
   type ListAvailableKeyPackagesOutput,
   type PendingWelcome,
-} from "../../contracts/contextvmCoordinator.ts";
-import { CvmMlsDeliveryServiceClient } from "../ctxcn/CvmMlsDeliveryServiceClient.ts";
+} from "../contracts/index.ts";
 import type { RelayHandler } from "@contextvm/sdk";
+import { cvmCoordinatorClient } from "./coordinatorClient.js";
 
 export interface CliSessionOptions {
   privateKey?: string;
@@ -83,7 +83,7 @@ export interface ConversationView {
 }
 
 export class CliSession {
-  readonly client: CvmMlsDeliveryServiceClient;
+  readonly client: cvmCoordinatorClient;
   readonly privateKey: string;
   readonly stablePubkey: string;
 
@@ -94,7 +94,7 @@ export class CliSession {
 
   constructor(options: CliSessionOptions = {}) {
     this.privateKey = options.privateKey ?? createPrivateKeyHex();
-    this.client = new CvmMlsDeliveryServiceClient({
+    this.client = new cvmCoordinatorClient({
       ...options,
       privateKey: this.privateKey,
     });
@@ -199,17 +199,15 @@ export class CliSession {
 
   async addMember(
     groupAlias: string,
-    targetStablePubkey: string,
-  ): Promise<{ welcomeId: string }> {
+    identifier: string,
+  ): Promise<{ keyPackageReference: string }> {
     const group = this.getGroup(groupAlias);
-    const consumeResult = await this.client.ConsumeKeyPackageForIdentity({
-      stablePubkey: targetStablePubkey,
+    const consumeResult = await this.client.ConsumeKeyPackage({
+      identifier,
     });
 
     if (!consumeResult.keyPackage) {
-      throw new Error(
-        `No published key package available for ${targetStablePubkey}`,
-      );
+      throw new Error(`No published key package available for ${identifier}`);
     }
 
     const memberKeyPackage = decode(
@@ -228,8 +226,8 @@ export class CliSession {
 
     group.state = commitResult.newState;
 
-    const storedWelcome = await this.client.StoreWelcome({
-      targetStablePubkey,
+    await this.client.StoreWelcome({
+      targetStablePubkey: consumeResult.keyPackage.stablePubkey,
       keyPackageReference: consumeResult.keyPackage.keyPackageRef,
       welcomeBase64: encodeWelcomeBase64(commitResult.welcome),
     });
@@ -238,14 +236,14 @@ export class CliSession {
       opaqueMessageBase64: commitResult.commitMessageBase64,
     });
 
-    return { welcomeId: storedWelcome.welcomeId };
+    return { keyPackageReference: consumeResult.keyPackage.keyPackageRef };
   }
 
   async fetchWelcomes(): Promise<PendingWelcome[]> {
     const result = await this.client.FetchPendingWelcomes({});
 
     for (const welcome of result.welcomes) {
-      this.welcomes.set(welcome.welcomeId, welcome);
+      this.welcomes.set(welcome.keyPackageReference, welcome);
     }
 
     return this.listWelcomes();
@@ -258,13 +256,15 @@ export class CliSession {
   }
 
   async acceptWelcome(
-    welcomeId: string,
+    keyPackageReference: string,
     groupAlias?: string,
   ): Promise<GroupSessionState> {
-    const welcome = this.welcomes.get(welcomeId);
+    const welcome = this.welcomes.get(keyPackageReference);
 
     if (!welcome) {
-      throw new Error(`Unknown welcome id: ${welcomeId}`);
+      throw new Error(
+        `Unknown welcome key package reference: ${keyPackageReference}`,
+      );
     }
 
     const keyPackage = this.findKeyPackageByRef(welcome.keyPackageReference);
@@ -293,7 +293,7 @@ export class CliSession {
 
     this.groups.set(alias, group);
     keyPackage.consumed = true;
-    this.welcomes.delete(welcomeId);
+    this.welcomes.delete(keyPackageReference);
 
     return this.getGroup(alias);
   }
