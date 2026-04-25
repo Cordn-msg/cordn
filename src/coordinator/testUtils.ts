@@ -1,4 +1,5 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { bytesToHex } from "nostr-tools/utils";
 import {
   createCommit,
   createApplicationMessage,
@@ -53,12 +54,6 @@ export interface CoordinatorPostedMessage {
 
 const encoder = new TextEncoder();
 const TEST_CIPHERSUITE = "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519";
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(
-    "",
-  );
-}
 
 export async function getTestCiphersuite(): Promise<CiphersuiteImpl> {
   return getCiphersuiteImpl(TEST_CIPHERSUITE, nobleCryptoProvider);

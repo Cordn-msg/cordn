@@ -7,8 +7,8 @@
     "dev": "pnpm run server:start",
     "build": "npx esbuild ./src/server/main.ts --bundle --outdir=./dist --target=node20 --format=esm --packages=external",
     "typecheck": "tsc --noEmit",
-    "client:cli": "node --experimental-strip-types ./src/client/cli/main.ts",
-    "server:start": "node --experimental-strip-types ./src/server/main.ts",
+    "client:cli": "node ./src/cli/main.ts",
+    "server:start": "node ./src/server/main.ts",
     "test": "vitest run ./src",
     "format": "prettier --write ./src"
   },

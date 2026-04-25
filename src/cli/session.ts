@@ -29,7 +29,7 @@ import {
   type PendingWelcome,
 } from "../contracts/index.ts";
 import type { RelayHandler } from "@contextvm/sdk";
-import { cvmCoordinatorClient } from "./coordinatorClient.js";
+import { cvmCoordinatorClient } from "./coordinatorClient.ts";
 
 export interface CliSessionOptions {
   privateKey?: string;

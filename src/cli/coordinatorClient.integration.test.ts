@@ -24,7 +24,7 @@ import {
 import { PrivateKeySigner, type RelayHandler } from "@contextvm/sdk";
 import { bytesToHex } from "nostr-tools/utils";
 import { decodeBase64, encodeBase64 } from "../server/base64.ts";
-import { cvmCoordinatorClient } from "./coordinatorClient.js";
+import { cvmCoordinatorClient } from "./coordinatorClient.ts";
 
 async function createClient(params: {
   privateKey: Uint8Array;
