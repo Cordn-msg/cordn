@@ -1,7 +1,8 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { CliSession } from "./session.ts";
+import { CliSession, type KeyPackageSummary } from "./session.ts";
+import type { CordnGroupMetadata } from "./groupMetadata.ts";
 
 const ansi = {
   reset: "\u001b[0m",
@@ -41,8 +42,9 @@ function printHelp(): void {
       "  key-packages",
       "  publish-kp <alias>",
       "  available-kps",
-      "  create-group <alias> [keyPackageAlias]",
+      "  create-group <alias> [keyPackageAlias] [--name <value>] [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
       "  groups",
+      "  group-info [groupAlias]",
       "  group <groupAlias>",
       "  use <groupAlias>",
       "  leave",
@@ -101,12 +103,168 @@ function formatGroupAlias(alias: string): string {
   return colorize(alias, ansi.cyan);
 }
 
+function formatPromptGroupLabel(
+  session: CliSession,
+  groupAlias: string,
+): string {
+  const group = session.getGroup(groupAlias);
+  const icon = group.metadata?.icon ? `${group.metadata.icon} ` : "";
+  const name = group.metadata?.name
+    ? ` ${colorize(group.metadata.name, ansi.bold)}`
+    : "";
+
+  return `${icon}${formatGroupAlias(groupAlias)}${name}`;
+}
+
 function formatWelcomeKeyPackageReference(keyPackageReference: string): string {
   return colorize(keyPackageReference, ansi.magenta);
 }
 
 function formatStatusValue(value: string | number): string {
   return colorize(String(value), ansi.bold);
+}
+
+function tokenizeInput(line: string): string[] {
+  const tokens = line.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+/g) ?? [];
+
+  return tokens.map((token) => {
+    if (
+      (token.startsWith('"') && token.endsWith('"')) ||
+      (token.startsWith("'") && token.endsWith("'"))
+    ) {
+      return token.slice(1, -1).replace(/\\(["'\\])/g, "$1");
+    }
+
+    return token;
+  });
+}
+
+function formatGroupMetadata(metadata?: CordnGroupMetadata): string {
+  if (!metadata) {
+    return colorize("(no shared metadata)", ansi.dim);
+  }
+
+  const parts = [
+    `name=${colorize(metadata.name, ansi.bold)}`,
+    metadata.description
+      ? `description=${colorize(metadata.description, ansi.dim)}`
+      : undefined,
+    metadata.icon ? `icon=${metadata.icon}` : undefined,
+    metadata.imageUrl
+      ? `image=${colorize(metadata.imageUrl, ansi.dim)}`
+      : undefined,
+    metadata.adminPubkeys && metadata.adminPubkeys.length > 0
+      ? `admins=${metadata.adminPubkeys.length}`
+      : undefined,
+  ].filter(Boolean);
+
+  return parts.join(" ");
+}
+
+function formatKeyPackageSummary(summary: KeyPackageSummary): string {
+  const parts = [
+    summary.alias ? `alias=${formatGroupAlias(summary.alias)}` : undefined,
+    `owner=${formatFullCredentialLabel(summary.stablePubkey)}`,
+    `ref=${formatKeyPackageRef(summary.keyPackageRef)}`,
+    summary.publishedAt === undefined
+      ? `published=${colorize("no", ansi.yellow)}`
+      : `published=${formatTimestamp(summary.publishedAt)}`,
+    summary.consumed === undefined
+      ? undefined
+      : `consumed=${summary.consumed ? colorize("yes", ansi.green) : colorize("no", ansi.yellow)}`,
+    `groupMetadataSupport=${summary.supportsGroupMetadata ? colorize("yes", ansi.green) : colorize("no", ansi.yellow)}`,
+  ].filter(Boolean);
+
+  return parts.join(" ");
+}
+
+function formatGroupDetails(session: CliSession, groupAlias: string): string {
+  const group = session.getGroup(groupAlias);
+  return [
+    `alias=${formatGroupAlias(group.alias)}`,
+    `cursor=${colorize(String(group.lastCursor), ansi.bold)}`,
+    `messages=${colorize(String(group.messages.length), ansi.bold)}`,
+    `sharedMetadata=${formatGroupMetadata(group.metadata)}`,
+  ].join("\n");
+}
+
+function parseCreateGroupArgs(args: string[]): {
+  alias: string;
+  keyPackageAlias?: string;
+  metadata?: CordnGroupMetadata;
+} {
+  const alias = args[0];
+
+  if (!alias) {
+    throw new Error(
+      "Usage: create-group <alias> [keyPackageAlias] [--name <value>] [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
+    );
+  }
+
+  let index = 1;
+  let keyPackageAlias: string | undefined;
+
+  if (args[index] && !args[index]!.startsWith("--")) {
+    keyPackageAlias = args[index];
+    index += 1;
+  }
+
+  const metadata: CordnGroupMetadata = { name: "" };
+  let metadataProvided = false;
+
+  while (index < args.length) {
+    const flag = args[index];
+    const value = args[index + 1];
+
+    if (!flag?.startsWith("--")) {
+      throw new Error(`Unexpected create-group argument: ${flag}`);
+    }
+
+    switch (flag) {
+      case "--name":
+        if (!value) throw new Error("Missing value for --name");
+        metadata.name = value;
+        metadataProvided = true;
+        index += 2;
+        break;
+      case "--description":
+        if (!value) throw new Error("Missing value for --description");
+        metadata.description = value;
+        metadataProvided = true;
+        index += 2;
+        break;
+      case "--icon":
+        if (!value) throw new Error("Missing value for --icon");
+        metadata.icon = value;
+        metadataProvided = true;
+        index += 2;
+        break;
+      case "--image-url":
+        if (!value) throw new Error("Missing value for --image-url");
+        metadata.imageUrl = value;
+        metadataProvided = true;
+        index += 2;
+        break;
+      case "--admin":
+        if (!value) throw new Error("Missing value for --admin");
+        metadata.adminPubkeys = [...(metadata.adminPubkeys ?? []), value];
+        metadataProvided = true;
+        index += 2;
+        break;
+      default:
+        throw new Error(`Unknown create-group option: ${flag}`);
+    }
+  }
+
+  if (metadataProvided && metadata.name === "") {
+    throw new Error("create-group metadata requires --name for v1");
+  }
+
+  return {
+    alias,
+    keyPackageAlias,
+    metadata: metadataProvided ? metadata : undefined,
+  };
 }
 
 function formatChatLine(
@@ -168,8 +326,8 @@ export async function startCliRepl(session: CliSession): Promise<void> {
   try {
     while (true) {
       const prompt = selectedGroupAlias
-        ? `cvm-mls:${selectedGroupAlias}> `
-        : "cvm-mls> ";
+        ? `cordn:${formatPromptGroupLabel(session, selectedGroupAlias)}> `
+        : "cordn> ";
       const line = (await rl.question(prompt)).trim();
 
       if (!line) {
@@ -188,7 +346,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
         continue;
       }
 
-      const [rawCommand = "", ...args] = line.split(/\s+/);
+      const [rawCommand = "", ...args] = tokenizeInput(line);
       const command = rawCommand;
       const knownCommands = new Set([
         "help",
@@ -200,6 +358,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
         "available-kps",
         "create-group",
         "groups",
+        "group-info",
         "group",
         "use",
         "leave",
@@ -262,7 +421,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
           }
           case "key-packages": {
             output.write(
-              `${formatList(session.listKeyPackages().map((entry) => `${formatGroupAlias(entry.alias)} ref=${formatKeyPackageRef(entry.keyPackageRef)} published=${entry.publishedAt === undefined ? colorize("no", ansi.yellow) : formatTimestamp(entry.publishedAt)} consumed=${entry.consumed ? colorize("yes", ansi.green) : colorize("no", ansi.yellow)}`))}\n`,
+              `${formatList(session.listKeyPackageSummaries().map((entry) => formatKeyPackageSummary(entry)))}\n`,
             );
             break;
           }
@@ -275,35 +434,44 @@ export async function startCliRepl(session: CliSession): Promise<void> {
             break;
           }
           case "available-kps": {
-            const keyPackages = await session.listAvailableKeyPackages();
+            const keyPackages =
+              await session.listAvailableKeyPackageSummaries();
             output.write(
-              `${formatList(keyPackages.map((entry) => `${formatFullCredentialLabel(entry.stablePubkey)} ref=${formatKeyPackageRef(entry.keyPackageRef)} published=${formatTimestamp(entry.publishedAt)}`))}\n`,
+              `${formatList(keyPackages.map((entry) => formatKeyPackageSummary(entry)))}\n`,
             );
             break;
           }
           case "create-group": {
-            if (!args[0])
-              throw new Error("Usage: create-group <alias> [keyPackageAlias]");
-            const group = await session.createGroup(args[0], args[1]);
+            const parsed = parseCreateGroupArgs(args);
+            const group = await session.createGroup(parsed.alias, {
+              keyPackageAlias: parsed.keyPackageAlias,
+              metadata: parsed.metadata,
+            });
             selectedGroupAlias = group.alias;
             output.write(
-              `${colorize("created group", ansi.green)} ${colorize(group.alias, ansi.cyan)}\n`,
+              `${colorize("created group", ansi.green)} ${colorize(group.alias, ansi.cyan)} ${formatGroupMetadata(group.metadata)}\n`,
             );
             break;
           }
           case "groups": {
             output.write(
-              `${formatList(session.listGroups().map((group) => `${formatGroupAlias(group.alias)} cursor=${colorize(String(group.lastCursor), ansi.bold)} messages=${colorize(String(group.messages.length), ansi.bold)}`))}\n`,
+              `${formatList(session.listGroups().map((group) => `${formatGroupAlias(group.alias)} cursor=${colorize(String(group.lastCursor), ansi.bold)} messages=${colorize(String(group.messages.length), ansi.bold)} ${formatGroupMetadata(group.metadata)}`))}\n`,
             );
+            break;
+          }
+          case "group-info": {
+            const alias = args[0] ?? selectedGroupAlias;
+            if (!alias) throw new Error("Usage: group-info [groupAlias]");
+            output.write(`${formatGroupDetails(session, alias)}\n`);
             break;
           }
           case "group":
           case "use": {
             if (!args[0]) throw new Error("Usage: use <groupAlias>");
-            session.getGroup(args[0]);
+            const group = session.getGroup(args[0]);
             selectedGroupAlias = args[0];
             output.write(
-              `${colorize("selected group", ansi.green)} ${colorize(selectedGroupAlias, ansi.cyan)}\n`,
+              `${colorize("selected group", ansi.green)} ${colorize(selectedGroupAlias, ansi.cyan)} ${formatGroupMetadata(group.metadata)}\n`,
             );
             break;
           }
@@ -344,7 +512,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
             const group = await session.acceptWelcome(args[0], args[1]);
             selectedGroupAlias = group.alias;
             output.write(
-              `${colorize("accepted welcome into", ansi.green)} ${colorize(group.alias, ansi.cyan)}\n`,
+              `${colorize("accepted welcome into", ansi.green)} ${colorize(group.alias, ansi.cyan)} ${formatGroupMetadata(group.metadata)}\n`,
             );
             break;
           }

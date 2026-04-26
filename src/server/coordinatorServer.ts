@@ -7,7 +7,7 @@ import {
 import { createCoordinator, Coordinator } from "../coordinator/coordinator.ts";
 import {
   CoordinatorAdapter,
-  registerCoordinatorContextVmTools,
+  registerCoordinatorMethods,
 } from "./coordinatorMethods.ts";
 
 const DEFAULT_RELAY_URLS = ["wss://relay.contextvm.org"];
@@ -24,11 +24,11 @@ export function createServer(coordinator?: Coordinator): {
   const _coordinator = coordinator ?? createCoordinator();
   const adapter = new CoordinatorAdapter(_coordinator);
   const server = new McpServer({
-    name: "cordn-ds",
+    name: "cordn-server",
     version: "0.1.0",
   });
 
-  registerCoordinatorContextVmTools(server, adapter);
+  registerCoordinatorMethods(server, adapter);
 
   return { coordinator: _coordinator, adapter, server };
 }

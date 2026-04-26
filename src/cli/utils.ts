@@ -16,13 +16,21 @@ import {
   nobleCryptoProvider,
   processMessage,
   unsafeTestingAuthenticationService,
+  type Capabilities,
   type CiphersuiteImpl,
   type ClientState,
   type Credential,
+  type GroupContextExtension,
   type KeyPackage,
   type PrivateKeyPackage,
   type Welcome,
 } from "ts-mls";
+import {
+  CORDN_GROUP_METADATA_EXTENSION_TYPE,
+  createCordnMetadataCapabilities,
+  makeCordnGroupMetadataExtension,
+  type CordnGroupMetadata,
+} from "./groupMetadata.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -63,9 +71,11 @@ export async function createMemberArtifacts(stablePubkey: string): Promise<{
   keyPackageBase64: string;
 }> {
   const cipherSuite = await getCliCiphersuite();
+  const capabilities: Capabilities = createCordnMetadataCapabilities();
   const generated = await generateKeyPackage({
     credential: createCredential(stablePubkey),
     cipherSuite,
+    capabilities,
   });
 
   const keyPackageRef = bytesToHex(
@@ -82,18 +92,31 @@ export async function createMemberArtifacts(stablePubkey: string): Promise<{
   };
 }
 
+export function keyPackageSupportsCordnMetadata(
+  keyPackage: KeyPackage,
+): boolean {
+  const supportedExtensions = keyPackage.leafNode.capabilities.extensions;
+
+  return supportedExtensions.includes(CORDN_GROUP_METADATA_EXTENSION_TYPE);
+}
+
 export async function createGroupState(params: {
   groupId: string;
   keyPackage: KeyPackage;
   privateKeyPackage: PrivateKeyPackage;
+  metadata?: CordnGroupMetadata;
 }): Promise<ClientState> {
   const cipherSuite = await getCliCiphersuite();
+  const extensions: GroupContextExtension[] = params.metadata
+    ? [makeCordnGroupMetadataExtension(params.metadata)]
+    : [];
 
   return createGroup({
     context: { cipherSuite, authService: unsafeTestingAuthenticationService },
     groupId: encoder.encode(params.groupId),
     keyPackage: params.keyPackage,
     privateKeyPackage: params.privateKeyPackage,
+    extensions,
   });
 }
 

@@ -102,9 +102,7 @@ async function main(): Promise<void> {
 
   const relayUrls = readRelayUrls();
   const serverInfo = {
-    name:
-      readOptionalStringEnv("CVM_MLS_SERVER_NAME") ??
-      "cvm-mls-delivery-service",
+    name: readOptionalStringEnv("CVM_MLS_SERVER_NAME") ?? "cordn-server",
     about: readOptionalStringEnv("CVM_MLS_SERVER_ABOUT"),
     website: readOptionalStringEnv("CVM_MLS_SERVER_WEBSITE"),
   };

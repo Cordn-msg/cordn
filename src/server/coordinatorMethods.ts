@@ -253,7 +253,7 @@ export class CoordinatorAdapter {
   }
 }
 
-export function registerCoordinatorContextVmTools(
+export function registerCoordinatorMethods(
   server: McpServer,
   adapter: CoordinatorAdapter,
 ): void {

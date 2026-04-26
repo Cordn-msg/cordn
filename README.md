@@ -1,6 +1,6 @@
-# Cordn-ds
+# Cordn
 
-Minimal MLS delivery service and ContextVM server adapter implemented in TypeScript on top of [`ts-mls`](ts-mls/README.md).
+Minimal MLS delivery service coordinator and ContextVM server adapter implemented in TypeScript on top of [`ts-mls`](ts-mls/README.md).
 
 ## Run the server
 

@@ -1,6 +1,6 @@
 export {
   CoordinatorAdapter,
-  registerCoordinatorContextVmTools,
+  registerCoordinatorMethods,
 } from "./coordinatorMethods";
 export {
   consumeKeyPackageInputSchema,

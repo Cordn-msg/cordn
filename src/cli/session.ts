@@ -7,6 +7,10 @@ import {
 } from "ts-mls";
 
 import {
+  getCordnGroupMetadataExtension,
+  type CordnGroupMetadata,
+} from "./groupMetadata.ts";
+import {
   addMemberToGroup,
   createApplicationMessageBase64,
   createGroupState,
@@ -20,6 +24,7 @@ import {
   encodeAuthenticatedSender,
   encodeWelcomeBase64,
   joinGroupFromWelcome,
+  keyPackageSupportsCordnMetadata,
   processMessageBase64,
 } from "./utils.ts";
 import {
@@ -55,6 +60,15 @@ export interface StoredKeyPackage {
   consumed: boolean;
 }
 
+export interface KeyPackageSummary {
+  alias?: string;
+  stablePubkey: string;
+  keyPackageRef: string;
+  publishedAt?: number;
+  consumed?: boolean;
+  supportsGroupMetadata: boolean;
+}
+
 export interface StoredMessage {
   cursor: number;
   createdAt: number;
@@ -72,9 +86,16 @@ export interface SyncIssue {
 export interface GroupSessionState {
   alias: string;
   state: ClientState;
+  metadata?: CordnGroupMetadata;
   lastCursor: number;
   messages: StoredMessage[];
   syncIssues: SyncIssue[];
+}
+
+export interface CreateGroupOptions {
+  groupId?: string;
+  keyPackageAlias?: string;
+  metadata?: CordnGroupMetadata;
 }
 
 export interface ConversationView {
@@ -107,6 +128,17 @@ export class CliSession {
 
   listKeyPackages(): StoredKeyPackage[] {
     return [...this.keyPackages.values()];
+  }
+
+  listKeyPackageSummaries(): KeyPackageSummary[] {
+    return this.listKeyPackages().map((entry) => ({
+      alias: entry.alias,
+      stablePubkey: this.stablePubkey,
+      keyPackageRef: entry.keyPackageRef,
+      publishedAt: entry.publishedAt,
+      consumed: entry.consumed,
+      supportsGroupMetadata: keyPackageSupportsCordnMetadata(entry.keyPackage),
+    }));
   }
 
   listWelcomes(): PendingWelcome[] {
@@ -171,14 +203,14 @@ export class CliSession {
 
   async createGroup(
     alias: string,
-    keyPackageAlias?: string,
+    options: CreateGroupOptions = {},
   ): Promise<GroupSessionState> {
     if (this.groups.has(alias)) {
       throw new Error(`Group alias already exists: ${alias}`);
     }
 
-    const keyPackage = keyPackageAlias
-      ? this.requireKeyPackage(keyPackageAlias)
+    const keyPackage = options.keyPackageAlias
+      ? this.requireKeyPackage(options.keyPackageAlias)
       : this.findUnconsumedKeyPackage();
 
     if (!keyPackage) {
@@ -186,9 +218,10 @@ export class CliSession {
     }
 
     const state = await createGroupState({
-      groupId: alias,
+      groupId: options.groupId ?? crypto.randomUUID(),
       keyPackage: keyPackage.keyPackage,
       privateKeyPackage: keyPackage.privateKeyPackage,
+      metadata: options.metadata,
     });
 
     const group = this.createGroupSessionState(alias, state);
@@ -253,6 +286,16 @@ export class CliSession {
     const result: ListAvailableKeyPackagesOutput =
       await this.client.ListAvailableKeyPackages({});
     return result.keyPackages;
+  }
+
+  async listAvailableKeyPackageSummaries(): Promise<KeyPackageSummary[]> {
+    const keyPackages = await this.listAvailableKeyPackages();
+    return keyPackages.map((entry) => ({
+      stablePubkey: entry.stablePubkey,
+      keyPackageRef: entry.keyPackageRef,
+      publishedAt: entry.publishedAt,
+      supportsGroupMetadata: true,
+    }));
   }
 
   async acceptWelcome(
@@ -363,6 +406,7 @@ export class CliSession {
 
       if (processed.kind === "applicationMessage") {
         group.state = processed.newState;
+        group.metadata = getCordnGroupMetadataExtension(processed.newState);
         group.lastCursor = message.cursor;
 
         const stored: StoredMessage = {
@@ -387,6 +431,7 @@ export class CliSession {
       }
 
       group.state = processed.newState;
+      group.metadata = getCordnGroupMetadataExtension(processed.newState);
       group.lastCursor = message.cursor;
     }
 
@@ -441,6 +486,7 @@ export class CliSession {
     return {
       alias,
       state,
+      metadata: getCordnGroupMetadataExtension(state),
       lastCursor: 0,
       messages: [],
       syncIssues: [],

@@ -6,7 +6,7 @@ import { CliSession } from "./session.ts";
 const program = new Command();
 
 program
-  .name("cvm-mls-cli")
+  .name("cordn-cli")
   .description("Minimal interactive MLS coordinator CLI")
   .option("--private-key <hex>", "hex private key for the client identity")
   .option("--server-pubkey <hex>", "target ContextVM server public key")
