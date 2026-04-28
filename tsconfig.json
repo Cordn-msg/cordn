@@ -1,12 +1,14 @@
 {
   "compilerOptions": {
-    "target": "ESNext",
+    "target": "ES2023",
     "module": "Preserve",
     "moduleResolution": "bundler",
-    "lib": ["ESNext"],
+    "lib": ["ES2023"],
+    "types": ["node"],
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
+    "rootDir": "./src",
     "outDir": "./dist",
     "strict": true,
     "noImplicitAny": true,
@@ -25,10 +27,10 @@
     "noImplicitOverride": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
+    "useUnknownInCatchVariables": true,
     "noPropertyAccessFromIndexSignature": false,
-    "pretty": true,
-    "baseUrl": "."
+    "pretty": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "ts-mls", "openmls", "hermetic-mls", "marmot"]
+  "exclude": ["node_modules", "dist"]
 }
