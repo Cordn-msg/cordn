@@ -1,4 +1,11 @@
-export { Coordinator, createCoordinator } from "./coordinator";
+export { Coordinator, createCoordinator } from "./coordinator.ts";
+export { InMemoryCoordinatorStorage } from "./storage/inMemoryStorage.ts";
+export { SqliteCoordinatorStorage } from "./storage/sqliteStorage.ts";
+export type {
+  AppendGroupMessageParams,
+  CoordinatorStorage,
+} from "./storage/storage.ts";
+export type { CoordinatorOptions } from "./coordinator.ts";
 export type {
   DeliveryServiceSnapshot,
   FetchGroupMessagesInput,
@@ -9,4 +16,4 @@ export type {
   PublishKeyPackageInput,
   StoreWelcomeInput,
   WelcomeQueueRecord,
-} from "./types";
+} from "./types.ts";

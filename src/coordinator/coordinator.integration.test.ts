@@ -5,7 +5,7 @@ import {
   unsafeTestingAuthenticationService,
 } from "ts-mls";
 
-import { Coordinator } from "./coordinator";
+import { Coordinator } from "./coordinator.ts";
 import {
   createActor,
   createApplicationMessageBytes,
@@ -17,7 +17,7 @@ import {
   decodeMlsFramedMessage,
   getTestCiphersuite,
   processMessageBytes,
-} from "./testUtils";
+} from "./testUtils.ts";
 
 describe("Coordinator integration flow", () => {
   test("supports an alice, bob, and carol invitation and delivery scenario", async () => {

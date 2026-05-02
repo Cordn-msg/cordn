@@ -34,13 +34,13 @@ export function createServer(coordinator?: Coordinator): {
 }
 
 export async function connectServer(
-  params: NostrServerTransportOptions,
+  params: NostrServerTransportOptions & { coordinator?: Coordinator },
 ): Promise<
   ReturnType<typeof createServer> & {
     transport: NostrServerTransport;
   }
 > {
-  const instance = createServer();
+  const instance = createServer(params.coordinator);
   const transport = new NostrServerTransport({
     signer: params.signer,
     relayHandler: params.relayHandler ?? getDefaultRelayUrls(),

@@ -43,7 +43,7 @@ type Decoder<T> = (
   bytes: Uint8Array,
   offset: number,
 ) => [T, number] | undefined;
-
+// TODO: Duplicated function
 function decodeExact<T>(
   bytes: Uint8Array,
   decoder: Decoder<T>,

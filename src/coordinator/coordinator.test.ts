@@ -1,14 +1,14 @@
 import { describe, expect, test } from "vitest";
 import { encode, mlsMessageEncoder, wireformats } from "ts-mls";
 
-import { Coordinator } from "./coordinator";
+import { Coordinator } from "./coordinator.ts";
 import {
   createActor,
   createKeyPackageRef,
   createMemberArtifacts,
   createWelcomeForNewMember,
   getTestCiphersuite,
-} from "./testUtils";
+} from "./testUtils.ts";
 import { createGroup, unsafeTestingAuthenticationService } from "ts-mls";
 
 function createBytes(values: number[]): Uint8Array {

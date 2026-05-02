@@ -9,16 +9,16 @@ import {
   wireformats,
 } from "ts-mls";
 
-import { Coordinator } from "../coordinator/coordinator";
+import { Coordinator } from "../coordinator/coordinator.ts";
 import {
   createApplicationMessageBytes,
   createMemberArtifacts,
   createWelcomeForNewMember,
   createActor,
   getTestCiphersuite,
-} from "../coordinator/testUtils";
-import { CoordinatorAdapter } from "./coordinatorMethods";
-import { encodeBase64 } from "./base64";
+} from "../coordinator/testUtils.ts";
+import { CoordinatorAdapter } from "./coordinatorMethods.ts";
+import { encodeBase64 } from "./base64.ts";
 
 function encodeWelcomeAsBase64(
   welcome: Parameters<typeof encodeWelcomeRecord>[0],

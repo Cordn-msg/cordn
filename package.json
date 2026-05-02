@@ -4,6 +4,11 @@
   "type": "module",
   "private": true,
   "packageManager": "pnpm@10.17.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
+  },
   "engines": {
     "node": ">=20"
   },
@@ -17,6 +22,7 @@
     "format": "prettier --write ./src ./tsconfig.json ./package.json ./README.md"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.6.0",
     "prettier": "^3.8.3",
     "typescript": "^5.9.3",
@@ -26,6 +32,7 @@
     "@contextvm/sdk": "^0.9.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@noble/ciphers": "^2.2.0",
+    "better-sqlite3": "^12.9.0",
     "commander": "^14.0.3",
     "nostr-tools": "^2.23.3",
     "ts-mls": "^2.0.0-rc.10",
