@@ -24,14 +24,14 @@ import {
 import { PrivateKeySigner, type RelayHandler } from "@contextvm/sdk";
 import { bytesToHex } from "nostr-tools/utils";
 import { decodeBase64, encodeBase64 } from "../server/base64.ts";
-import { cvmCoordinatorClient } from "./coordinatorClient.ts";
+import { cordnClient } from "./coordinatorClient.ts";
 
 async function createClient(params: {
   privateKey: Uint8Array;
   serverPubkey: string;
   relayHandler: RelayHandler;
-}): Promise<cvmCoordinatorClient> {
-  return new cvmCoordinatorClient({
+}): Promise<cordnClient> {
+  return new cordnClient({
     privateKey: bytesToHex(params.privateKey),
     serverPubkey: params.serverPubkey,
     relayHandler: params.relayHandler,
@@ -39,7 +39,7 @@ async function createClient(params: {
 }
 
 describe("CvmMlsDeliveryServiceClient integration flow", () => {
-  const clients: cvmCoordinatorClient[] = [];
+  const clients: cordnClient[] = [];
 
   afterEach(async () => {
     await Promise.allSettled(

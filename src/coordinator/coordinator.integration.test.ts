@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  createGroup,
   defaultProposalTypes,
   processMessage,
   unsafeTestingAuthenticationService,
@@ -14,6 +15,7 @@ import {
   createMemberArtifacts,
   createProposalMessageBytes,
   createThreeActorGroupScenario,
+  createWelcomeForNewMember,
   decodeMlsFramedMessage,
   getTestCiphersuite,
   processMessageBytes,
@@ -255,6 +257,87 @@ describe("Coordinator integration flow", () => {
     expect(new TextDecoder().decode(carolApplicationResult.message)).toBe(
       "post-commit hello from bob",
     );
+  });
+
+  test("queues competing same-epoch commits so conflict handling can be exercised by clients", async () => {
+    const coordinator = new Coordinator();
+    const cipherSuite = await getTestCiphersuite();
+    const alice = await createMemberArtifacts(createActor("alice"));
+    const bob = await createMemberArtifacts(createActor("bob"));
+    const carol = await createMemberArtifacts(createActor("carol"));
+    const dave = await createMemberArtifacts(createActor("dave"));
+
+    let aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-conflicting-commits"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+
+    const bobJoin = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+    aliceState = bobJoin.senderState;
+
+    const aliceCommit = await createCommitMessageBytes({
+      state: aliceState,
+      extraProposals: [
+        {
+          proposalType: defaultProposalTypes.add,
+          add: { keyPackage: carol.keyPackage },
+        },
+      ],
+    });
+    const bobCommit = await createCommitMessageBytes({
+      state: bobJoin.receiverState,
+      extraProposals: [
+        {
+          proposalType: defaultProposalTypes.add,
+          add: { keyPackage: dave.keyPackage },
+        },
+      ],
+    });
+
+    const postedAliceCommit = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: createEphemeralPubkey(),
+      opaqueMessage: aliceCommit.encodedMessage,
+    });
+    const postedBobCommit = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: createEphemeralPubkey(),
+      opaqueMessage: bobCommit.encodedMessage,
+    });
+
+    const queued = coordinator.fetchGroupMessages({
+      groupId: postedAliceCommit.groupId,
+    });
+
+    expect(queued.map((message) => message.cursor)).toEqual([
+      postedAliceCommit.cursor,
+      postedBobCommit.cursor,
+    ]);
+    expect(coordinator.getGroupRouting(postedAliceCommit.groupId)).toEqual({
+      groupId: postedAliceCommit.groupId,
+      latestHandshakeEpoch: 1n,
+      lastMessageCursor: postedBobCommit.cursor,
+    });
+
+    const bobAppliesAlice = await processMessageBytes({
+      state: bobJoin.receiverState,
+      encodedMessage: queued[0]!.opaqueMessage,
+    });
+
+    expect(bobAppliesAlice.kind).toBe("newState");
+    if (bobAppliesAlice.kind !== "newState") {
+      throw new Error("Expected first competing commit to advance Bob state");
+    }
+
+    await expect(
+      processMessageBytes({
+        state: bobAppliesAlice.newState,
+        encodedMessage: queued[1]!.opaqueMessage,
+      }),
+    ).rejects.toThrow(/former epoch|epoch too old/i);
   });
 
   test("preserves ordered queue semantics across proposal, commit, and application traffic", async () => {

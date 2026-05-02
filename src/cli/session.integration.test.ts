@@ -40,6 +40,7 @@ describe("CliSession", () => {
 
       await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
       const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
 
       await bob.fetchWelcomes();
       await bob.acceptWelcome(invitation.keyPackageReference, "demo");
@@ -57,6 +58,62 @@ describe("CliSession", () => {
       expect(aliceSynced).toHaveLength(1);
       expect(aliceSynced[0]?.plaintext).toBe("hello alice");
       expect(aliceSynced[0]?.sender).toBe(bob.stablePubkey);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("does not skip unseen coordinator messages after multiple local sends without intermediate sync", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await bob.sendMessage("demo", "bob-1");
+      await alice.syncGroup("demo");
+
+      await alice.sendMessage("demo", "alice-1");
+      await alice.sendMessage("demo", "alice-2");
+      await alice.sendMessage("demo", "alice-3");
+
+      const bobReceived = await bob.syncGroup("demo");
+
+      expect(bobReceived.map((message) => message.plaintext)).toEqual([
+        "alice-1",
+        "alice-2",
+        "alice-3",
+      ]);
+      expect(
+        bob
+          .listMessages("demo")
+          .filter((message) => message.direction === "inbound")
+          .map((message) => message.plaintext),
+      ).toEqual(["alice-1", "alice-2", "alice-3"]);
     } finally {
       await server.transport.close();
     }
@@ -90,6 +147,7 @@ describe("CliSession", () => {
 
       await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
       const invitation = await alice.addMember("demo", published.keyPackageRef);
+      await alice.syncGroup("demo");
 
       await bob.fetchWelcomes();
       await bob.acceptWelcome(invitation.keyPackageReference, "demo");
@@ -147,6 +205,7 @@ describe("CliSession", () => {
       });
 
       const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
       await bob.fetchWelcomes();
       const joined = await bob.acceptWelcome(
         invitation.keyPackageReference,
@@ -196,6 +255,7 @@ describe("CliSession", () => {
 
       await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
       const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
 
       await bob.fetchWelcomes();
       await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
@@ -210,6 +270,7 @@ describe("CliSession", () => {
         "demo-2",
         carol.stablePubkey,
       );
+      await alice.syncGroup("demo-2");
 
       await carol.fetchWelcomes();
       await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
@@ -307,6 +368,7 @@ describe("CliSession", () => {
 
       await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
       const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
 
       await bob.fetchWelcomes();
       await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
@@ -320,11 +382,7 @@ describe("CliSession", () => {
       const aliceMessagesAfterCommit = await alice.syncGroup("demo");
 
       expect(aliceMessagesAfterCommit).toEqual([]);
-      expect(alice.listSyncIssues("demo")).toEqual([
-        expect.objectContaining({
-          detail: "Cannot process commit or proposal from former epoch",
-        }),
-      ]);
+      expect(alice.listSyncIssues("demo")).toEqual([]);
 
       await carol.fetchWelcomes();
       await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
@@ -344,6 +402,210 @@ describe("CliSession", () => {
       expect(
         alice.listMessages("demo").map((message) => message.plaintext),
       ).toEqual(["hello bob", "hello alice", "hello everyone"]);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("advances fetch progress when replaying already-recorded outbound messages", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      const outbound = await alice.sendMessage("demo", "hello bob");
+      const firstSync = await alice.syncGroup("demo");
+      const secondSync = await alice.syncGroup("demo");
+
+      expect(firstSync).toEqual([]);
+      expect(secondSync).toEqual([]);
+      expect(alice.listSyncIssues("demo")).toEqual([]);
+      expect(alice.getGroup("demo").fetchCursor).toBe(outbound.cursor);
+      expect(alice.getGroup("demo").lastCursor).toBe(outbound.cursor);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("treats same-epoch add-member welcomes as tentative until the client can confirm its branch survived sync", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const dave = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol, dave);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+      await dave.generateKeyPackage("dave-main");
+      await bob.publishKeyPackage("bob-main");
+      await carol.publishKeyPackage("carol-main");
+      await dave.publishKeyPackage("dave-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+
+      const carolInvitation = await alice.addMember("demo", carol.stablePubkey);
+      const daveInvitation = await bob.addMember("demo", dave.stablePubkey);
+
+      expect(await carol.fetchWelcomes()).toEqual([]);
+      expect(await dave.fetchWelcomes()).toEqual([]);
+
+      await alice.syncGroup("demo");
+      await bob.syncGroup("demo");
+
+      await carol.fetchWelcomes();
+      await dave.fetchWelcomes();
+
+      expect(
+        carol.listWelcomes().map((welcome) => welcome.keyPackageReference),
+      ).toEqual([carolInvitation.keyPackageReference]);
+      expect(dave.listWelcomes()).toEqual([]);
+
+      expect(alice.listSyncIssues("demo")).toEqual([
+        expect.objectContaining({
+          detail: "Cannot process commit or proposal from former epoch",
+        }),
+      ]);
+      expect(bob.listSyncIssues("demo")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            detail: "Cannot process commit or proposal from former epoch",
+          }),
+        ]),
+      );
+
+      await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
+
+      await expect(
+        dave.acceptWelcome(daveInvitation.keyPackageReference, "demo"),
+      ).rejects.toThrow();
+
+      await alice.sendMessage("demo", "post-conflict hello");
+      const bobReceived = await bob.syncGroup("demo");
+
+      expect(bobReceived.map((message) => message.plaintext)).toEqual([
+        "post-conflict hello",
+      ]);
+
+      expect(carol.listGroups()).toHaveLength(1);
+      expect(dave.listGroups()).toEqual([]);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("records stale-epoch sync issues while still advancing fetch progress", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const dave = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol, dave);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+      await dave.generateKeyPackage("dave-main");
+      await bob.publishKeyPackage("bob-main");
+      await carol.publishKeyPackage("carol-main");
+      await dave.publishKeyPackage("dave-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+
+      await alice.addMember("demo", carol.stablePubkey);
+      await bob.addMember("demo", dave.stablePubkey);
+
+      const aliceBefore = alice.getGroup("demo").fetchCursor;
+      await alice.syncGroup("demo");
+      const aliceAfterFirst = alice.getGroup("demo").fetchCursor;
+      const aliceAfterSecond =
+        (await alice.syncGroup("demo"), alice.getGroup("demo").fetchCursor);
+
+      expect(alice.listSyncIssues("demo")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            detail: "Cannot process commit or proposal from former epoch",
+          }),
+        ]),
+      );
+      expect(aliceAfterFirst).toBeGreaterThan(aliceBefore);
+      expect(aliceAfterSecond).toBe(aliceAfterFirst);
     } finally {
       await server.transport.close();
     }
@@ -381,6 +643,7 @@ describe("CliSession", () => {
 
       await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
       const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
 
       await bob.fetchWelcomes();
       await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");

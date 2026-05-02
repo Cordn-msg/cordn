@@ -54,7 +54,7 @@ export type coordinatorClient = {
   ) => Promise<FetchGroupMessagesOutput>;
 };
 
-export class cvmCoordinatorClient implements coordinatorClient {
+export class cordnClient implements coordinatorClient {
   static readonly SERVER_PUBKEY =
     "24f092697f908abd8b950438ea01055b43d2cb84757474dca395c4be20329257";
   static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
@@ -79,12 +79,11 @@ export class cvmCoordinatorClient implements coordinatorClient {
     // Use options.signer if provided, otherwise create from resolved private key
     const signer = options.signer || new PrivateKeySigner(resolvedPrivateKey);
     // Use options.relays if provided, otherwise use class DEFAULT_RELAYS
-    const relays = options.relays || cvmCoordinatorClient.DEFAULT_RELAYS;
+    const relays = options.relays || cordnClient.DEFAULT_RELAYS;
     // Use options.relayHandler if provided, otherwise create from relays
     const relayHandler =
       options.relayHandler || new ApplesauceRelayPool(relays);
-    const serverPubkey =
-      options.serverPubkey ?? cvmCoordinatorClient.SERVER_PUBKEY;
+    const serverPubkey = options.serverPubkey ?? cordnClient.SERVER_PUBKEY;
     const { privateKey: _, serverPubkey: __, relays: ___, ...rest } = options;
 
     this.transport = new NostrClientTransport({
