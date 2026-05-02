@@ -44,3 +44,4 @@ coverage/
 # WASM build outputs (if any)
 **/*.wasm
 **/*.wat
+cordn.sqlite*

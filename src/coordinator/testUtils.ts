@@ -73,6 +73,30 @@ export function createEphemeralPubkey(): string {
   return getPublicKey(generateSecretKey());
 }
 
+export function createBytes(values: number[]): Uint8Array {
+  return Uint8Array.from(values);
+}
+
+export function createPrivateMessage(params: {
+  groupId?: string;
+  epoch: bigint;
+  contentType: 1 | 2 | 3;
+  bytes: number[];
+}): Uint8Array {
+  return encode(mlsMessageEncoder, {
+    version: 1,
+    wireformat: wireformats.mls_private_message,
+    privateMessage: {
+      groupId: encoder.encode(params.groupId ?? "group-local"),
+      epoch: params.epoch,
+      contentType: params.contentType,
+      authenticatedData: new Uint8Array(),
+      encryptedSenderData: new Uint8Array(),
+      ciphertext: Uint8Array.from(params.bytes),
+    },
+  });
+}
+
 export function createCredential(stablePubkey: string): Credential {
   return {
     credentialType: defaultCredentialTypes.basic,

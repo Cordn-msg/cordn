@@ -1,38 +1,16 @@
 import { describe, expect, test } from "vitest";
-import { encode, mlsMessageEncoder, wireformats } from "ts-mls";
+import { createGroup, unsafeTestingAuthenticationService } from "ts-mls";
 
 import { Coordinator } from "./coordinator.ts";
 import {
   createActor,
+  createBytes,
   createKeyPackageRef,
   createMemberArtifacts,
+  createPrivateMessage,
   createWelcomeForNewMember,
   getTestCiphersuite,
 } from "./testUtils.ts";
-import { createGroup, unsafeTestingAuthenticationService } from "ts-mls";
-
-function createBytes(values: number[]): Uint8Array {
-  return Uint8Array.from(values);
-}
-
-function createPrivateMessage(params: {
-  epoch: bigint;
-  contentType: 1 | 2 | 3;
-  bytes: number[];
-}): Uint8Array {
-  return encode(mlsMessageEncoder, {
-    version: 1,
-    wireformat: wireformats.mls_private_message,
-    privateMessage: {
-      groupId: new TextEncoder().encode("group-local"),
-      epoch: params.epoch,
-      contentType: params.contentType,
-      authenticatedData: new Uint8Array(),
-      encryptedSenderData: new Uint8Array(),
-      ciphertext: Uint8Array.from(params.bytes),
-    },
-  });
-}
 
 describe("Coordinator key package flow", () => {
   test("publishes, lists, consumes, and snapshots key packages in FIFO order", async () => {
@@ -290,5 +268,60 @@ describe("Coordinator group message flow", () => {
     ).toThrow("Rejected stale handshake message");
 
     expect(coordinator.getGroupRouting("unknown-group")).toBeNull();
+  });
+
+  test("keeps cursors monotonic per group across multiple groups", () => {
+    const coordinator = new Coordinator();
+
+    const alphaFirst = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice-alpha-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1, 2],
+      }),
+    });
+    const betaFirst = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "bob-beta-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-beta",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [3, 4],
+      }),
+    });
+    const alphaSecond = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "carol-alpha-2",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [5, 6],
+      }),
+    });
+
+    expect(alphaFirst.cursor).toBe(1);
+    expect(betaFirst.cursor).toBe(1);
+    expect(alphaSecond.cursor).toBe(2);
+    expect(
+      coordinator.fetchGroupMessages({
+        groupId: "group-alpha",
+        afterCursor: 1,
+      }),
+    ).toEqual([expect.objectContaining({ cursor: 2, groupId: "group-alpha" })]);
+    expect(
+      coordinator.fetchGroupMessages({ groupId: "group-beta", afterCursor: 1 }),
+    ).toEqual([]);
+    expect(coordinator.getGroupRouting("group-alpha")).toEqual({
+      groupId: "group-alpha",
+      latestHandshakeEpoch: 1n,
+      lastMessageCursor: 2,
+    });
+    expect(coordinator.getGroupRouting("group-beta")).toEqual({
+      groupId: "group-beta",
+      latestHandshakeEpoch: 1n,
+      lastMessageCursor: 1,
+    });
   });
 });

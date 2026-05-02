@@ -10,9 +10,6 @@ import {
   keyPackageDecoder,
   keyPackageEncoder,
   mlsMessageDecoder,
-  mlsMessageEncoder,
-  protocolVersions,
-  wireformats,
   type KeyPackage,
   type Welcome,
 } from "ts-mls";
@@ -35,27 +32,10 @@ import {
   storeWelcomeInputSchema,
   storeWelcomeOutputSchema,
 } from "../contracts/index.ts";
+import { decodeExact, decodeWelcome, encodeWelcome } from "../mlsCodec.ts";
 import { assertNonEmptyBase64, encodeBase64 } from "./base64.ts";
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
-
-type Decoder<T> = (
-  bytes: Uint8Array,
-  offset: number,
-) => [T, number] | undefined;
-// TODO: Duplicated function
-function decodeExact<T>(
-  bytes: Uint8Array,
-  decoder: Decoder<T>,
-  label: string,
-): T {
-  const decoded = decoder(bytes, 0);
-  if (!decoded || decoded[1] !== bytes.length) {
-    throw new Error(`Invalid ${label}`);
-  }
-
-  return decoded[0];
-}
 
 function decodeKeyPackageBase64(keyPackageBase64: string): KeyPackage {
   try {
@@ -71,30 +51,17 @@ function decodeKeyPackageBase64(keyPackageBase64: string): KeyPackage {
 
 function decodeWelcomeBase64(welcomeBase64: string): Welcome {
   try {
-    const message = decodeExact(
+    return decodeWelcome(
       assertNonEmptyBase64(welcomeBase64, "welcomeBase64"),
-      mlsMessageDecoder,
       "welcomeBase64",
     );
-
-    if (message.wireformat !== wireformats.mls_welcome) {
-      throw new Error("Invalid welcomeBase64");
-    }
-
-    return message.welcome;
   } catch {
     throw new Error("Invalid welcomeBase64");
   }
 }
 
 function encodeWelcomeBase64(welcome: Welcome): string {
-  return encodeBase64(
-    encode(mlsMessageEncoder, {
-      version: protocolVersions.mls10,
-      wireformat: wireformats.mls_welcome,
-      welcome,
-    }),
-  );
+  return encodeBase64(encodeWelcome(welcome));
 }
 
 function decodeOpaqueMessageBase64(opaqueMessageBase64: string): Uint8Array {
@@ -257,6 +224,7 @@ export function registerCoordinatorMethods(
   server: McpServer,
   adapter: CoordinatorAdapter,
 ): void {
+  // TODO: Store the entire key package publish event
   server.registerTool(
     CONTEXTVM_COORDINATOR_TOOLS.publishKeyPackage,
     {
@@ -278,7 +246,7 @@ export function registerCoordinatorMethods(
     },
     (input) => adapter.listAvailableKeyPackages(input),
   );
-
+  // TODO: Return the entire key package publish event
   server.registerTool(
     CONTEXTVM_COORDINATOR_TOOLS.consumeKeyPackage,
     {

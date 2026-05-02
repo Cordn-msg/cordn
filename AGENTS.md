@@ -14,6 +14,12 @@ Primary implementation areas:
 - [`src/cli/`](src/cli/) — terminal client and integration helpers
 - [`src/contracts/`](src/contracts/) — shared request/response contracts
 
+Coordinator contract notes:
+
+- Group delivery cursors are monotonic per group, never global across all groups.
+- [`fetchGroupMessages({ groupId, afterCursor })`](src/coordinator/coordinator.ts:160) must treat `afterCursor` as a cursor within that group only.
+- Keep storage backends behaviorally aligned; changes in [`src/coordinator/storage/inMemoryStorage.ts`](src/coordinator/storage/inMemoryStorage.ts) and [`src/coordinator/storage/sqliteStorage.ts`](src/coordinator/storage/sqliteStorage.ts) require parity coverage in [`src/coordinator/storage/storage.test.ts`](src/coordinator/storage/storage.test.ts).
+
 ## Setup commands
 
 - Install dependencies: `pnpm install`
@@ -35,7 +41,7 @@ Primary implementation areas:
 Environment notes for the server:
 
 - Optional `.env` and `.env.local` files are loaded by [`loadRuntimeEnv()`](src/server/main.ts:54)
-- Relevant variables include `CVM_MLS_SERVER_PRIVATE_KEY`, `CVM_MLS_RELAY_URLS`, `CVM_MLS_SERVER_NAME`, `CVM_MLS_SERVER_ABOUT`, `CVM_MLS_SERVER_WEBSITE`, and `CVM_MLS_ANNOUNCED`
+- Relevant variables include `CORDN_SERVER_PRIVATE_KEY`, `CORDN_RELAY_URLS`, `CORDN_SERVER_NAME`, `CORDN_SERVER_ABOUT`, `CORDN_SERVER_WEBSITE`, `CORDN_ANNOUNCED`, `CORDN_STORAGE_BACKEND`, and `CORDN_SQLITE_PATH`
 
 ## Testing instructions
 
@@ -77,6 +83,6 @@ Agent expectations:
 
 ## Troubleshooting notes
 
-- If the server fails at startup, verify relay URLs and `CVM_MLS_SERVER_PRIVATE_KEY`
+- If the server fails at startup, verify relay URLs and `CORDN_SERVER_PRIVATE_KEY`
 - If tests hang or become flaky, check integration-style tests under [`src/cli/`](src/cli/) and [`src/server/`](src/server/)
 - If imports fail at runtime, confirm explicit `.ts` extensions are preserved in source imports

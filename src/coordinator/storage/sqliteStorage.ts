@@ -1,15 +1,10 @@
 import Database from "better-sqlite3";
 import {
-  encode,
-  keyPackageDecoder,
-  keyPackageEncoder,
-  mlsMessageDecoder,
-  mlsMessageEncoder,
-  protocolVersions,
-  wireformats,
-  type KeyPackage,
-  type Welcome,
-} from "ts-mls";
+  decodeKeyPackage,
+  decodeWelcome,
+  encodeKeyPackage,
+  encodeWelcome,
+} from "../../mlsCodec.ts";
 
 import type {
   DeliveryServiceSnapshot,
@@ -59,44 +54,6 @@ interface GroupRoutingRow {
   last_message_cursor: number;
 }
 
-function decodeExact<T>(
-  bytes: Uint8Array,
-  decoder: (bytes: Uint8Array, offset: number) => [T, number] | undefined,
-  label: string,
-): T {
-  const decoded = decoder(bytes, 0);
-  if (!decoded || decoded[1] !== bytes.length) {
-    throw new Error(`Invalid persisted ${label}`);
-  }
-
-  return decoded[0];
-}
-
-function encodeKeyPackage(keyPackage: KeyPackage): Uint8Array {
-  return encode(keyPackageEncoder, keyPackage);
-}
-
-function decodeKeyPackage(bytes: Uint8Array): KeyPackage {
-  return decodeExact(bytes, keyPackageDecoder, "key package");
-}
-
-function encodeWelcome(welcome: Welcome): Uint8Array {
-  return encode(mlsMessageEncoder, {
-    version: protocolVersions.mls10,
-    wireformat: wireformats.mls_welcome,
-    welcome,
-  });
-}
-
-function decodeWelcome(bytes: Uint8Array): Welcome {
-  const message = decodeExact(bytes, mlsMessageDecoder, "welcome");
-  if (message.wireformat !== wireformats.mls_welcome) {
-    throw new Error("Invalid persisted welcome");
-  }
-
-  return message.welcome;
-}
-
 function toUint8Array(buffer: Buffer): Uint8Array {
   return Uint8Array.from(buffer);
 }
@@ -140,11 +97,11 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     GroupRoutingRow
   >;
   private readonly insertGroupMessageStatement: Database.Statement<
-    [string, string, Buffer, number]
+    [number, string, string, Buffer, number]
   >;
-  private readonly selectLastInsertCursorStatement: Database.Statement<
-    [],
-    { cursor: number | bigint }
+  private readonly selectGroupRoutingForCursorStatement: Database.Statement<
+    [string],
+    Pick<GroupRoutingRow, "last_message_cursor">
   >;
   private readonly fetchGroupMessagesStatement: Database.Statement<
     [string],
@@ -209,12 +166,16 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       );
 
       CREATE TABLE IF NOT EXISTS group_messages (
-        cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cursor INTEGER NOT NULL,
         group_id TEXT NOT NULL,
         ephemeral_sender_pubkey TEXT NOT NULL,
         opaque_message BLOB NOT NULL,
         created_at INTEGER NOT NULL
       );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_group_messages_group_cursor_unique
+      ON group_messages (group_id, cursor);
 
       CREATE INDEX IF NOT EXISTS idx_group_messages_group_cursor
       ON group_messages (group_id, cursor);
@@ -313,19 +274,24 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       LIMIT 1
     `);
     this.insertGroupMessageStatement = this.database.prepare<
-      [string, string, Buffer, number]
+      [number, string, string, Buffer, number]
     >(`
       INSERT INTO group_messages (
+        cursor,
         group_id,
         ephemeral_sender_pubkey,
         opaque_message,
         created_at
-      ) VALUES (?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?)
     `);
-    this.selectLastInsertCursorStatement = this.database.prepare<
-      [],
-      { cursor: number | bigint }
-    >("SELECT last_insert_rowid() AS cursor");
+    this.selectGroupRoutingForCursorStatement = this.database.prepare<
+      [string],
+      Pick<GroupRoutingRow, "last_message_cursor">
+    >(`
+      SELECT last_message_cursor
+      FROM group_routing
+      WHERE group_id = ?
+    `);
     this.fetchGroupMessagesStatement = this.database.prepare<
       [string],
       GroupMessageRow
@@ -390,18 +356,21 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
 
     this.appendGroupMessageTransaction = this.database.transaction(
       (params: AppendGroupMessageParams) => {
+        const routingRow = this.selectGroupRoutingForCursorStatement.get(
+          params.groupId,
+        );
+        const cursor = (routingRow?.last_message_cursor ?? 0) + 1;
+        if (!Number.isSafeInteger(cursor) || cursor <= 0) {
+          throw new Error("Unable to allocate per-group message cursor");
+        }
+
         this.insertGroupMessageStatement.run(
+          cursor,
           params.groupId,
           params.ephemeralSenderPubkey,
           Buffer.from(params.opaqueMessage),
           params.createdAt,
         );
-
-        const cursorRow = this.selectLastInsertCursorStatement.get();
-        const cursor = Number(cursorRow?.cursor ?? 0);
-        if (!Number.isSafeInteger(cursor) || cursor <= 0) {
-          throw new Error("Unable to allocate group message cursor");
-        }
 
         this.upsertGroupRoutingStatement.run(
           params.groupId,

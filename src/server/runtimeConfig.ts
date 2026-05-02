@@ -112,10 +112,10 @@ function readOptionalBooleanEnv(
 }
 
 function readRequiredSigner(env: NodeJS.ProcessEnv): PrivateKeySigner {
-  const privateKey = readOptionalStringEnv(env, "CVM_MLS_SERVER_PRIVATE_KEY");
+  const privateKey = readOptionalStringEnv(env, "CORDN_SERVER_PRIVATE_KEY");
   if (!privateKey) {
     throw new Error(
-      "Missing required environment variable: CVM_MLS_SERVER_PRIVATE_KEY",
+      "Missing required environment variable: CORDN_SERVER_PRIVATE_KEY",
     );
   }
 
@@ -123,7 +123,7 @@ function readRequiredSigner(env: NodeJS.ProcessEnv): PrivateKeySigner {
 }
 
 function readRelayUrls(env: NodeJS.ProcessEnv): string[] {
-  const configured = readOptionalStringEnv(env, "CVM_MLS_RELAY_URLS");
+  const configured = readOptionalStringEnv(env, "CORDN_RELAY_URLS");
   if (!configured) {
     return getDefaultRelayUrls();
   }
@@ -138,11 +138,11 @@ function readRelayUrls(env: NodeJS.ProcessEnv): string[] {
 
 function readStorageConfig(env: NodeJS.ProcessEnv): StorageConfig {
   const backendValue =
-    readOptionalStringEnv(env, "CVM_MLS_STORAGE_BACKEND") ?? "memory";
+    readOptionalStringEnv(env, "CORDN_STORAGE_BACKEND") ?? "memory";
 
   if (backendValue !== "memory" && backendValue !== "sqlite") {
     throw new Error(
-      "Invalid storage backend in CVM_MLS_STORAGE_BACKEND: expected 'memory' or 'sqlite'",
+      "Invalid storage backend in CORDN_STORAGE_BACKEND: expected 'memory' or 'sqlite'",
     );
   }
 
@@ -153,7 +153,7 @@ function readStorageConfig(env: NodeJS.ProcessEnv): StorageConfig {
   return {
     backend: "sqlite",
     sqlitePath:
-      readOptionalStringEnv(env, "CVM_MLS_SQLITE_PATH") ?? "./cordn.sqlite",
+      readOptionalStringEnv(env, "CORDN_SQLITE_PATH") ?? "./cordn.sqlite",
   };
 }
 
@@ -164,12 +164,11 @@ export function readServerRuntimeConfig(
     signer: readRequiredSigner(env),
     relayUrls: readRelayUrls(env),
     serverInfo: {
-      name: readOptionalStringEnv(env, "CVM_MLS_SERVER_NAME") ?? "cordn-server",
-      about: readOptionalStringEnv(env, "CVM_MLS_SERVER_ABOUT"),
-      website: readOptionalStringEnv(env, "CVM_MLS_SERVER_WEBSITE"),
+      name: readOptionalStringEnv(env, "CORDN_SERVER_NAME") ?? "cordn-server",
+      about: readOptionalStringEnv(env, "CORDN_SERVER_ABOUT"),
+      website: readOptionalStringEnv(env, "CORDN_SERVER_WEBSITE"),
     },
-    isAnnouncedServer:
-      readOptionalBooleanEnv(env, "CVM_MLS_ANNOUNCED") ?? false,
+    isAnnouncedServer: readOptionalBooleanEnv(env, "CORDN_ANNOUNCED") ?? false,
     storage: readStorageConfig(env),
   };
 }

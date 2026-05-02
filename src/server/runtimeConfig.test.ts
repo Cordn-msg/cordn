@@ -12,7 +12,7 @@ import {
 describe("readServerRuntimeConfig", () => {
   test("defaults to in-memory storage and server defaults", () => {
     const config = readServerRuntimeConfig({
-      CVM_MLS_SERVER_PRIVATE_KEY: "1".repeat(64),
+      CORDN_SERVER_PRIVATE_KEY: "1".repeat(64),
     });
 
     expect(config.storage).toEqual({ backend: "memory" });
@@ -23,12 +23,12 @@ describe("readServerRuntimeConfig", () => {
 
   test("reads sqlite storage configuration and comma-separated relays", () => {
     const config = readServerRuntimeConfig({
-      CVM_MLS_SERVER_PRIVATE_KEY: "2".repeat(64),
-      CVM_MLS_STORAGE_BACKEND: "sqlite",
-      CVM_MLS_SQLITE_PATH: "./data/cordn.sqlite",
-      CVM_MLS_RELAY_URLS: "wss://relay-a.example, wss://relay-b.example",
-      CVM_MLS_SERVER_NAME: "custom-cordn",
-      CVM_MLS_ANNOUNCED: "1",
+      CORDN_SERVER_PRIVATE_KEY: "2".repeat(64),
+      CORDN_STORAGE_BACKEND: "sqlite",
+      CORDN_SQLITE_PATH: "./data/cordn.sqlite",
+      CORDN_RELAY_URLS: "wss://relay-a.example, wss://relay-b.example",
+      CORDN_SERVER_NAME: "custom-cordn",
+      CORDN_ANNOUNCED: "1",
     });
 
     expect(config.storage).toEqual({
@@ -46,10 +46,10 @@ describe("readServerRuntimeConfig", () => {
   test("rejects invalid storage backend values", () => {
     expect(() =>
       readServerRuntimeConfig({
-        CVM_MLS_SERVER_PRIVATE_KEY: "3".repeat(64),
-        CVM_MLS_STORAGE_BACKEND: "postgres",
+        CORDN_SERVER_PRIVATE_KEY: "3".repeat(64),
+        CORDN_STORAGE_BACKEND: "postgres",
       }),
-    ).toThrowError("Invalid storage backend");
+    ).toThrow("Invalid storage backend");
   });
 });
 
