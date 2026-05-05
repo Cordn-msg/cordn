@@ -28,8 +28,11 @@ import {
   type ListAvailableKeyPackagesOutput,
   type PostGroupMessageOutput,
   type PublishKeyPackageOutput,
+  type RemoveKeyPackagesInput,
+  type RemoveKeyPackagesOutput,
   type StoreWelcomeInput,
   type StoreWelcomeOutput,
+  removeKeyPackagesOutputSchema,
 } from "../contracts/index.ts";
 
 export type coordinatorClient = {
@@ -42,6 +45,9 @@ export type coordinatorClient = {
   ConsumeKeyPackage: (
     input: ConsumeKeyPackageInput,
   ) => Promise<ConsumeKeyPackageOutput>;
+  RemoveKeyPackages: (
+    input: RemoveKeyPackagesInput,
+  ) => Promise<RemoveKeyPackagesOutput>;
   FetchPendingWelcomes: (
     args: FetchPendingWelcomesInput,
   ) => Promise<FetchPendingWelcomesOutput>;
@@ -150,6 +156,16 @@ export class cordnClient implements coordinatorClient {
       CONTEXTVM_COORDINATOR_TOOLS.consumeKeyPackage,
       input,
       consumeKeyPackageOutputSchema,
+    );
+  }
+
+  async RemoveKeyPackages(
+    input: RemoveKeyPackagesInput,
+  ): Promise<RemoveKeyPackagesOutput> {
+    return this.call(
+      CONTEXTVM_COORDINATOR_TOOLS.removeKeyPackages,
+      input,
+      removeKeyPackagesOutputSchema,
     );
   }
 

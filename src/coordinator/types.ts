@@ -4,6 +4,7 @@ export interface PublishedKeyPackageRecord {
   stablePubkey: string;
   keyPackage: KeyPackage;
   keyPackageRef: string;
+  isLastResort: boolean;
   publishedAt: number;
 }
 

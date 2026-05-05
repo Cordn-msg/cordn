@@ -4,6 +4,7 @@ export const CONTEXTVM_COORDINATOR_TOOLS = {
   publishKeyPackage: "publish_key_package",
   listAvailableKeyPackages: "list_available_key_packages",
   consumeKeyPackage: "consume_key_package",
+  removeKeyPackages: "remove_key_packages",
   fetchPendingWelcomes: "fetch_pending_welcomes",
   storeWelcome: "store_welcome",
   postGroupMessage: "post_group_message",
@@ -19,6 +20,7 @@ export const publishKeyPackageInputSchema = z.object({
 
 export const publishKeyPackageOutputSchema = z.object({
   keyPackageRef: z.string(),
+  isLastResort: z.boolean(),
   publishedAt: z.number(),
 });
 
@@ -30,6 +32,7 @@ export const consumedKeyPackageSchema = z.object({
   stablePubkey: z.string(),
   keyPackageRef: z.string(),
   keyPackageBase64: z.string(),
+  isLastResort: z.boolean(),
   publishedAt: z.number(),
 });
 
@@ -40,7 +43,16 @@ export const consumeKeyPackageOutputSchema = z.object({
 export const availableKeyPackageSchema = z.object({
   stablePubkey: z.string(),
   keyPackageRef: z.string(),
+  isLastResort: z.boolean(),
   publishedAt: z.number(),
+});
+
+export const removeKeyPackagesInputSchema = z.object({
+  keyPackageRefs: z.array(z.string().min(1)).min(1),
+});
+
+export const removeKeyPackagesOutputSchema = z.object({
+  removedKeyPackageRefs: z.array(z.string()),
 });
 
 export const listAvailableKeyPackagesInputSchema = emptyInputSchema;
@@ -114,6 +126,12 @@ export type ListAvailableKeyPackagesInput = z.infer<
 >;
 export type ListAvailableKeyPackagesOutput = z.infer<
   typeof listAvailableKeyPackagesOutputSchema
+>;
+export type RemoveKeyPackagesInput = z.infer<
+  typeof removeKeyPackagesInputSchema
+>;
+export type RemoveKeyPackagesOutput = z.infer<
+  typeof removeKeyPackagesOutputSchema
 >;
 export type FetchPendingWelcomesInput = z.infer<
   typeof fetchPendingWelcomesInputSchema

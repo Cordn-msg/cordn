@@ -29,6 +29,8 @@ import {
   postGroupMessageOutputSchema,
   publishKeyPackageInputSchema,
   publishKeyPackageOutputSchema,
+  removeKeyPackagesInputSchema,
+  removeKeyPackagesOutputSchema,
   storeWelcomeInputSchema,
   storeWelcomeOutputSchema,
 } from "../contracts/index.ts";
@@ -86,6 +88,20 @@ function requireClientPubkey(extra: ToolExtra): string {
   return clientPubkey;
 }
 
+function mapAvailableKeyPackage(record: {
+  stablePubkey: string;
+  keyPackageRef: string;
+  isLastResort: boolean;
+  publishedAt: number;
+}) {
+  return {
+    stablePubkey: record.stablePubkey,
+    keyPackageRef: record.keyPackageRef,
+    isLastResort: record.isLastResort,
+    publishedAt: record.publishedAt,
+  };
+}
+
 export class CoordinatorAdapter {
   private readonly coordinator: Coordinator;
 
@@ -107,6 +123,7 @@ export class CoordinatorAdapter {
       content: [],
       structuredContent: {
         keyPackageRef: record.keyPackageRef,
+        isLastResort: record.isLastResort,
         publishedAt: record.publishedAt,
       },
     };
@@ -125,6 +142,7 @@ export class CoordinatorAdapter {
               keyPackageBase64: encodeBase64(
                 encode(keyPackageEncoder, record.keyPackage),
               ),
+              isLastResort: record.isLastResort,
               publishedAt: record.publishedAt,
             }
           : null,
@@ -140,11 +158,38 @@ export class CoordinatorAdapter {
     return {
       content: [],
       structuredContent: {
-        keyPackages: records.map((record) => ({
-          stablePubkey: record.stablePubkey,
-          keyPackageRef: record.keyPackageRef,
-          publishedAt: record.publishedAt,
-        })),
+        keyPackages: records.map(mapAvailableKeyPackage),
+      },
+    };
+  }
+
+  removeKeyPackages(
+    input: z.infer<typeof removeKeyPackagesInputSchema>,
+    extra: ToolExtra,
+  ) {
+    const clientPubkey = requireClientPubkey(extra);
+    const records = input.keyPackageRefs.map((keyPackageRef) => {
+      const record = this.coordinator.getKeyPackage(keyPackageRef);
+      if (!record) {
+        throw new Error(`Unknown key package ref: ${keyPackageRef}`);
+      }
+
+      if (record.stablePubkey !== clientPubkey) {
+        throw new Error(`Unauthorized key package ref: ${keyPackageRef}`);
+      }
+
+      return record;
+    });
+
+    return {
+      content: [],
+      structuredContent: {
+        removedKeyPackageRefs: records.map((record) => {
+          return (
+            this.coordinator.removeKeyPackage(record.keyPackageRef)
+              ?.keyPackageRef ?? record.keyPackageRef
+          );
+        }),
       },
     };
   }
@@ -245,6 +290,17 @@ export function registerCoordinatorMethods(
       outputSchema: listAvailableKeyPackagesOutputSchema,
     },
     (input) => adapter.listAvailableKeyPackages(input),
+  );
+
+  server.registerTool(
+    CONTEXTVM_COORDINATOR_TOOLS.removeKeyPackages,
+    {
+      description:
+        "Remove published MLS key packages owned by the injected caller identity.",
+      inputSchema: removeKeyPackagesInputSchema,
+      outputSchema: removeKeyPackagesOutputSchema,
+    },
+    (input, extra) => adapter.removeKeyPackages(input, extra),
   );
   // TODO: Return the entire key package publish event
   server.registerTool(

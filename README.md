@@ -16,6 +16,9 @@ Minimal MLS delivery service coordinator and ContextVM server adapter implemente
 - Group message cursors are monotonic per group, not global across all groups.
 - [`fetchGroupMessages({ groupId, afterCursor })`](src/coordinator/coordinator.ts:160) interprets `afterCursor` relative to the specified group only.
 - Storage backends must preserve parity for this behavior, including [`InMemoryCoordinatorStorage`](src/coordinator/storage/inMemoryStorage.ts:38) and [`SqliteCoordinatorStorage`](src/coordinator/storage/sqliteStorage.ts:104).
+- [`cordn`](package.json) supports last-resort MLS KeyPackages, deriving `isLastResort` from the KeyPackage extension rather than trusting an out-of-band publish flag.
+- Stable-identity KeyPackage consumption prefers regular KeyPackages first and falls back to last-resort KeyPackages without consuming them.
+- The CLI [`gen-kp`](src/cli/replCommands.ts:188) command can generate and publish last-resort KeyPackages, and [`delete-kp`](src/cli/replCommands.ts:205) can explicitly remove published KeyPackages.
 
 ## Run the server
 

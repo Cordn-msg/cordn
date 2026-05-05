@@ -12,11 +12,6 @@ import type {
   CoordinatorStorage,
 } from "./storage.ts";
 
-interface KeyPackageQueue {
-  records: PublishedKeyPackageRecord[];
-  head: number;
-}
-
 interface GroupLog {
   nextCursor: number;
   routing: GroupRoutingRecord;
@@ -36,19 +31,19 @@ function createGroupLog(groupId: string, epoch: bigint): GroupLog {
 }
 
 export class InMemoryCoordinatorStorage implements CoordinatorStorage {
-  private readonly keyPackagesByIdentity = new Map<string, KeyPackageQueue>();
+  private readonly keyPackagesByIdentity = new Map<
+    string,
+    PublishedKeyPackageRecord[]
+  >();
   private readonly welcomesByIdentity = new Map<string, WelcomeQueueRecord[]>();
   private readonly groups = new Map<string, GroupLog>();
 
   publishKeyPackage(
     record: PublishedKeyPackageRecord,
   ): PublishedKeyPackageRecord {
-    const queue = this.keyPackagesByIdentity.get(record.stablePubkey) ?? {
-      records: [],
-      head: 0,
-    };
-    queue.records.push(record);
-    this.keyPackagesByIdentity.set(record.stablePubkey, queue);
+    const records = this.keyPackagesByIdentity.get(record.stablePubkey) ?? [];
+    records.push(record);
+    this.keyPackagesByIdentity.set(record.stablePubkey, records);
 
     return record;
   }
@@ -56,28 +51,43 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
   listKeyPackagesForIdentity(
     stablePubkey: string,
   ): PublishedKeyPackageRecord[] {
-    const queue = this.keyPackagesByIdentity.get(stablePubkey);
-    if (!queue) {
-      return [];
-    }
-
-    if (queue.head === 0) {
-      return queue.records;
-    }
-
-    return queue.records.slice(queue.head);
+    return this.keyPackagesByIdentity.get(stablePubkey) ?? [];
   }
 
   listAllKeyPackages(): PublishedKeyPackageRecord[] {
     const records: PublishedKeyPackageRecord[] = [];
 
-    for (const queue of this.keyPackagesByIdentity.values()) {
-      for (let index = queue.head; index < queue.records.length; index += 1) {
-        records.push(queue.records[index]!);
+    for (const keyPackages of this.keyPackagesByIdentity.values()) {
+      for (let index = 0; index < keyPackages.length; index += 1) {
+        records.push(keyPackages[index]!);
       }
     }
 
     return records;
+  }
+
+  getKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
+    const located = this.findKeyPackage(keyPackageRef);
+    if (located) {
+      return located.record;
+    }
+
+    return null;
+  }
+
+  removeKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
+    const located = this.findKeyPackage(keyPackageRef);
+    if (!located) {
+      return null;
+    }
+
+    const { stablePubkey, index, records } = located;
+    const [removed] = records.splice(index, 1);
+    if (records.length === 0) {
+      this.keyPackagesByIdentity.delete(stablePubkey);
+    }
+
+    return removed ?? null;
   }
 
   consumeKeyPackage(identifier: string): PublishedKeyPackageRecord | null {
@@ -155,8 +165,8 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   snapshot(): DeliveryServiceSnapshot {
     let publishedKeyPackages = 0;
-    for (const queue of this.keyPackagesByIdentity.values()) {
-      publishedKeyPackages += queue.records.length - queue.head;
+    for (const records of this.keyPackagesByIdentity.values()) {
+      publishedKeyPackages += records.length;
     }
 
     const pendingWelcomes = Array.from(this.welcomesByIdentity.values()).reduce(
@@ -182,48 +192,55 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
   private consumeKeyPackageByIdentity(
     stablePubkey: string,
   ): PublishedKeyPackageRecord | null {
-    const queue = this.keyPackagesByIdentity.get(stablePubkey);
-    if (!queue || queue.head >= queue.records.length) {
+    const records = this.keyPackagesByIdentity.get(stablePubkey);
+    if (!records || records.length === 0) {
       return null;
     }
 
-    const record = queue.records[queue.head] ?? null;
-    if (!record) {
-      return null;
+    const regular = records.find((record) => !record.isLastResort);
+    if (regular) {
+      return this.removeKeyPackage(regular.keyPackageRef);
     }
 
-    queue.head += 1;
-
-    if (queue.head >= queue.records.length) {
-      this.keyPackagesByIdentity.delete(stablePubkey);
-    }
-
-    return record;
+    return records.at(-1) ?? null;
   }
 
   private consumeKeyPackageByReference(
     keyPackageRef: string,
   ): PublishedKeyPackageRecord | null {
-    for (const [stablePubkey, queue] of this.keyPackagesByIdentity.entries()) {
-      for (let index = queue.head; index < queue.records.length; index += 1) {
-        const record = queue.records[index];
-        if (record?.keyPackageRef !== keyPackageRef) {
-          continue;
-        }
+    const record = this.getKeyPackage(keyPackageRef);
+    if (!record) {
+      return null;
+    }
 
-        if (index === queue.head) {
-          return this.consumeKeyPackageByIdentity(stablePubkey);
-        }
+    return record.isLastResort ? record : this.removeKeyPackage(keyPackageRef);
+  }
 
-        queue.records.splice(index, 1);
-        if (queue.head >= queue.records.length) {
-          this.keyPackagesByIdentity.delete(stablePubkey);
-        }
-
-        return record;
+  private findKeyPackage(keyPackageRef: string):
+    | {
+        stablePubkey: string;
+        index: number;
+        records: PublishedKeyPackageRecord[];
+        record: PublishedKeyPackageRecord;
+      }
+    | undefined {
+    for (const [
+      stablePubkey,
+      records,
+    ] of this.keyPackagesByIdentity.entries()) {
+      const index = records.findIndex(
+        (candidate) => candidate.keyPackageRef === keyPackageRef,
+      );
+      if (index >= 0) {
+        return {
+          stablePubkey,
+          index,
+          records,
+          record: records[index]!,
+        };
       }
     }
 
-    return null;
+    return undefined;
   }
 }

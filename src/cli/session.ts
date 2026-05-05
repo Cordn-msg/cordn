@@ -39,10 +39,7 @@ import {
   hasPendingEpochOperation,
   rejectPendingEpochOperations,
 } from "./pendingEpochOperations.ts";
-import {
-  MissingLocalKeyPackageForWelcomeError,
-  NoAvailableKeyPackageError,
-} from "./sessionErrors.ts";
+import { MissingLocalKeyPackageForWelcomeError } from "./sessionErrors.ts";
 import { CliSessionStore } from "./sessionStore.ts";
 export type {
   CliSessionOptions,
@@ -86,6 +83,7 @@ export class CliSession {
       alias: entry.alias,
       stablePubkey: this.stablePubkey,
       keyPackageRef: entry.keyPackageRef,
+      isLastResort: entry.isLastResort,
       publishedAt: entry.publishedAt,
       consumed: entry.consumed,
       supportsGroupMetadata: keyPackageSupportsCordnMetadata(entry.keyPackage),
@@ -113,31 +111,85 @@ export class CliSession {
     return this.store.getGroup(alias);
   }
 
-  async generateKeyPackage(alias?: string): Promise<StoredKeyPackage> {
+  async generateKeyPackage(
+    alias?: string,
+    options: { localOnly?: boolean; lastResort?: boolean } = {},
+  ): Promise<StoredKeyPackage> {
     const resolvedAlias = alias ?? `kp-${this.store.keyPackageCount + 1}`;
 
-    const generated = await createMemberArtifacts(this.stablePubkey);
+    const generated = await createMemberArtifacts(this.stablePubkey, {
+      lastResort: options.lastResort,
+    });
     const stored: StoredKeyPackage = {
       alias: resolvedAlias,
       keyPackage: generated.keyPackage,
       privateKeyPackage: generated.privateKeyPackage,
       keyPackageRef: generated.keyPackageRef,
       keyPackageBase64: generated.keyPackageBase64,
+      isLastResort: generated.isLastResort,
       consumed: false,
     };
 
     this.store.addKeyPackage(stored);
+
+    if (!options.localOnly) {
+      await this.publishKeyPackage(stored.alias);
+    }
+
     return stored;
   }
 
   async publishKeyPackage(alias: string): Promise<StoredKeyPackage> {
     const stored = this.requireKeyPackage(alias);
+    if (stored.publishedAt !== undefined) {
+      return stored;
+    }
+
     const result = await this.client.PublishKeyPackage({
       keyPackageRef: stored.keyPackageRef,
       keyPackageBase64: stored.keyPackageBase64,
     });
+    stored.isLastResort = result.isLastResort;
     stored.publishedAt = result.publishedAt;
     return stored;
+  }
+
+  async deleteKeyPackage(
+    aliasOrKeyPackageRef: string,
+    options: { localOnly?: boolean } = {},
+  ): Promise<{ keyPackageRef: string; removedLocal: boolean }> {
+    const byRef = this.store.findKeyPackageByRef(aliasOrKeyPackageRef);
+    const byAlias = byRef
+      ? undefined
+      : this.tryRequireKeyPackage(aliasOrKeyPackageRef);
+    const keyPackageRef =
+      byRef?.keyPackageRef ?? byAlias?.keyPackageRef ?? aliasOrKeyPackageRef;
+
+    let removedLocal = false;
+    if (byRef) {
+      this.store.deleteKeyPackageByRef(keyPackageRef);
+      removedLocal = true;
+    } else if (byAlias) {
+      this.store.deleteKeyPackage(aliasOrKeyPackageRef);
+      removedLocal = true;
+    }
+
+    if (!options.localOnly) {
+      if (!byRef && !byAlias) {
+        const available = await this.listAvailableKeyPackages();
+        const existsRemotely = available.some(
+          (entry) => entry.keyPackageRef === keyPackageRef,
+        );
+
+        if (!existsRemotely) {
+          throw new Error(`Unknown key package ref: ${keyPackageRef}`);
+        }
+      }
+
+      await this.client.RemoveKeyPackages({ keyPackageRefs: [keyPackageRef] });
+    }
+
+    return { keyPackageRef, removedLocal };
   }
 
   async createGroup(
@@ -146,11 +198,8 @@ export class CliSession {
   ): Promise<GroupSessionState> {
     const keyPackage = options.keyPackageAlias
       ? this.requireKeyPackage(options.keyPackageAlias)
-      : this.store.findUnconsumedKeyPackage();
-
-    if (!keyPackage) {
-      throw new NoAvailableKeyPackageError();
-    }
+      : (this.store.findUnconsumedKeyPackage() ??
+        (await this.generateKeyPackage(undefined, { localOnly: true })));
 
     const state = await createGroupState({
       groupId: options.groupId ?? crypto.randomUUID(),
@@ -211,6 +260,7 @@ export class CliSession {
     return keyPackages.map((entry) => ({
       stablePubkey: entry.stablePubkey,
       keyPackageRef: entry.keyPackageRef,
+      isLastResort: entry.isLastResort,
       publishedAt: entry.publishedAt,
       supportsGroupMetadata: true,
     }));
@@ -370,6 +420,14 @@ export class CliSession {
 
   private requireKeyPackage(alias: string): StoredKeyPackage {
     return this.store.getKeyPackage(alias);
+  }
+
+  private tryRequireKeyPackage(alias: string): StoredKeyPackage | undefined {
+    try {
+      return this.requireKeyPackage(alias);
+    } catch {
+      return undefined;
+    }
   }
 
   private deriveGroupId(state: ClientState): string {

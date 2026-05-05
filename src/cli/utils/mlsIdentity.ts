@@ -21,6 +21,10 @@ import {
   encodeBase64,
   getCliCiphersuite,
 } from "./mlsBase.ts";
+import {
+  ensureLastResortKeyPackageExtension,
+  isLastResortKeyPackage,
+} from "../../lastResortKeyPackage.ts";
 
 const encoder = new TextEncoder();
 
@@ -33,11 +37,15 @@ export function createCredential(stablePubkey: string): Credential {
   };
 }
 
-export async function createMemberArtifacts(stablePubkey: string): Promise<{
+export async function createMemberArtifacts(
+  stablePubkey: string,
+  options: { lastResort?: boolean } = {},
+): Promise<{
   keyPackage: KeyPackage;
   privateKeyPackage: PrivateKeyPackage;
   keyPackageRef: string;
   keyPackageBase64: string;
+  isLastResort: boolean;
 }> {
   const cipherSuite = await getCliCiphersuite();
   const capabilities: Capabilities = createCordnMetadataCapabilities();
@@ -45,6 +53,9 @@ export async function createMemberArtifacts(stablePubkey: string): Promise<{
     credential: createCredential(stablePubkey),
     cipherSuite,
     capabilities,
+    extensions: options.lastResort
+      ? ensureLastResortKeyPackageExtension([])
+      : undefined,
   });
 
   const keyPackageRef = bytesToHex(
@@ -58,6 +69,7 @@ export async function createMemberArtifacts(stablePubkey: string): Promise<{
     keyPackageBase64: encodeBase64(
       encode(keyPackageEncoder, generated.publicPackage),
     ),
+    isLastResort: isLastResortKeyPackage(generated.publicPackage),
   };
 }
 

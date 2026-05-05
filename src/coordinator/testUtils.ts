@@ -29,6 +29,7 @@ import {
   type Proposal,
   type Welcome,
 } from "ts-mls";
+import { ensureLastResortKeyPackageExtension } from "../lastResortKeyPackage.ts";
 
 export interface TestActor {
   name: string;
@@ -106,11 +107,15 @@ export function createCredential(stablePubkey: string): Credential {
 
 export async function createMemberArtifacts(
   actor: TestActor,
+  options: { lastResort?: boolean } = {},
 ): Promise<TestMemberArtifacts> {
   const cipherSuite = await getTestCiphersuite();
   const generated = await generateKeyPackage({
     credential: createCredential(actor.stablePubkey),
     cipherSuite,
+    extensions: options.lastResort
+      ? ensureLastResortKeyPackageExtension([])
+      : undefined,
   });
 
   return {

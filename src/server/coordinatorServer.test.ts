@@ -122,6 +122,52 @@ describe("CoordinatorAdapter", () => {
     );
   });
 
+  test("removes only caller-owned key packages", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-remove"));
+    const bob = await createMemberArtifacts(createActor("bob-remove"));
+
+    adapter.publishKeyPackage(
+      {
+        keyPackageRef: "kp-ref-alice-remove",
+        keyPackageBase64: encodeBase64(
+          encode(keyPackageEncoder, alice.keyPackage),
+        ),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
+    adapter.publishKeyPackage(
+      {
+        keyPackageRef: "kp-ref-bob-remove",
+        keyPackageBase64: encodeBase64(
+          encode(keyPackageEncoder, bob.keyPackage),
+        ),
+      },
+      createExtra(bob.actor.stablePubkey),
+    );
+
+    expect(
+      adapter.removeKeyPackages(
+        { keyPackageRefs: ["kp-ref-alice-remove"] },
+        createExtra(alice.actor.stablePubkey),
+      ).structuredContent.removedKeyPackageRefs,
+    ).toEqual(["kp-ref-alice-remove"]);
+    expect(coordinator.getKeyPackage("kp-ref-alice-remove")).toBeNull();
+    expect(() =>
+      adapter.removeKeyPackages(
+        { keyPackageRefs: ["kp-ref-bob-remove"] },
+        createExtra(alice.actor.stablePubkey),
+      ),
+    ).toThrow("Unauthorized key package ref: kp-ref-bob-remove");
+    expect(() =>
+      adapter.removeKeyPackages(
+        { keyPackageRefs: ["kp-ref-missing-remove"] },
+        createExtra(alice.actor.stablePubkey),
+      ),
+    ).toThrow("Unknown key package ref: kp-ref-missing-remove");
+  });
+
   test("rejects missing injected client pubkey on self-scoped operations", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);

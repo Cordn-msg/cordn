@@ -94,6 +94,40 @@ describe.each<StorageFixture>([
     });
   });
 
+  test("keeps last-resort key packages after consume and supports explicit remove", async () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+    const actor = createActor("alice-last-resort-storage");
+    const regular = await createMemberArtifacts(actor);
+    const lastResort = await createMemberArtifacts(actor, { lastResort: true });
+    const regularRef = await createKeyPackageRef(regular.keyPackage);
+    const lastResortRef = await createKeyPackageRef(lastResort.keyPackage);
+
+    coordinator.publishKeyPackage({
+      stablePubkey: actor.stablePubkey,
+      keyPackage: regular.keyPackage,
+      keyPackageRef: regularRef,
+    });
+    coordinator.publishKeyPackage({
+      stablePubkey: actor.stablePubkey,
+      keyPackage: lastResort.keyPackage,
+      keyPackageRef: lastResortRef,
+    });
+
+    expect(
+      coordinator.consumeKeyPackage(actor.stablePubkey)?.keyPackageRef,
+    ).toBe(regularRef);
+    expect(
+      coordinator.consumeKeyPackage(actor.stablePubkey)?.keyPackageRef,
+    ).toBe(lastResortRef);
+    expect(coordinator.getKeyPackage(lastResortRef)?.isLastResort).toBe(true);
+    expect(coordinator.removeKeyPackage(lastResortRef)?.keyPackageRef).toBe(
+      lastResortRef,
+    );
+    expect(coordinator.getKeyPackage(lastResortRef)).toBeNull();
+  });
+
   test("stores and drains queued welcomes per target identity", async () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());

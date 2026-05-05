@@ -29,12 +29,6 @@ export class UnknownKeyPackageAliasError extends CliSessionError {
   }
 }
 
-export class NoAvailableKeyPackageError extends CliSessionError {
-  constructor() {
-    super("No available local key package. Generate one first.");
-  }
-}
-
 export class UnknownWelcomeReferenceError extends CliSessionError {
   constructor(keyPackageReference: string) {
     super(`Unknown welcome key package reference: ${keyPackageReference}`);

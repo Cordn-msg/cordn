@@ -27,9 +27,11 @@ interface SqliteCoordinatorStorageOptions {
 }
 
 interface KeyPackageRow {
+  id?: number;
   stable_pubkey: string;
   key_package_ref: string;
   key_package_bytes: Buffer;
+  is_last_resort: number;
   published_at: number;
 }
 
@@ -62,7 +64,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   private readonly database: SqliteDatabase;
   private readonly ownsDatabase: boolean;
   private readonly publishKeyPackageStatement: Database.Statement<
-    [string, string, Buffer, number]
+    [string, string, Buffer, number, number]
   >;
   private readonly listKeyPackagesForIdentityStatement: Database.Statement<
     [string],
@@ -81,6 +83,10 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     KeyPackageRow & { id: number }
   >;
   private readonly deleteKeyPackageStatement: Database.Statement<[number]>;
+  private readonly getKeyPackageByRefStatement: Database.Statement<
+    [string],
+    KeyPackageRow
+  >;
   private readonly storeWelcomeStatement: Database.Statement<
     [string, string, Buffer, number]
   >;
@@ -142,6 +148,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         stable_pubkey TEXT NOT NULL,
         key_package_ref TEXT NOT NULL UNIQUE,
         key_package_bytes BLOB NOT NULL,
+        is_last_resort INTEGER NOT NULL,
         published_at INTEGER NOT NULL
       );
 
@@ -182,20 +189,21 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     `);
 
     this.publishKeyPackageStatement = this.database.prepare<
-      [string, string, Buffer, number]
+      [string, string, Buffer, number, number]
     >(`
       INSERT INTO key_packages (
         stable_pubkey,
         key_package_ref,
         key_package_bytes,
+        is_last_resort,
         published_at
-      ) VALUES (?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?)
     `);
     this.listKeyPackagesForIdentityStatement = this.database.prepare<
       [string],
       KeyPackageRow
     >(`
-      SELECT stable_pubkey, key_package_ref, key_package_bytes, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
       FROM key_packages
       WHERE stable_pubkey = ?
       ORDER BY id ASC
@@ -204,15 +212,24 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [],
       KeyPackageRow
     >(`
-      SELECT stable_pubkey, key_package_ref, key_package_bytes, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
       FROM key_packages
       ORDER BY id ASC
+    `);
+    this.getKeyPackageByRefStatement = this.database.prepare<
+      [string],
+      KeyPackageRow
+    >(`
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
+      FROM key_packages
+      WHERE key_package_ref = ?
+      LIMIT 1
     `);
     this.consumeKeyPackageByRefStatement = this.database.prepare<
       [string],
       KeyPackageRow & { id: number }
     >(`
-      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
       FROM key_packages
       WHERE key_package_ref = ?
       LIMIT 1
@@ -221,10 +238,10 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       KeyPackageRow & { id: number }
     >(`
-      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
       FROM key_packages
       WHERE stable_pubkey = ?
-      ORDER BY id ASC
+      ORDER BY is_last_resort ASC, CASE WHEN is_last_resort = 0 THEN id END ASC, CASE WHEN is_last_resort = 1 THEN id END DESC
       LIMIT 1
     `);
     this.deleteKeyPackageStatement = this.database.prepare<[number]>(
@@ -329,7 +346,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
           return null;
         }
 
-        this.deleteKeyPackageStatement.run(row.id);
+        if (!row.is_last_resort) {
+          this.deleteKeyPackageStatement.run(row.id);
+        }
         return row;
       },
     );
@@ -341,7 +360,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
           return null;
         }
 
-        this.deleteKeyPackageStatement.run(row.id);
+        if (!row.is_last_resort) {
+          this.deleteKeyPackageStatement.run(row.id);
+        }
         return row;
       },
     );
@@ -396,6 +417,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       record.stablePubkey,
       record.keyPackageRef,
       Buffer.from(encodeKeyPackage(record.keyPackage)),
+      record.isLastResort ? 1 : 0,
       record.publishedAt,
     );
 
@@ -412,6 +434,21 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   listAllKeyPackages(): PublishedKeyPackageRecord[] {
     const rows = this.listAllKeyPackagesStatement.all();
     return rows.map((row) => this.mapKeyPackageRow(row));
+  }
+
+  getKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
+    const row = this.getKeyPackageByRefStatement.get(keyPackageRef);
+    return row ? this.mapKeyPackageRow(row) : null;
+  }
+
+  removeKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
+    const row = this.getKeyPackageByRefStatement.get(keyPackageRef);
+    if (!row || row.id === undefined) {
+      return null;
+    }
+
+    this.deleteKeyPackageStatement.run(row.id);
+    return this.mapKeyPackageRow(row);
   }
 
   consumeKeyPackage(identifier: string): PublishedKeyPackageRecord | null {
@@ -490,6 +527,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       stablePubkey: row.stable_pubkey,
       keyPackageRef: row.key_package_ref,
       keyPackage: decodeKeyPackage(toUint8Array(row.key_package_bytes)),
+      isLastResort: row.is_last_resort === 1,
       publishedAt: row.published_at,
     };
   }

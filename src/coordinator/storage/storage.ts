@@ -42,6 +42,8 @@ export interface CoordinatorStorage {
   ): PublishedKeyPackageRecord;
   listKeyPackagesForIdentity(stablePubkey: string): PublishedKeyPackageRecord[];
   listAllKeyPackages(): PublishedKeyPackageRecord[];
+  getKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null;
+  removeKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null;
   consumeKeyPackage(identifier: string): PublishedKeyPackageRecord | null;
   storeWelcome(record: WelcomeQueueRecord): WelcomeQueueRecord;
   fetchPendingWelcomes(targetStablePubkey: string): WelcomeQueueRecord[];

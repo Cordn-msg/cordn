@@ -43,6 +43,12 @@ export class CliSessionStore {
     return keyPackage;
   }
 
+  deleteKeyPackage(alias: string): StoredKeyPackage {
+    const keyPackage = this.getKeyPackage(alias);
+    this.keyPackages.delete(alias);
+    return keyPackage;
+  }
+
   findUnconsumedKeyPackage(): StoredKeyPackage | undefined {
     for (const keyPackage of this.keyPackages.values()) {
       if (!keyPackage.consumed) {
@@ -58,6 +64,19 @@ export class CliSessionStore {
       if (candidate.keyPackageRef === keyPackageRef) {
         return candidate;
       }
+    }
+
+    return undefined;
+  }
+
+  deleteKeyPackageByRef(keyPackageRef: string): StoredKeyPackage | undefined {
+    for (const [alias, candidate] of this.keyPackages.entries()) {
+      if (candidate.keyPackageRef !== keyPackageRef) {
+        continue;
+      }
+
+      this.keyPackages.delete(alias);
+      return candidate;
     }
 
     return undefined;

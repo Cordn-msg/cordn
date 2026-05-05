@@ -37,7 +37,6 @@ describe("CliSession", () => {
 
       await alice.generateKeyPackage("alice-main");
       await bob.generateKeyPackage("bob-main");
-      await bob.publishKeyPackage("bob-main");
 
       await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
       const invitation = await alice.addMember("demo", bob.stablePubkey);
@@ -120,6 +119,71 @@ describe("CliSession", () => {
     }
   });
 
+  test("supports last-resort generation and explicit deletion", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice);
+
+      const generated = await alice.generateKeyPackage("alice-recovery", {
+        lastResort: true,
+      });
+
+      expect(generated.isLastResort).toBe(true);
+      expect(
+        (await alice.listAvailableKeyPackageSummaries()).some(
+          (entry) =>
+            entry.keyPackageRef === generated.keyPackageRef &&
+            entry.isLastResort === true,
+        ),
+      ).toBe(true);
+
+      await alice.deleteKeyPackage("alice-recovery");
+
+      expect(
+        (await alice.listAvailableKeyPackageSummaries()).some(
+          (entry) => entry.keyPackageRef === generated.keyPackageRef,
+        ),
+      ).toBe(false);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("reports accurate errors when deleting a non-existent key package ref", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice);
+
+      await expect(
+        alice.deleteKeyPackage("kp-ref-does-not-exist"),
+      ).rejects.toThrow("Unknown key package ref: kp-ref-does-not-exist");
+    } finally {
+      await server.transport.close();
+    }
+  });
+
   test("allows inviting by exact published key package ref", async () => {
     const relayHub = new MockRelayHub();
     const serverSigner = new PrivateKeySigner();
@@ -159,6 +223,34 @@ describe("CliSession", () => {
       expect(invitation.keyPackageReference).toBe(published.keyPackageRef);
       expect(synced).toHaveLength(1);
       expect(synced[0]?.plaintext).toBe("hello exact key package");
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("creates a group without requiring a pre-generated local key package", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice);
+
+      expect(alice.listKeyPackageSummaries()).toEqual([]);
+
+      const group = await alice.createGroup("demo");
+
+      expect(group.alias).toBe("demo");
+      expect(alice.listKeyPackageSummaries()).toHaveLength(1);
+      expect(alice.listKeyPackageSummaries()[0]?.publishedAt).toBeUndefined();
     } finally {
       await server.transport.close();
     }

@@ -110,6 +110,64 @@ describe("Coordinator key package flow", () => {
       coordinator.listAllKeyPackages().map((record) => record.keyPackageRef),
     ).toEqual([aliceRecord.keyPackageRef, bobRecord.keyPackageRef]);
   });
+
+  test("keeps last-resort key packages available on consume and explicit lookup", async () => {
+    const coordinator = new Coordinator();
+    const actor = createActor("alice-last-resort");
+    const regular = await createMemberArtifacts(actor);
+    const lastResort = await createMemberArtifacts(actor, { lastResort: true });
+    const regularRef = await createKeyPackageRef(regular.keyPackage);
+    const lastResortRef = await createKeyPackageRef(lastResort.keyPackage);
+
+    coordinator.publishKeyPackage({
+      stablePubkey: actor.stablePubkey,
+      keyPackage: regular.keyPackage,
+      keyPackageRef: regularRef,
+    });
+    coordinator.publishKeyPackage({
+      stablePubkey: actor.stablePubkey,
+      keyPackage: lastResort.keyPackage,
+      keyPackageRef: lastResortRef,
+    });
+
+    expect(
+      coordinator.consumeKeyPackage(actor.stablePubkey)?.keyPackageRef,
+    ).toBe(regularRef);
+
+    const consumedLastResort = coordinator.consumeKeyPackage(
+      actor.stablePubkey,
+    );
+    expect(consumedLastResort?.keyPackageRef).toBe(lastResortRef);
+    expect(consumedLastResort?.isLastResort).toBe(true);
+    expect(coordinator.consumeKeyPackage(lastResortRef)?.keyPackageRef).toBe(
+      lastResortRef,
+    );
+    expect(
+      coordinator
+        .listKeyPackagesForIdentity(actor.stablePubkey)
+        .map((record) => record.keyPackageRef),
+    ).toEqual([lastResortRef]);
+  });
+
+  test("removes a published key package by ref", async () => {
+    const coordinator = new Coordinator();
+    const alice = await createMemberArtifacts(createActor("alice-remove"));
+    const keyPackageRef = await createKeyPackageRef(alice.keyPackage);
+
+    coordinator.publishKeyPackage({
+      stablePubkey: alice.actor.stablePubkey,
+      keyPackage: alice.keyPackage,
+      keyPackageRef,
+    });
+
+    expect(coordinator.getKeyPackage(keyPackageRef)?.keyPackageRef).toBe(
+      keyPackageRef,
+    );
+    expect(coordinator.removeKeyPackage(keyPackageRef)?.keyPackageRef).toBe(
+      keyPackageRef,
+    );
+    expect(coordinator.getKeyPackage(keyPackageRef)).toBeNull();
+  });
 });
 
 describe("Coordinator welcome flow", () => {

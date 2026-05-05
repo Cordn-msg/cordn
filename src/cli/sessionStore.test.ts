@@ -20,6 +20,7 @@ function createKeyPackage(alias: string): StoredKeyPackage {
     privateKeyPackage: {} as StoredKeyPackage["privateKeyPackage"],
     keyPackageRef: `${alias}-ref`,
     keyPackageBase64: `${alias}-base64`,
+    isLastResort: false,
     consumed: false,
   };
 }

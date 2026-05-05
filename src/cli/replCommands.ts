@@ -27,7 +27,7 @@ export const knownCommands = new Set([
   "whoami",
   "gen-kp",
   "key-packages",
-  "publish-kp",
+  "delete-kp",
   "available-kps",
   "create-group",
   "groups",
@@ -161,6 +161,7 @@ export async function executeReplCommand(
 ): Promise<ReplCommandResult> {
   const { session, output } = context;
   let { selectedGroupAlias } = context;
+  const positionalArgs = args.filter((arg) => !arg.startsWith("--"));
 
   switch (command) {
     case "help": {
@@ -186,23 +187,33 @@ export async function executeReplCommand(
       break;
     }
     case "gen-kp": {
-      const result = await session.generateKeyPackage(args[0]);
+      const result = await session.generateKeyPackage(positionalArgs[0], {
+        localOnly: args.includes("--local-only"),
+        lastResort: args.includes("--last-resort"),
+      });
       output.write(
         `${colorize("generated", ansi.green)} ${result.alias} (${colorize(result.keyPackageRef, ansi.dim)})\n`,
       );
       break;
     }
+    case "kps":
     case "key-packages": {
       output.write(
         `${formatList(session.listKeyPackageSummaries().map((entry) => formatKeyPackageSummary(entry)))}\n`,
       );
       break;
     }
-    case "publish-kp": {
-      if (!args[0]) throw new CliUsageError("Usage: publish-kp <alias>");
-      const result = await session.publishKeyPackage(args[0]);
+    case "delete-kp": {
+      if (!args[0]) {
+        throw new CliUsageError(
+          "Usage: delete-kp <aliasOrKeyPackageRef> [--local-only]",
+        );
+      }
+      const result = await session.deleteKeyPackage(args[0], {
+        localOnly: args.includes("--local-only"),
+      });
       output.write(
-        `${colorize("published", ansi.green)} ${result.alias} at ${colorize(String(result.publishedAt), ansi.dim)}\n`,
+        `${colorize("deleted", ansi.green)} ${colorize(result.keyPackageRef, ansi.dim)}${result.removedLocal ? "" : " (remote only)"}\n`,
       );
       break;
     }

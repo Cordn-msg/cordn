@@ -115,6 +115,9 @@ export function formatKeyPackageSummary(summary: KeyPackageSummary): string {
     summary.alias ? `alias=${formatGroupAlias(summary.alias)}` : undefined,
     `owner=${formatFullCredentialLabel(summary.stablePubkey)}`,
     `ref=${formatKeyPackageRef(summary.keyPackageRef)}`,
+    summary.isLastResort === undefined
+      ? undefined
+      : `lastResort=${summary.isLastResort ? colorize("yes", ansi.green) : colorize("no", ansi.yellow)}`,
     summary.publishedAt === undefined
       ? `published=${colorize("no", ansi.yellow)}`
       : `published=${formatTimestamp(summary.publishedAt)}`,
@@ -175,21 +178,8 @@ export function formatChatHistory(
 export function formatSyncResult(
   session: CliSession,
   groupAlias: string,
-  messages: Awaited<ReturnType<CliSession["syncGroup"]>>,
+  _messages: Awaited<ReturnType<CliSession["syncGroup"]>>,
 ): string {
-  if (messages.length > 0) {
-    return formatList(
-      messages.map((message) =>
-        formatChatLine(
-          message.direction,
-          message.cursor,
-          message.sender,
-          message.plaintext,
-        ),
-      ),
-    );
-  }
-
   return formatChatHistory(session, groupAlias);
 }
 
@@ -200,9 +190,9 @@ export function printHelp(): void {
       "  help",
       "  status",
       "  whoami",
-      "  gen-kp [alias]",
-      "  key-packages",
-      "  publish-kp <alias>",
+      "  gen-kp [alias] [--last-resort] [--local-only]",
+      "  key-packages | kps",
+      "  delete-kp <aliasOrKeyPackageRef> [--local-only]",
       "  available-kps",
       "  create-group <alias> [keyPackageAlias] [--name <value>] [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
       "  groups",

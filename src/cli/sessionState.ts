@@ -23,6 +23,7 @@ export interface StoredKeyPackage {
   privateKeyPackage: PrivateKeyPackage;
   keyPackageRef: string;
   keyPackageBase64: string;
+  isLastResort: boolean;
   publishedAt?: number;
   consumed: boolean;
 }
@@ -31,6 +32,7 @@ export interface KeyPackageSummary {
   alias?: string;
   stablePubkey: string;
   keyPackageRef: string;
+  isLastResort?: boolean;
   publishedAt?: number;
   consumed?: boolean;
   supportsGroupMetadata: boolean;

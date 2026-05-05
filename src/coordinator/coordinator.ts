@@ -11,6 +11,7 @@ import type {
 } from "./types.ts";
 import type { CoordinatorStorage } from "./storage/storage.ts";
 import { InMemoryCoordinatorStorage } from "./storage/inMemoryStorage.ts";
+import { isLastResortKeyPackage } from "../lastResortKeyPackage.ts";
 
 import {
   contentTypes,
@@ -91,6 +92,7 @@ export class Coordinator {
       stablePubkey: input.stablePubkey,
       keyPackage: input.keyPackage,
       keyPackageRef: input.keyPackageRef,
+      isLastResort: isLastResortKeyPackage(input.keyPackage),
       publishedAt: this.now(),
     };
 
@@ -106,7 +108,15 @@ export class Coordinator {
   listAllKeyPackages(): PublishedKeyPackageRecord[] {
     return this.storage.listAllKeyPackages();
   }
-  // TODO: In a future iteration we should also consider last resort key packages
+
+  getKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
+    return this.storage.getKeyPackage(keyPackageRef);
+  }
+
+  removeKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
+    return this.storage.removeKeyPackage(keyPackageRef);
+  }
+
   consumeKeyPackage(identifier: string): PublishedKeyPackageRecord | null {
     return this.storage.consumeKeyPackage(identifier);
   }
