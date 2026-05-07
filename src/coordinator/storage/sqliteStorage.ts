@@ -33,6 +33,7 @@ interface KeyPackageRow {
   key_package_bytes: Buffer;
   is_last_resort: number;
   published_at: number;
+  publication_event_json: string;
 }
 
 interface WelcomeRow {
@@ -64,7 +65,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   private readonly database: SqliteDatabase;
   private readonly ownsDatabase: boolean;
   private readonly publishKeyPackageStatement: Database.Statement<
-    [string, string, Buffer, number, number]
+    [string, string, Buffer, number, number, string]
   >;
   private readonly listKeyPackagesForIdentityStatement: Database.Statement<
     [string],
@@ -149,7 +150,8 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         key_package_ref TEXT NOT NULL UNIQUE,
         key_package_bytes BLOB NOT NULL,
         is_last_resort INTEGER NOT NULL,
-        published_at INTEGER NOT NULL
+        published_at INTEGER NOT NULL,
+        publication_event_json TEXT NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_key_packages_identity_order
@@ -189,21 +191,22 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     `);
 
     this.publishKeyPackageStatement = this.database.prepare<
-      [string, string, Buffer, number, number]
+      [string, string, Buffer, number, number, string]
     >(`
       INSERT INTO key_packages (
         stable_pubkey,
         key_package_ref,
         key_package_bytes,
         is_last_resort,
-        published_at
-      ) VALUES (?, ?, ?, ?, ?)
+        published_at,
+        publication_event_json
+      ) VALUES (?, ?, ?, ?, ?, ?)
     `);
     this.listKeyPackagesForIdentityStatement = this.database.prepare<
       [string],
       KeyPackageRow
     >(`
-      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at, publication_event_json
       FROM key_packages
       WHERE stable_pubkey = ?
       ORDER BY id ASC
@@ -212,7 +215,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [],
       KeyPackageRow
     >(`
-      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at, publication_event_json
       FROM key_packages
       ORDER BY id ASC
     `);
@@ -220,7 +223,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       KeyPackageRow
     >(`
-      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at, publication_event_json
       FROM key_packages
       WHERE key_package_ref = ?
       LIMIT 1
@@ -229,7 +232,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       KeyPackageRow & { id: number }
     >(`
-      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at, publication_event_json
       FROM key_packages
       WHERE key_package_ref = ?
       LIMIT 1
@@ -238,7 +241,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       KeyPackageRow & { id: number }
     >(`
-      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at
+      SELECT id, stable_pubkey, key_package_ref, key_package_bytes, is_last_resort, published_at, publication_event_json
       FROM key_packages
       WHERE stable_pubkey = ?
       ORDER BY is_last_resort ASC, CASE WHEN is_last_resort = 0 THEN id END ASC, CASE WHEN is_last_resort = 1 THEN id END DESC
@@ -419,6 +422,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       Buffer.from(encodeKeyPackage(record.keyPackage)),
       record.isLastResort ? 1 : 0,
       record.publishedAt,
+      JSON.stringify(record.publicationEvent),
     );
 
     return record;
@@ -529,6 +533,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       keyPackage: decodeKeyPackage(toUint8Array(row.key_package_bytes)),
       isLastResort: row.is_last_resort === 1,
       publishedAt: row.published_at,
+      publicationEvent: JSON.parse(row.publication_event_json),
     };
   }
 

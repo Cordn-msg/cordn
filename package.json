@@ -26,16 +26,16 @@
     "@types/node": "^25.6.0",
     "prettier": "^3.8.3",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.17"
+    "vitest": "^4.1.5"
   },
   "dependencies": {
-    "@contextvm/sdk": "^0.9.0",
+    "@contextvm/sdk": "^0.10.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@noble/ciphers": "^2.2.0",
     "better-sqlite3": "^12.9.0",
     "commander": "^14.0.3",
     "nostr-tools": "^2.23.3",
-    "ts-mls": "^2.0.0-rc.10",
-    "zod": "^4.3.6"
+    "ts-mls": "2.0.0-rc.11",
+    "zod": "^4.4.3"
   }
 }

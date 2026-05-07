@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { finalizeEvent } from "nostr-tools/pure";
 import {
   createGroup,
   encode,
@@ -19,6 +20,28 @@ import {
 } from "../coordinator/testUtils.ts";
 import { CoordinatorAdapter } from "./coordinatorMethods.ts";
 import { encodeBase64 } from "./base64.ts";
+
+function createPublicationEvent(params: {
+  pubkey: string;
+  secretKey: Uint8Array;
+  keyPackageBase64: string;
+}) {
+  return finalizeEvent(
+    {
+      kind: 1111,
+      created_at: 1_700_000_000,
+      tags: [],
+      content: JSON.stringify({
+        params: {
+          arguments: {
+            keyPackageBase64: params.keyPackageBase64,
+          },
+        },
+      }),
+    },
+    params.secretKey,
+  );
+}
 
 function encodeWelcomeAsBase64(
   welcome: Parameters<typeof encodeWelcomeRecord>[0],
@@ -42,26 +65,40 @@ function encodeWelcomeRecord(
   });
 }
 
-function createExtra(clientPubkey?: string) {
+function createExtra(clientPubkey?: string, requestEventId?: string) {
   return {
-    _meta: clientPubkey ? { clientPubkey } : {},
+    _meta: clientPubkey
+      ? {
+          clientPubkey,
+          ...(requestEventId ? { requestEventId } : {}),
+        }
+      : {},
   } as never;
 }
 
 describe("CoordinatorAdapter", () => {
   test("maps injected client identity into self-scoped operations", async () => {
     const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
+    const publicationEvent = createPublicationEvent({
+      pubkey: alice.actor.stablePubkey,
+      secretKey: alice.actor.secretKey,
+      keyPackageBase64: encodeBase64(
+        encode(keyPackageEncoder, alice.keyPackage),
+      ),
+    });
+    const adapter = new CoordinatorAdapter(coordinator, (requestEventId) =>
+      requestEventId === publicationEvent.id ? publicationEvent : null,
+    );
 
-    const published = adapter.publishKeyPackage(
+    const published = await adapter.publishKeyPackage(
       {
         keyPackageRef: "kp-ref-alice",
         keyPackageBase64: encodeBase64(
           encode(keyPackageEncoder, alice.keyPackage),
         ),
       },
-      createExtra(alice.actor.stablePubkey),
+      createExtra(alice.actor.stablePubkey, publicationEvent.id),
     );
 
     expect(published.content).toEqual([]);
@@ -78,32 +115,65 @@ describe("CoordinatorAdapter", () => {
     expect(consumed.structuredContent.keyPackage?.keyPackageRef).toBe(
       "kp-ref-alice",
     );
+    expect(
+      consumed.structuredContent.keyPackage?.publicationEvent,
+    ).toMatchObject({
+      id: publicationEvent.id,
+      pubkey: publicationEvent.pubkey,
+      created_at: publicationEvent.created_at,
+      kind: publicationEvent.kind,
+      tags: publicationEvent.tags,
+      content: publicationEvent.content,
+      sig: publicationEvent.sig,
+    });
   });
 
   test("lists available key packages without consuming them", async () => {
     const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
     const bob = await createMemberArtifacts(createActor("bob"));
+    const aliceEvent = createPublicationEvent({
+      pubkey: alice.actor.stablePubkey,
+      secretKey: alice.actor.secretKey,
+      keyPackageBase64: encodeBase64(
+        encode(keyPackageEncoder, alice.keyPackage),
+      ),
+    });
+    const bobEvent = createPublicationEvent({
+      pubkey: bob.actor.stablePubkey,
+      secretKey: bob.actor.secretKey,
+      keyPackageBase64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
+    });
+    const adapter = new CoordinatorAdapter(coordinator, (requestEventId) => {
+      if (requestEventId === aliceEvent.id) {
+        return aliceEvent;
+      }
 
-    adapter.publishKeyPackage(
+      if (requestEventId === bobEvent.id) {
+        return bobEvent;
+      }
+
+      return null;
+    });
+
+    await adapter.publishKeyPackage(
       {
         keyPackageRef: "kp-ref-alice",
         keyPackageBase64: encodeBase64(
           encode(keyPackageEncoder, alice.keyPackage),
         ),
       },
-      createExtra(alice.actor.stablePubkey),
+      createExtra(alice.actor.stablePubkey, aliceEvent.id),
     );
 
-    adapter.publishKeyPackage(
+    await adapter.publishKeyPackage(
       {
         keyPackageRef: "kp-ref-bob",
         keyPackageBase64: encodeBase64(
           encode(keyPackageEncoder, bob.keyPackage),
         ),
       },
-      createExtra(bob.actor.stablePubkey),
+      createExtra(bob.actor.stablePubkey, bobEvent.id),
     );
 
     const listed = adapter.listAvailableKeyPackages({});
@@ -124,27 +194,49 @@ describe("CoordinatorAdapter", () => {
 
   test("removes only caller-owned key packages", async () => {
     const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice-remove"));
     const bob = await createMemberArtifacts(createActor("bob-remove"));
+    const aliceEvent = createPublicationEvent({
+      pubkey: alice.actor.stablePubkey,
+      secretKey: alice.actor.secretKey,
+      keyPackageBase64: encodeBase64(
+        encode(keyPackageEncoder, alice.keyPackage),
+      ),
+    });
+    const bobEvent = createPublicationEvent({
+      pubkey: bob.actor.stablePubkey,
+      secretKey: bob.actor.secretKey,
+      keyPackageBase64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
+    });
+    const adapter = new CoordinatorAdapter(coordinator, (requestEventId) => {
+      if (requestEventId === aliceEvent.id) {
+        return aliceEvent;
+      }
 
-    adapter.publishKeyPackage(
+      if (requestEventId === bobEvent.id) {
+        return bobEvent;
+      }
+
+      return null;
+    });
+
+    await adapter.publishKeyPackage(
       {
         keyPackageRef: "kp-ref-alice-remove",
         keyPackageBase64: encodeBase64(
           encode(keyPackageEncoder, alice.keyPackage),
         ),
       },
-      createExtra(alice.actor.stablePubkey),
+      createExtra(alice.actor.stablePubkey, aliceEvent.id),
     );
-    adapter.publishKeyPackage(
+    await adapter.publishKeyPackage(
       {
         keyPackageRef: "kp-ref-bob-remove",
         keyPackageBase64: encodeBase64(
           encode(keyPackageEncoder, bob.keyPackage),
         ),
       },
-      createExtra(bob.actor.stablePubkey),
+      createExtra(bob.actor.stablePubkey, bobEvent.id),
     );
 
     expect(
@@ -173,7 +265,7 @@ describe("CoordinatorAdapter", () => {
     const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
 
-    expect(() =>
+    await expect(
       adapter.publishKeyPackage(
         {
           keyPackageRef: "kp-ref-alice",
@@ -183,7 +275,7 @@ describe("CoordinatorAdapter", () => {
         },
         createExtra(),
       ),
-    ).toThrowError("Missing injected client pubkey");
+    ).rejects.toThrowError("Missing injected client pubkey");
   });
 
   test("rejects invalid base64 and malformed payloads", async () => {
@@ -191,7 +283,7 @@ describe("CoordinatorAdapter", () => {
     const adapter = new CoordinatorAdapter(coordinator);
     const alice = await createMemberArtifacts(createActor("alice"));
 
-    expect(() =>
+    await expect(
       adapter.publishKeyPackage(
         {
           keyPackageRef: "kp-ref-alice",
@@ -199,7 +291,7 @@ describe("CoordinatorAdapter", () => {
         },
         createExtra(alice.actor.stablePubkey),
       ),
-    ).toThrowError("Invalid keyPackageBase64");
+    ).rejects.toThrowError("Invalid keyPackageBase64");
 
     expect(() =>
       adapter.postGroupMessage(

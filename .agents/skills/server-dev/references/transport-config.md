@@ -10,6 +10,7 @@ interface NostrServerTransportOptions {
 
   // Optional - Server metadata
   serverInfo?: ServerInfo;
+  profileMetadata?: ProfileMetadata;
 
   // Optional - Discovery
   /** @deprecated Use isAnnouncedServer instead. */
@@ -27,6 +28,7 @@ interface NostrServerTransportOptions {
 
   // Optional - Features
   injectClientPubkey?: boolean;
+  injectRequestEventId?: boolean;
   encryptionMode?: EncryptionMode;
   logLevel?: LogLevel;
 }
@@ -42,6 +44,30 @@ interface ServerInfo {
   about?: string; // Description
 }
 ```
+
+## ProfileMetadata
+
+```typescript
+interface ProfileMetadata {
+  name?: string;
+  about?: string;
+  picture?: string;
+  banner?: string;
+  website?: string;
+  nip05?: string;
+  lud16?: string;
+  [key: string]: unknown;
+}
+```
+
+The `profileMetadata` object is serialized as JSON and published as a NIP-01 `kind:0` event. Publication is **opt-in** and only happens when `profileMetadata` is provided.
+
+Key behaviors:
+
+- `kind:0` publication is independent from `isAnnouncedServer`
+- A server can publish profile metadata even when it does **not** publish public announcement events
+- The profile event is sent through the same discoverability publication path as relay-list and announcement events
+- `bootstrapRelayUrls` also help distribute profile metadata in local or non-WebSocket relay environments
 
 ## CapabilityExclusion
 
@@ -111,6 +137,37 @@ isCapabilityExcluded: async (exclusion) => {
 - `publishRelayList` - TypeScript SDK option that publishes `kind:10002` relay-list metadata unless explicitly disabled
 - `relayListUrls` - Explicit relay URLs to advertise in the relay list
 - `bootstrapRelayUrls` - Extra relays where discoverability events are published without advertising them as operational relays
+- `profileMetadata` - Optional NIP-01 `kind:0` social profile metadata (CEP-23). Independent from `isAnnouncedServer`
+
+## CEP-15 Common Tool Schemas
+
+CEP-15 common tool schema publication is configured by decorating `NostrServerTransport` with `withCommonToolSchemas()`.
+
+```typescript
+const transport = withCommonToolSchemas(
+  new NostrServerTransport({
+    signer,
+    relayHandler: relayPool,
+    isAnnouncedServer: true,
+  }),
+  {
+    tools: [{ name: 'translate_text' }],
+  }
+);
+```
+
+Behavior:
+
+- computes a schema hash from the tool `name`, normalized `inputSchema`, and optional `outputSchema`
+- injects `_meta['io.contextvm/common-schema'].schemaHash` into `tools/list`
+- adds matching `i` and `k` tags to announced tools lists
+
+Constraints:
+
+- use this only for tools that intentionally match a shared public contract
+- tool `name` is part of the schema identity
+- `outputSchema` affects the hash when present
+- remote `$ref` values must be resolved before hashing
 
 ## LogLevel
 

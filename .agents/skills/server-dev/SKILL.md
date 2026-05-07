@@ -45,22 +45,24 @@ console.log('Server running on Nostr');
 
 ## NostrServerTransport Options
 
-| Option                 | Type                       | Description                                         |
-| ---------------------- | -------------------------- | --------------------------------------------------- |
-| `signer`               | `NostrSigner`              | Required. Signs all Nostr events                    |
-| `relayHandler`         | `RelayHandler \| string[]` | Required. Relay connection manager.                 |
-| `serverInfo`           | `ServerInfo`               | Optional. Metadata for announcements                |
-| `isAnnouncedServer`    | `boolean`                  | Publish server announcements. Default: `false`      |
-| `publishRelayList`     | `boolean`                  | Publish `kind:10002` relay-list metadata            |
-| `relayListUrls`        | `string[]`                 | Explicit relay URLs to advertise                    |
-| `bootstrapRelayUrls`   | `string[]`                 | Extra discoverability publication relays            |
-| `allowedPublicKeys`    | `string[]`                 | Whitelist client public keys                        |
-| `isPubkeyAllowed`      | `function`                 | Dynamic pubkey authorization callback               |
-| `excludedCapabilities` | `CapabilityExclusion[]`    | Bypass whitelist for specific methods               |
-| `isCapabilityExcluded` | `function`                 | Dynamic capability exclusion callback               |
-| `injectClientPubkey`   | `boolean`                  | Inject client pubkey into `_meta`. Default: `false` |
-| `encryptionMode`       | `EncryptionMode`           | `OPTIONAL`, `REQUIRED`, or `DISABLED`               |
-| `oversizedTransfer`    | `object`                   | CEP-22 oversized payload transfer configuration     |
+| Option                 | Type                       | Description                                                    |
+| ---------------------- | -------------------------- | -------------------------------------------------------------- |
+| `signer`               | `NostrSigner`              | Required. Signs all Nostr events                               |
+| `relayHandler`         | `RelayHandler \| string[]` | Required. Relay connection manager.                            |
+| `serverInfo`           | `ServerInfo`               | Optional. Metadata for announcements                           |
+| `profileMetadata`      | `ProfileMetadata`          | Optional. Nostr `kind:0` social profile (CEP-23)               |
+| `isAnnouncedServer`    | `boolean`                  | Publish server announcements. Default: `false`                 |
+| `publishRelayList`     | `boolean`                  | Publish `kind:10002` relay-list metadata                       |
+| `relayListUrls`        | `string[]`                 | Explicit relay URLs to advertise                               |
+| `bootstrapRelayUrls`   | `string[]`                 | Extra discoverability publication relays                       |
+| `allowedPublicKeys`    | `string[]`                 | Whitelist client public keys                                   |
+| `isPubkeyAllowed`      | `function`                 | Dynamic pubkey authorization callback                          |
+| `excludedCapabilities` | `CapabilityExclusion[]`    | Bypass whitelist for specific methods                          |
+| `isCapabilityExcluded` | `function`                 | Dynamic capability exclusion callback                          |
+| `injectClientPubkey`   | `boolean`                  | Inject client pubkey into `_meta`. Default: `false`            |
+| `injectRequestEventId` | `boolean`                  | Inject inbound request event ID into `_meta`. Default: `false` |
+| `encryptionMode`       | `EncryptionMode`           | `OPTIONAL`, `REQUIRED`, or `DISABLED`                          |
+| `oversizedTransfer`    | `object`                   | CEP-22 oversized payload transfer configuration                |
 
 ## Oversized Transfer
 
@@ -168,6 +170,29 @@ const transport = new NostrServerTransport({
 
 Publishes events on kinds 11316-11320 with your server's capabilities. In the TypeScript SDK, `publishRelayList` is independent from `isAnnouncedServer` and defaults to enabled, so relay-list metadata is published unless you explicitly opt out.
 
+## CEP-15 Common Tool Schemas
+
+If a tool is meant to implement a shared public contract, decorate the transport with `withCommonToolSchemas()` before connecting the server.
+
+```typescript
+const transport = withCommonToolSchemas(
+  new NostrServerTransport({
+    signer,
+    relayHandler: relayPool,
+    isAnnouncedServer: true,
+  }),
+  {
+    tools: [{ name: 'translate_text' }],
+  }
+);
+
+await server.connect(transport);
+```
+
+This makes the SDK publish `_meta['io.contextvm/common-schema'].schemaHash` in `tools/list` and matching `i`/`k` announcement tags for the opted-in tools.
+
+Use this only for tools that intentionally follow a shared CEP-15 schema. Tool `name` and `outputSchema` affect compatibility, and remote `$ref` values must be resolved before hashing.
+
 ### Relay-list publication strategy
 
 - CEP-17 is protocol-level and implementation-agnostic; the defaults below describe the TypeScript SDK behavior, not a protocol requirement
@@ -175,6 +200,38 @@ Publishes events on kinds 11316-11320 with your server's capabilities. In the Ty
 - Use `relayListUrls` only if you need to override the advertised relay list
 - Use `bootstrapRelayUrls` when you want broader discoverability publication without advertising those relays as operational endpoints
 - Set `publishRelayList: false` only if you intentionally want to disable CEP-17 relay-list publication
+
+## Server Profile Metadata (CEP-23)
+
+Publish a Nostr `kind:0` social profile alongside your server. This is opt-in and independent from `isAnnouncedServer`.
+
+`serverInfo` and `profileMetadata` serve different purposes:
+
+- **`serverInfo`** powers ContextVM discovery and initialize semantics
+- **`profileMetadata`** powers an optional Nostr social/profile identity via `kind:0`
+
+This separation matters because some servers want to be discoverable over ContextVM without maintaining a public social profile, while others want both.
+
+```typescript
+const transport = new NostrServerTransport({
+  signer,
+  relayHandler: relayPool,
+  isAnnouncedServer: true,
+  profileMetadata: {
+    name: 'My Awesome MCP Server',
+    about: 'Public MCP provider on Nostr',
+    picture: 'https://example.com/avatar.png',
+    website: 'https://example.com',
+    nip05: 'server@example.com',
+  },
+  serverInfo: {
+    name: 'My Awesome MCP Server',
+    website: 'https://example.com',
+  },
+});
+```
+
+A server can publish profile metadata even when it does **not** publish public announcement events. The profile event is sent through the same discoverability publication path as relay-list and announcement events, so `bootstrapRelayUrls` also help distribute profile metadata in local or non-WebSocket relay environments.
 
 ## Client Public Key Injection
 
@@ -192,6 +249,45 @@ server.registerTool("personalized", {...}, async (args, extra) => {
   const clientPubkey = extra._meta?.clientPubkey;
   // Use pubkey for personalization, rate limiting, etc.
 });
+```
+
+## Request Event ID Injection
+
+When `injectRequestEventId` is enabled, the inbound Nostr event ID is injected into `_meta.requestEventId`. Use `transport.getNostrRequestEvent()` inside a tool handler to retrieve the full signed Nostr event, including the sender's pubkey and all event metadata.
+
+```typescript
+const transport = new NostrServerTransport({
+  signer,
+  relayHandler: relayPool,
+  injectRequestEventId: true,
+});
+
+server.registerTool(
+  'whoami',
+  {
+    description: 'Returns the public key of the client that invoked this tool.',
+    inputSchema: {},
+  },
+  async (_args, extra) => {
+    const requestEventId = extra._meta?.requestEventId;
+    if (requestEventId) {
+      const requestEvent = transport.getNostrRequestEvent(requestEventId);
+      if (requestEvent) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Called by ${requestEvent.pubkey} at timestamp ${requestEvent.created_at}`,
+            },
+          ],
+        };
+      }
+    }
+    return {
+      content: [{ type: 'text', text: 'unknown caller' }],
+    };
+  }
+);
 ```
 
 ## Structured Outputs

@@ -4,11 +4,11 @@ import type {
   ServerNotification,
   ServerRequest,
 } from "@modelcontextprotocol/sdk/types.js";
+import { verifyEvent, type NostrEvent } from "nostr-tools";
 import type { z } from "zod";
 import {
-  encode,
+  isDefaultCredential,
   keyPackageDecoder,
-  keyPackageEncoder,
   mlsMessageDecoder,
   type KeyPackage,
   type Welcome,
@@ -38,6 +38,7 @@ import { decodeExact, decodeWelcome, encodeWelcome } from "../mlsCodec.ts";
 import { assertNonEmptyBase64, encodeBase64 } from "./base64.ts";
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
+export type ResolveRequestEvent = (requestEventId: string) => NostrEvent | null;
 
 function decodeKeyPackageBase64(keyPackageBase64: string): KeyPackage {
   try {
@@ -88,6 +89,51 @@ function requireClientPubkey(extra: ToolExtra): string {
   return clientPubkey;
 }
 
+function getRequestEventId(extra: ToolExtra): string | null {
+  const requestEventId = extra._meta?.requestEventId;
+  return typeof requestEventId === "string" && requestEventId.length > 0
+    ? requestEventId
+    : null;
+}
+
+function readStablePubkeyFromCredential(keyPackage: KeyPackage): string {
+  const credential = keyPackage.leafNode.credential;
+  if (
+    !isDefaultCredential(credential) ||
+    credential.credentialType !== 1 ||
+    !("identity" in credential)
+  ) {
+    throw new Error("Only BasicCredential key packages are supported");
+  }
+
+  return new TextDecoder().decode(credential.identity);
+}
+
+async function verifyPublishedKeyPackageBinding(params: {
+  clientPubkey: string;
+  publicationEvent: NostrEvent;
+  keyPackage: KeyPackage;
+}): Promise<string> {
+  if (!verifyEvent(params.publicationEvent)) {
+    throw new Error("Invalid publication event signature");
+  }
+
+  if (params.publicationEvent.pubkey !== params.clientPubkey) {
+    throw new Error(
+      "Publication event signer does not match injected client pubkey",
+    );
+  }
+
+  const stablePubkey = readStablePubkeyFromCredential(params.keyPackage);
+  if (stablePubkey !== params.publicationEvent.pubkey) {
+    throw new Error(
+      "Key package credential identity does not match publication event signer",
+    );
+  }
+
+  return stablePubkey;
+}
+
 function mapAvailableKeyPackage(record: {
   stablePubkey: string;
   keyPackageRef: string;
@@ -104,19 +150,41 @@ function mapAvailableKeyPackage(record: {
 
 export class CoordinatorAdapter {
   private readonly coordinator: Coordinator;
+  private readonly resolveRequestEvent?: ResolveRequestEvent;
 
-  constructor(coordinator: Coordinator) {
+  constructor(
+    coordinator: Coordinator,
+    resolveRequestEvent?: ResolveRequestEvent,
+  ) {
     this.coordinator = coordinator;
+    this.resolveRequestEvent = resolveRequestEvent;
   }
 
-  publishKeyPackage(
+  async publishKeyPackage(
     input: z.infer<typeof publishKeyPackageInputSchema>,
     extra: ToolExtra,
   ) {
+    const clientPubkey = requireClientPubkey(extra);
+    const keyPackage = decodeKeyPackageBase64(input.keyPackageBase64);
+    const requestEventId = getRequestEventId(extra);
+    const publicationEvent = requestEventId
+      ? this.resolveRequestEvent?.(requestEventId)
+      : undefined;
+    if (!publicationEvent) {
+      throw new Error("Missing publication event");
+    }
+
+    const stablePubkey = await verifyPublishedKeyPackageBinding({
+      clientPubkey,
+      publicationEvent,
+      keyPackage,
+    });
+
     const record = this.coordinator.publishKeyPackage({
-      stablePubkey: requireClientPubkey(extra),
+      stablePubkey,
       keyPackageRef: input.keyPackageRef,
-      keyPackage: decodeKeyPackageBase64(input.keyPackageBase64),
+      keyPackage,
+      publicationEvent,
     });
 
     return {
@@ -139,11 +207,9 @@ export class CoordinatorAdapter {
           ? {
               stablePubkey: record.stablePubkey,
               keyPackageRef: record.keyPackageRef,
-              keyPackageBase64: encodeBase64(
-                encode(keyPackageEncoder, record.keyPackage),
-              ),
               isLastResort: record.isLastResort,
               publishedAt: record.publishedAt,
+              publicationEvent: record.publicationEvent,
             }
           : null,
       },
@@ -278,7 +344,7 @@ export function registerCoordinatorMethods(
       inputSchema: publishKeyPackageInputSchema,
       outputSchema: publishKeyPackageOutputSchema,
     },
-    (input, extra) => adapter.publishKeyPackage(input, extra),
+    async (input, extra) => adapter.publishKeyPackage(input, extra),
   );
 
   server.registerTool(

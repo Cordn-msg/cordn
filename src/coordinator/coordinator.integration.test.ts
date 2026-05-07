@@ -13,6 +13,7 @@ import {
   createCommitMessageBytes,
   createEphemeralPubkey,
   createMemberArtifacts,
+  createSignedPublicationEvent,
   createProposalMessageBytes,
   createThreeActorGroupScenario,
   createWelcomeForNewMember,
@@ -34,12 +35,20 @@ describe("Coordinator integration flow", () => {
       stablePubkey: bob.actor.stablePubkey,
       keyPackage: scenario.bob.keyPackage,
       keyPackageRef: scenario.bobKeyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: bob.actor,
+        keyPackage: scenario.bob.keyPackage,
+      }),
     });
 
     const carolKeyPackage = coordinator.publishKeyPackage({
       stablePubkey: carol.actor.stablePubkey,
       keyPackage: scenario.carol.keyPackage,
       keyPackageRef: scenario.carolKeyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: carol.actor,
+        keyPackage: scenario.carol.keyPackage,
+      }),
     });
 
     expect(

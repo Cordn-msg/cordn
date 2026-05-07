@@ -10,6 +10,7 @@ import {
   createBytes,
   createKeyPackageRef,
   createMemberArtifacts,
+  createSignedPublicationEvent,
   createPrivateMessage,
   createWelcomeForNewMember,
   getTestCiphersuite,
@@ -61,17 +62,27 @@ describe.each<StorageFixture>([
     const firstKeyPackageRef = await createKeyPackageRef(alice.keyPackage);
     const second = await createMemberArtifacts(createActor("alice-unit-next"));
     const secondKeyPackageRef = await createKeyPackageRef(second.keyPackage);
+    const firstPublicationEvent = createSignedPublicationEvent({
+      actor: alice.actor,
+      keyPackage: alice.keyPackage,
+    });
+    const secondPublicationEvent = createSignedPublicationEvent({
+      actor: second.actor,
+      keyPackage: second.keyPackage,
+    });
 
     const firstRecord = coordinator.publishKeyPackage({
       stablePubkey,
       keyPackage: alice.keyPackage,
       keyPackageRef: firstKeyPackageRef,
+      publicationEvent: firstPublicationEvent,
     });
 
     const secondRecord = coordinator.publishKeyPackage({
       stablePubkey,
       keyPackage: second.keyPackage,
       keyPackageRef: secondKeyPackageRef,
+      publicationEvent: secondPublicationEvent,
     });
 
     expect(coordinator.listKeyPackagesForIdentity(stablePubkey)).toHaveLength(
@@ -108,11 +119,19 @@ describe.each<StorageFixture>([
       stablePubkey: actor.stablePubkey,
       keyPackage: regular.keyPackage,
       keyPackageRef: regularRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor,
+        keyPackage: regular.keyPackage,
+      }),
     });
     coordinator.publishKeyPackage({
       stablePubkey: actor.stablePubkey,
       keyPackage: lastResort.keyPackage,
       keyPackageRef: lastResortRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor,
+        keyPackage: lastResort.keyPackage,
+      }),
     });
 
     expect(

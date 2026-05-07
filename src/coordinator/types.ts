@@ -1,3 +1,4 @@
+import type { NostrEvent } from "nostr-tools";
 import type { KeyPackage, Welcome } from "ts-mls";
 
 export interface PublishedKeyPackageRecord {
@@ -6,6 +7,7 @@ export interface PublishedKeyPackageRecord {
   keyPackageRef: string;
   isLastResort: boolean;
   publishedAt: number;
+  publicationEvent: NostrEvent;
 }
 
 export interface WelcomeQueueRecord {
@@ -33,6 +35,7 @@ export interface PublishKeyPackageInput {
   stablePubkey: string;
   keyPackage: KeyPackage;
   keyPackageRef: string;
+  publicationEvent: NostrEvent;
 }
 
 export interface StoreWelcomeInput {

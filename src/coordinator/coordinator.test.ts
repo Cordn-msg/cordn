@@ -7,6 +7,7 @@ import {
   createBytes,
   createKeyPackageRef,
   createMemberArtifacts,
+  createSignedPublicationEvent,
   createPrivateMessage,
   createWelcomeForNewMember,
   getTestCiphersuite,
@@ -25,12 +26,20 @@ describe("Coordinator key package flow", () => {
       stablePubkey,
       keyPackage: alice.keyPackage,
       keyPackageRef: firstKeyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: alice.actor,
+        keyPackage: alice.keyPackage,
+      }),
     });
 
     const secondRecord = coordinator.publishKeyPackage({
       stablePubkey,
       keyPackage: second.keyPackage,
       keyPackageRef: secondKeyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: second.actor,
+        keyPackage: second.keyPackage,
+      }),
     });
 
     const listed = coordinator.listKeyPackagesForIdentity(stablePubkey);
@@ -69,12 +78,20 @@ describe("Coordinator key package flow", () => {
       stablePubkey,
       keyPackage: alice.keyPackage,
       keyPackageRef: firstKeyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: alice.actor,
+        keyPackage: alice.keyPackage,
+      }),
     });
 
     coordinator.publishKeyPackage({
       stablePubkey,
       keyPackage: second.keyPackage,
       keyPackageRef: secondKeyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: second.actor,
+        keyPackage: second.keyPackage,
+      }),
     });
 
     const consumed = coordinator.consumeKeyPackage(secondKeyPackageRef);
@@ -98,12 +115,20 @@ describe("Coordinator key package flow", () => {
       stablePubkey: alice.actor.stablePubkey,
       keyPackage: alice.keyPackage,
       keyPackageRef: aliceKeyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: alice.actor,
+        keyPackage: alice.keyPackage,
+      }),
     });
 
     const bobRecord = coordinator.publishKeyPackage({
       stablePubkey: bob.actor.stablePubkey,
       keyPackage: bob.keyPackage,
       keyPackageRef: bobKeyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: bob.actor,
+        keyPackage: bob.keyPackage,
+      }),
     });
 
     expect(
@@ -123,11 +148,19 @@ describe("Coordinator key package flow", () => {
       stablePubkey: actor.stablePubkey,
       keyPackage: regular.keyPackage,
       keyPackageRef: regularRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor,
+        keyPackage: regular.keyPackage,
+      }),
     });
     coordinator.publishKeyPackage({
       stablePubkey: actor.stablePubkey,
       keyPackage: lastResort.keyPackage,
       keyPackageRef: lastResortRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor,
+        keyPackage: lastResort.keyPackage,
+      }),
     });
 
     expect(
@@ -158,6 +191,10 @@ describe("Coordinator key package flow", () => {
       stablePubkey: alice.actor.stablePubkey,
       keyPackage: alice.keyPackage,
       keyPackageRef,
+      publicationEvent: createSignedPublicationEvent({
+        actor: alice.actor,
+        keyPackage: alice.keyPackage,
+      }),
     });
 
     expect(coordinator.getKeyPackage(keyPackageRef)?.keyPackageRef).toBe(

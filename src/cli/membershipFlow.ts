@@ -1,4 +1,4 @@
-import { decode, keyPackageDecoder, type ClientState } from "ts-mls";
+import { type ClientState } from "ts-mls";
 
 import type { PendingAddMemberOperation } from "./pendingEpochOperations.ts";
 import type {
@@ -6,7 +6,6 @@ import type {
   StoredKeyPackage,
   StoredWelcome,
 } from "./sessionState.ts";
-import { decodeBase64 } from "./utils/mlsBase.ts";
 import {
   decodeWelcomeBase64,
   encodeWelcomeBase64,
@@ -19,6 +18,8 @@ import {
   InvalidConsumedKeyPackageError,
   NoPublishedKeyPackageError,
 } from "./sessionErrors.ts";
+import { parseConsumedKeyPackage } from "./utils/publishedKeyPackage.ts";
+import type { NostrEvent } from "nostr-tools";
 
 export interface PreparedAddMemberResult {
   keyPackageReference: string;
@@ -32,9 +33,9 @@ export async function prepareAddMember(params: {
   identifier: string;
   consumeKeyPackage: (params: { identifier: string }) => Promise<{
     keyPackage: {
-      keyPackageBase64: string;
       keyPackageRef: string;
       stablePubkey: string;
+      publicationEvent: NostrEvent;
     } | null;
   }>;
   deriveGroupId: (state: ClientState) => string;
@@ -47,9 +48,8 @@ export async function prepareAddMember(params: {
     throw new NoPublishedKeyPackageError(params.identifier);
   }
 
-  const memberKeyPackage = decode(
-    keyPackageDecoder,
-    decodeBase64(consumeResult.keyPackage.keyPackageBase64),
+  const memberKeyPackage = await parseConsumedKeyPackage(
+    consumeResult.keyPackage,
   );
 
   if (!memberKeyPackage) {

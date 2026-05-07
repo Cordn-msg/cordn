@@ -1,5 +1,15 @@
 import { z } from "zod";
 
+export const nostrEventSchema = z.object({
+  id: z.string().min(1),
+  pubkey: z.string().min(1),
+  created_at: z.number(),
+  kind: z.number(),
+  tags: z.array(z.array(z.string())),
+  content: z.string(),
+  sig: z.string().min(1),
+});
+
 export const CONTEXTVM_COORDINATOR_TOOLS = {
   publishKeyPackage: "publish_key_package",
   listAvailableKeyPackages: "list_available_key_packages",
@@ -31,9 +41,9 @@ export const consumeKeyPackageInputSchema = z.object({
 export const consumedKeyPackageSchema = z.object({
   stablePubkey: z.string(),
   keyPackageRef: z.string(),
-  keyPackageBase64: z.string(),
   isLastResort: z.boolean(),
   publishedAt: z.number(),
+  publicationEvent: nostrEventSchema,
 });
 
 export const consumeKeyPackageOutputSchema = z.object({

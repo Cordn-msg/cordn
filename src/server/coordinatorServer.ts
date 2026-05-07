@@ -3,10 +3,10 @@ import {
   NostrServerTransport,
   type NostrServerTransportOptions,
 } from "@contextvm/sdk";
-
 import { createCoordinator, Coordinator } from "../coordinator/coordinator.ts";
 import {
   CoordinatorAdapter,
+  type ResolveRequestEvent,
   registerCoordinatorMethods,
 } from "./coordinatorMethods.ts";
 
@@ -16,13 +16,16 @@ export function getDefaultRelayUrls(): string[] {
   return [...DEFAULT_RELAY_URLS];
 }
 
-export function createServer(coordinator?: Coordinator): {
+export function createServer(
+  coordinator?: Coordinator,
+  resolveRequestEvent?: ResolveRequestEvent,
+): {
   coordinator: Coordinator;
   adapter: CoordinatorAdapter;
   server: McpServer;
 } {
   const _coordinator = coordinator ?? createCoordinator();
-  const adapter = new CoordinatorAdapter(_coordinator);
+  const adapter = new CoordinatorAdapter(_coordinator, resolveRequestEvent);
   const server = new McpServer({
     name: "cordn-server",
     version: "0.1.0",
@@ -40,19 +43,27 @@ export async function connectServer(
     transport: NostrServerTransport;
   }
 > {
-  const instance = createServer(params.coordinator);
   const transport = new NostrServerTransport({
     signer: params.signer,
     relayHandler: params.relayHandler ?? getDefaultRelayUrls(),
     serverInfo: params.serverInfo,
     isAnnouncedServer: params.isAnnouncedServer ?? false,
     injectClientPubkey: true,
+    injectRequestEventId: true,
     oversizedTransfer: {
       enabled: true,
     },
   });
 
-  await instance.server.connect(transport);
+  const resolveRequestEvent: ResolveRequestEvent = (requestEventId) => {
+    return transport.getNostrRequestEvent(requestEventId) ?? null;
+  };
+  const instanceWithResolver = createServer(
+    params.coordinator,
+    resolveRequestEvent,
+  );
 
-  return { ...instance, transport };
+  await instanceWithResolver.server.connect(transport);
+
+  return { ...instanceWithResolver, transport };
 }

@@ -94,6 +94,7 @@ export class Coordinator {
       keyPackageRef: input.keyPackageRef,
       isLastResort: isLastResortKeyPackage(input.keyPackage),
       publishedAt: this.now(),
+      publicationEvent: input.publicationEvent,
     };
 
     return this.storage.publishKeyPackage(record);

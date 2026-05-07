@@ -1,4 +1,9 @@
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import {
+  finalizeEvent,
+  generateSecretKey,
+  getPublicKey,
+  type NostrEvent,
+} from "nostr-tools/pure";
 import { bytesToHex } from "nostr-tools/utils";
 import {
   createCommit,
@@ -16,6 +21,7 @@ import {
   defaultProposalTypes,
   joinGroup,
   encode,
+  keyPackageEncoder,
   mlsMessageDecoder,
   mlsMessageEncoder,
   wireformats,
@@ -30,6 +36,7 @@ import {
   type Welcome,
 } from "ts-mls";
 import { ensureLastResortKeyPackageExtension } from "../lastResortKeyPackage.ts";
+import { encodeBase64 } from "../server/base64.ts";
 
 export interface TestActor {
   name: string;
@@ -130,6 +137,23 @@ export async function createKeyPackageRef(
 ): Promise<string> {
   const cipherSuite = await getTestCiphersuite();
   return bytesToHex(await makeKeyPackageRef(keyPackage, cipherSuite.hash));
+}
+
+export function createSignedPublicationEvent(params: {
+  actor: TestActor;
+  keyPackage: KeyPackage;
+  createdAt?: number;
+  kind?: number;
+}): NostrEvent {
+  return finalizeEvent(
+    {
+      kind: params.kind ?? 1111,
+      created_at: params.createdAt ?? 1_700_000_000,
+      tags: [],
+      content: encodeBase64(encode(keyPackageEncoder, params.keyPackage)),
+    },
+    params.actor.secretKey,
+  );
 }
 
 export async function createWelcomeForNewMember(params: {
