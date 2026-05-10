@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@contextvm/sdk':
-        specifier: ^0.11.2
-        version: 0.11.2(typescript@5.9.3)
+        specifier: ^0.11.6
+        version: 0.11.6(typescript@5.9.3)
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -51,8 +51,8 @@ importers:
 
 packages:
 
-  '@contextvm/sdk@0.11.2':
-    resolution: {integrity: sha512-cJzl8b0CvJWnVblpD7+ZHsOe/WuS2v5E8nYmCCeINaZnpex4AkqeCC+BzwBze2tcKBn28xERUnJ1Ve7FLQpvlg==}
+  '@contextvm/sdk@0.11.6':
+    resolution: {integrity: sha512-b1f8m5Pw7+MUTYg0qSULL0A2PO0P06O2miRwSlkzpsRq+XbtAcHjSMHECxvyboEz+GD1C5eykf4WknbrzGMgrA==}
     engines: {bun: '>=1.2.0'}
     peerDependencies:
       typescript: ^5.9.3
@@ -1178,7 +1178,7 @@ packages:
 
 snapshots:
 
-  '@contextvm/sdk@0.11.2(typescript@5.9.3)':
+  '@contextvm/sdk@0.11.6(typescript@5.9.3)':
     dependencies:
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@noble/hashes': 2.2.0

@@ -99,4 +99,36 @@ describe("ingestGroupMessages", () => {
     expect(group.fetchCursor).toBe(4);
     expect(group.lastCursor).toBe(4);
   });
+
+  test("records stale-generation issues and advances fetch progress", async () => {
+    const group = createGroupState();
+
+    processMessageBase64.mockRejectedValueOnce(
+      new Error("Desired gen in the past"),
+    );
+
+    const result = await ingestGroupMessages({
+      group,
+      messages: [
+        {
+          cursor: 9,
+          createdAt: 90,
+          opaqueMessageBase64: "late-private-message",
+        },
+      ],
+      hasPendingEpochOperation: () => false,
+    });
+
+    expect(result.issues).toEqual([
+      {
+        cursor: 9,
+        createdAt: 90,
+        detail: "Desired gen in the past",
+      },
+    ]);
+    expect(result.received).toEqual([]);
+    expect(result.reconciled).toEqual([]);
+    expect(group.fetchCursor).toBe(9);
+    expect(group.lastCursor).toBe(9);
+  });
 });

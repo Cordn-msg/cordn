@@ -28,6 +28,10 @@ function isFormerEpochIssue(detail: string): boolean {
   );
 }
 
+function isStaleGenerationIssue(detail: string): boolean {
+  return detail === "Desired gen in the past";
+}
+
 export async function ingestGroupMessages(params: {
   group: GroupSessionState;
   messages: RawGroupMessage[];
@@ -80,7 +84,7 @@ export async function ingestGroupMessages(params: {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
 
-      if (isFormerEpochIssue(detail)) {
+      if (isFormerEpochIssue(detail) || isStaleGenerationIssue(detail)) {
         group.fetchCursor = message.cursor;
         group.lastCursor = Math.max(group.lastCursor, message.cursor);
         const issue = {

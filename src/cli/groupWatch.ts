@@ -22,6 +22,7 @@ export function runGroupWatch(params: {
   const { client, groupId, getAfterCursor, fetchMessages, callbacks } = params;
 
   let abort: (reason?: string) => Promise<void> = async () => undefined;
+  let expectedAbortReason: string | undefined;
   const task = (async () => {
     callbacks.onConnecting();
 
@@ -36,13 +37,26 @@ export function runGroupWatch(params: {
     void subscription.result.catch(() => undefined);
 
     abort = async (reason?: string) => {
+      expectedAbortReason = reason;
       await subscription.abort(reason).catch(() => undefined);
     };
 
     callbacks.onWatching();
 
-    for await (const message of subscription.stream) {
-      await callbacks.onMessages([message]);
+    try {
+      for await (const message of subscription.stream) {
+        await callbacks.onMessages([message]);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (
+        expectedAbortReason !== undefined &&
+        detail === `Open stream aborted: ${expectedAbortReason}`
+      ) {
+        return;
+      }
+
+      throw error;
     }
   })();
 

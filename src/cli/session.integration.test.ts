@@ -786,6 +786,112 @@ describe("CliSession", () => {
     }
   });
 
+  test("returns watched groups to idle on explicit unwatch without emitting errored", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      const statusEvents: Array<{ watchStatus: string; error?: string }> = [];
+      const unsubscribe = bob.onWatchEvent((event) => {
+        statusEvents.push({
+          watchStatus: event.watchStatus,
+          error: event.error,
+        });
+      });
+
+      try {
+        await bob.watchGroup("demo");
+        await waitForCondition(() => bob.getWatchStatus("demo") === "watching");
+
+        await bob.unwatchGroup("demo");
+
+        expect(bob.getWatchStatus("demo")).toBe("idle");
+        expect(statusEvents.map((event) => event.watchStatus)).toContain(
+          "idle",
+        );
+        expect(
+          statusEvents.find((event) => event.watchStatus === "errored"),
+        ).toBeUndefined();
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("disconnect tears down active watches cleanly", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await bob.watchGroup("demo");
+      await waitForCondition(() => bob.getWatchStatus("demo") === "watching");
+
+      await expect(bob.disconnect()).resolves.toBeUndefined();
+      expect(bob.getWatchStatus("demo")).toBe("idle");
+
+      const index = sessions.indexOf(bob);
+      if (index >= 0) {
+        sessions.splice(index, 1);
+      }
+    } finally {
+      await server.transport.close();
+    }
+  });
+
   test("emits semantic group events for watch status and message ingestion", async () => {
     const relayHub = new MockRelayHub();
     const serverSigner = new PrivateKeySigner();

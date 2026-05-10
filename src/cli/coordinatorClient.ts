@@ -75,8 +75,8 @@ export type coordinatorClient = {
 export class cordnClient implements coordinatorClient {
   static readonly SERVER_PUBKEY =
     "24f092697f908abd8b950438ea01055b43d2cb84757474dca395c4be20329257";
-  static readonly DEFAULT_RELAYS = ["ws://localhost:10547"];
-  // static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
+  // static readonly DEFAULT_RELAYS = ["ws://localhost:10547"];
+  static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
   private client: Client;
   private readonly transport: NostrClientTransport;
   private readonly connected: Promise<void>;
@@ -111,7 +111,7 @@ export class cordnClient implements coordinatorClient {
       relayHandler,
       isStateless: true,
       logLevel: "silent",
-      encryptionMode: EncryptionMode.DISABLED,
+      // encryptionMode: EncryptionMode.DISABLED,
       openStream: {
         enabled: true,
       },
