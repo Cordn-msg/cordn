@@ -36,9 +36,22 @@ export async function applyGroupSync(params: {
     if (
       group.messages.some(
         (stored) =>
-          stored.cursor === message.cursor && stored.direction === "outbound",
+          stored.direction === "outbound" &&
+          (stored.cursor === message.cursor ||
+            stored.opaqueMessageBase64 === message.opaqueMessageBase64),
       )
     ) {
+      const existingOutbound = group.messages.find(
+        (stored) =>
+          stored.direction === "outbound" &&
+          stored.opaqueMessageBase64 === message.opaqueMessageBase64,
+      );
+
+      if (existingOutbound) {
+        existingOutbound.cursor = message.cursor;
+        existingOutbound.createdAt = message.createdAt;
+      }
+
       group.fetchCursor = message.cursor;
       group.lastCursor = Math.max(group.lastCursor, message.cursor);
       continue;

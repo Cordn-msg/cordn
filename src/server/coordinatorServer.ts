@@ -10,7 +10,8 @@ import {
   registerCoordinatorMethods,
 } from "./coordinatorMethods.ts";
 
-const DEFAULT_RELAY_URLS = ["wss://relay.contextvm.org"];
+// const DEFAULT_RELAY_URLS = ["wss://relay.contextvm.org"];
+const DEFAULT_RELAY_URLS = ["ws://localhost:10547"];
 
 export function getDefaultRelayUrls(): string[] {
   return [...DEFAULT_RELAY_URLS];
@@ -51,6 +52,9 @@ export async function connectServer(
     injectClientPubkey: true,
     injectRequestEventId: true,
     oversizedTransfer: {
+      enabled: true,
+    },
+    openStream: {
       enabled: true,
     },
   });

@@ -53,6 +53,32 @@ export type {
   StoredWelcome,
 } from "./sessionState.ts";
 
+export type GroupWatchStatus = "connecting" | "watching" | "errored";
+
+export interface GroupListEntry {
+  alias: string;
+  metadata?: GroupSessionState["metadata"];
+  lastCursor: number;
+  messageCount: number;
+  watchStatus: GroupWatchStatus | "idle";
+  error?: string;
+}
+
+export interface WatchEvent {
+  groupAlias: string;
+  received: StoredMessage[];
+  issues: SyncIssue[];
+  watchStatus: GroupWatchStatus | "idle";
+  error?: string;
+}
+
+interface GroupWatchHandle {
+  abort: (reason?: string) => Promise<void>;
+  task: Promise<void>;
+  status: GroupWatchStatus;
+  lastError?: string;
+}
+
 export class CliSession {
   readonly client: cordnClient;
   readonly privateKey: string;
@@ -60,6 +86,8 @@ export class CliSession {
 
   private readonly store = new CliSessionStore();
   private readonly groupIdDecoder = new TextDecoder();
+  private readonly watchHandles = new Map<string, GroupWatchHandle>();
+  private readonly watchListeners = new Set<(event: WatchEvent) => void>();
 
   constructor(options: CliSessionOptions = {}) {
     this.privateKey = options.privateKey ?? createPrivateKeyHex();
@@ -71,7 +99,12 @@ export class CliSession {
   }
 
   async disconnect(): Promise<void> {
-    await this.client.disconnect();
+    await Promise.allSettled(
+      [...this.watchHandles.keys()].map((groupAlias) =>
+        this.unwatchGroup(groupAlias),
+      ),
+    );
+    await this.client.disconnect().catch(() => undefined);
   }
 
   listKeyPackages(): StoredKeyPackage[] {
@@ -96,6 +129,32 @@ export class CliSession {
 
   listGroups(): GroupSessionState[] {
     return this.store.listGroups();
+  }
+
+  listGroupEntries(): GroupListEntry[] {
+    return this.store.listGroups().map((group) => ({
+      alias: group.alias,
+      metadata: group.metadata,
+      lastCursor: group.lastCursor,
+      messageCount: group.messages.length,
+      watchStatus: this.getWatchStatus(group.alias),
+      error: this.watchHandles.get(group.alias)?.lastError,
+    }));
+  }
+
+  onWatchEvent(listener: (event: WatchEvent) => void): () => void {
+    this.watchListeners.add(listener);
+    return () => {
+      this.watchListeners.delete(listener);
+    };
+  }
+
+  getWatchStatus(groupAlias: string): GroupWatchStatus | "idle" {
+    return this.watchHandles.get(groupAlias)?.status ?? "idle";
+  }
+
+  isWatching(groupAlias: string): boolean {
+    return this.watchHandles.has(groupAlias);
   }
 
   getStatus(): SessionStatus {
@@ -293,6 +352,7 @@ export class CliSession {
     });
 
     this.store.addGroup(group);
+    await this.establishPostWelcomeBaseline(group, welcome.createdAt);
     this.store.deleteWelcome(keyPackageReference);
 
     return this.getGroup(alias);
@@ -310,56 +370,111 @@ export class CliSession {
     });
 
     group.state = outbound.newState;
-    const posted = await this.client.PostGroupMessage({
-      opaqueMessageBase64: outbound.opaqueMessageBase64,
-    });
     const stored: StoredMessage = {
-      cursor: posted.cursor,
-      createdAt: posted.createdAt,
+      cursor: 0,
+      createdAt: Date.now(),
       direction: "outbound",
       sender: this.stablePubkey,
       plaintext,
+      opaqueMessageBase64: outbound.opaqueMessageBase64,
     };
 
     group.messages.push(stored);
-    group.lastCursor = Math.max(group.lastCursor, posted.cursor);
+    try {
+      const posted = await this.client.PostGroupMessage({
+        opaqueMessageBase64: outbound.opaqueMessageBase64,
+      });
+
+      stored.cursor = posted.cursor;
+      stored.createdAt = posted.createdAt;
+      group.lastCursor = Math.max(group.lastCursor, posted.cursor);
+    } catch (error) {
+      const index = group.messages.indexOf(stored);
+      if (index >= 0) {
+        group.messages.splice(index, 1);
+      }
+      throw error;
+    }
+
     return stored;
   }
 
   async syncGroup(groupAlias: string): Promise<StoredMessage[]> {
+    if (this.isWatching(groupAlias)) {
+      return [];
+    }
+
     const group = this.getGroup(groupAlias);
     const result = await this.fetchRawGroupMessages(
       this.deriveGroupId(group.state),
       group.fetchCursor,
     );
-    const sync = await applyGroupSync({
-      group,
-      messages: result.messages,
-      hasPendingEpochOperation: (opaqueMessageBase64) =>
-        hasPendingEpochOperation(
-          this.store.pendingOperations,
-          group.alias,
-          opaqueMessageBase64,
-        ),
-    });
+    const { received } = await this.applyIncomingMessages(group, result.messages);
+    return received;
+  }
 
-    await confirmPendingEpochOperations(
-      this.store.pendingOperations,
-      this.client,
-      {
-        groupAlias: group.alias,
-        opaqueMessageBase64s: [...sync.appliedPendingCommitMessages],
-      },
-    );
-
-    if (sync.rejectedPendingCommitMessages.size > 0) {
-      await rejectPendingEpochOperations(this.store.pendingOperations, {
-        groupAlias: group.alias,
-        opaqueMessageBase64s: [...sync.rejectedPendingCommitMessages],
-      });
+  async watchGroup(groupAlias: string): Promise<void> {
+    if (this.watchHandles.has(groupAlias)) {
+      return;
     }
 
-    return sync.received;
+    const group = this.getGroup(groupAlias);
+    const groupId = this.deriveGroupId(group.state);
+
+    const task = (async () => {
+      this.setWatchStatus(groupAlias, "connecting");
+
+      const catchup = await this.fetchRawGroupMessages(groupId, group.fetchCursor);
+      const catchupResult = await this.applyIncomingMessages(group, catchup.messages);
+      this.emitWatchEvent(groupAlias, catchupResult.received, catchupResult.issues);
+
+      const subscription = await this.client.SubscribeGroupMessages({
+        groupId,
+        afterCursor: group.fetchCursor > 0 ? group.fetchCursor : undefined,
+      });
+      void subscription.result.catch(() => undefined);
+
+      const handle = this.watchHandles.get(groupAlias);
+      if (handle) {
+        handle.abort = async (reason?: string) => {
+          await subscription.abort(reason).catch(() => undefined);
+        };
+      }
+
+      this.setWatchStatus(groupAlias, "watching");
+
+      for await (const message of subscription.stream) {
+        const streamed = await this.applyIncomingMessages(group, [message]);
+        this.emitWatchEvent(groupAlias, streamed.received, streamed.issues);
+      }
+    })().catch((error) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.setWatchStatus(groupAlias, "errored", reason);
+    });
+
+    this.watchHandles.set(groupAlias, {
+      abort: async () => undefined,
+      task,
+      status: "connecting",
+    });
+  }
+
+  async unwatchGroup(groupAlias: string): Promise<void> {
+    const handle = this.watchHandles.get(groupAlias);
+    if (!handle) {
+      return;
+    }
+
+    this.watchHandles.delete(groupAlias);
+    await handle.abort("user requested stop").catch(() => undefined);
+    await handle.task.catch(() => undefined);
+    this.emitWatchEvent(groupAlias, [], []);
+  }
+
+  async watchAllGroups(): Promise<void> {
+    for (const group of this.listGroups()) {
+      await this.watchGroup(group.alias);
+    }
   }
 
   async syncAll(): Promise<Record<string, StoredMessage[]>> {
@@ -432,5 +547,115 @@ export class CliSession {
 
   private deriveGroupId(state: ClientState): string {
     return this.groupIdDecoder.decode(state.groupContext.groupId);
+  }
+
+  private async applyIncomingMessages(
+    group: GroupSessionState,
+    messages: FetchGroupMessagesOutput["messages"],
+    options: {
+      suppressIssue?: (issue: SyncIssue) => boolean;
+    } = {},
+  ): Promise<{ received: StoredMessage[]; issues: SyncIssue[] }> {
+    const previousIssueCount = group.syncIssues.length;
+    const sync = await applyGroupSync({
+      group,
+      messages,
+      hasPendingEpochOperation: (opaqueMessageBase64) =>
+        hasPendingEpochOperation(
+          this.store.pendingOperations,
+          group.alias,
+          opaqueMessageBase64,
+        ),
+    });
+
+    await confirmPendingEpochOperations(
+      this.store.pendingOperations,
+      this.client,
+      {
+        groupAlias: group.alias,
+        opaqueMessageBase64s: [...sync.appliedPendingCommitMessages],
+      },
+    );
+
+    if (sync.rejectedPendingCommitMessages.size > 0) {
+      await rejectPendingEpochOperations(this.store.pendingOperations, {
+        groupAlias: group.alias,
+        opaqueMessageBase64s: [...sync.rejectedPendingCommitMessages],
+      });
+    }
+
+    return {
+      received: sync.received,
+      issues: options.suppressIssue
+        ? this.removeSuppressedIssues(
+            group,
+            previousIssueCount,
+            options.suppressIssue,
+          )
+        : group.syncIssues.slice(previousIssueCount),
+    };
+  }
+
+  private async establishPostWelcomeBaseline(
+    group: GroupSessionState,
+    welcomeCreatedAt: number,
+  ): Promise<void> {
+    const result = await this.fetchRawGroupMessages(
+      this.deriveGroupId(group.state),
+      group.fetchCursor,
+    );
+
+    await this.applyIncomingMessages(group, result.messages, {
+      suppressIssue: (issue) =>
+        issue.createdAt <= welcomeCreatedAt &&
+        (issue.detail === "Cannot process commit or proposal from former epoch" ||
+          issue.detail === "Cannot process message, epoch too old"),
+    });
+  }
+
+  private removeSuppressedIssues(
+    group: GroupSessionState,
+    previousIssueCount: number,
+    suppressIssue: (issue: SyncIssue) => boolean,
+  ): SyncIssue[] {
+    const added = group.syncIssues.slice(previousIssueCount);
+    const unsuppressed = added.filter((issue) => !suppressIssue(issue));
+
+    group.syncIssues.splice(previousIssueCount, added.length, ...unsuppressed);
+    return unsuppressed;
+  }
+
+  private setWatchStatus(
+    groupAlias: string,
+    status: GroupWatchStatus,
+    lastError?: string,
+  ): void {
+    const handle = this.watchHandles.get(groupAlias);
+    if (!handle) {
+      return;
+    }
+
+    handle.status = status;
+    handle.lastError = lastError;
+    this.emitWatchEvent(groupAlias, [], []);
+  }
+
+  private emitWatchEvent(
+    groupAlias: string,
+    received: StoredMessage[],
+    issues: SyncIssue[],
+  ): void {
+    const handle = this.watchHandles.get(groupAlias);
+    const event: WatchEvent = {
+      groupAlias,
+      received,
+      issues,
+      watchStatus: handle?.status ?? "idle",
+      error: handle?.lastError,
+    };
+
+    for (const listener of this.watchListeners) {
+      listener(event);
+    }
   }
 }

@@ -19,6 +19,7 @@ import {
   getTestCiphersuite,
 } from "../coordinator/testUtils.ts";
 import { CoordinatorAdapter } from "./coordinatorMethods.ts";
+import { decodeBase64 } from "./base64.ts";
 import { encodeBase64 } from "./base64.ts";
 
 function createPublicationEvent(params: {
@@ -362,5 +363,113 @@ describe("CoordinatorAdapter", () => {
     expect(
       fetchedMessages.structuredContent.messages[0]?.opaqueMessageBase64,
     ).toBe(encodeBase64(messageBytes.encodedMessage));
+  });
+
+  test("streams backlog and live group messages as JSON chunks", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-stream"));
+    const bob = await createMemberArtifacts(createActor("bob-stream"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-streaming"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+
+    const group = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    const backlogMessageBytes = await createApplicationMessageBytes({
+      state: group.senderState,
+      plaintext: "backlog message",
+    });
+
+    const backlogPosted = adapter.postGroupMessage(
+      {
+        opaqueMessageBase64: encodeBase64(backlogMessageBytes.encodedMessage),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    const writtenChunks: string[] = [];
+    let closed = false;
+    let abortedReason: string | undefined;
+    const stopError = new Error("stop after two chunks");
+
+    const subscribePromise = adapter.subscribeGroupMessages(
+      {
+        groupId: backlogPosted.structuredContent.groupId,
+        afterCursor: 0,
+      },
+      {
+        _meta: {
+          stream: {
+            async start() {},
+            async write(data: string) {
+              writtenChunks.push(data);
+              if (writtenChunks.length >= 2) {
+                throw stopError;
+              }
+            },
+            async close() {
+              closed = true;
+            },
+            async abort(reason?: string) {
+              abortedReason = reason;
+            },
+          },
+        },
+      } as never,
+    );
+
+    await Promise.resolve();
+
+    expect(writtenChunks).toHaveLength(1);
+
+    const liveMessageBytes = await createApplicationMessageBytes({
+      state: backlogMessageBytes.newState,
+      plaintext: "live message",
+    });
+
+    const livePosted = adapter.postGroupMessage(
+      {
+        opaqueMessageBase64: encodeBase64(liveMessageBytes.encodedMessage),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(writtenChunks).toHaveLength(2);
+
+    const parsedFirst = JSON.parse(writtenChunks[0] ?? "{}");
+    const parsedSecond = JSON.parse(writtenChunks[1] ?? "{}");
+
+    expect(parsedFirst).toMatchObject({
+      cursor: 1,
+      groupId: backlogPosted.structuredContent.groupId,
+      createdAt: expect.any(Number),
+    });
+    expect(decodeBase64(parsedFirst.opaqueMessageBase64)).toEqual(
+      backlogMessageBytes.encodedMessage,
+    );
+
+    expect(parsedSecond).toMatchObject({
+      cursor: livePosted.structuredContent.cursor,
+      groupId: livePosted.structuredContent.groupId,
+      createdAt: expect.any(Number),
+    });
+    expect(decodeBase64(parsedSecond.opaqueMessageBase64)).toEqual(
+      liveMessageBytes.encodedMessage,
+    );
+
+    expect(closed).toBe(false);
+    await expect(subscribePromise).rejects.toBe(stopError);
+    expect(abortedReason).toBe("stop after two chunks");
   });
 });

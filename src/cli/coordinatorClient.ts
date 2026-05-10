@@ -1,10 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  callToolStream,
   NostrClientTransport,
   type NostrTransportOptions,
   PrivateKeySigner,
   ApplesauceRelayPool,
+  EncryptionMode,
 } from "@contextvm/sdk";
 import type { ZodType } from "zod";
 import {
@@ -20,18 +22,23 @@ import {
   type PublishKeyPackageInput,
   publishKeyPackageOutputSchema,
   storeWelcomeOutputSchema,
+  subscribeGroupMessagesOutputSchema,
   type ConsumeKeyPackageOutput,
   type FetchGroupMessagesOutput,
   type FetchPendingWelcomesInput,
   type FetchPendingWelcomesOutput,
+  type GroupMessage,
   type ListAvailableKeyPackagesInput,
   type ListAvailableKeyPackagesOutput,
   type PostGroupMessageOutput,
   type PublishKeyPackageOutput,
   type RemoveKeyPackagesInput,
   type RemoveKeyPackagesOutput,
+  type SubscribeGroupMessagesInput,
+  type SubscribeGroupMessagesOutput,
   type StoreWelcomeInput,
   type StoreWelcomeOutput,
+  groupMessageSchema,
   removeKeyPackagesOutputSchema,
 } from "../contracts/index.ts";
 
@@ -58,14 +65,22 @@ export type coordinatorClient = {
   FetchGroupMessages: (
     input: FetchGroupMessagesInput,
   ) => Promise<FetchGroupMessagesOutput>;
+  SubscribeGroupMessages: (
+    input: SubscribeGroupMessagesInput,
+  ) => Promise<{
+    stream: AsyncIterable<GroupMessage>;
+    result: Promise<SubscribeGroupMessagesOutput>;
+    abort: (reason?: string) => Promise<void>;
+  }>;
 };
 
 export class cordnClient implements coordinatorClient {
   static readonly SERVER_PUBKEY =
     "24f092697f908abd8b950438ea01055b43d2cb84757474dca395c4be20329257";
-  static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
+  static readonly DEFAULT_RELAYS = ["ws://localhost:10547"];
+  // static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
   private client: Client;
-  private transport: Transport;
+  private readonly transport: NostrClientTransport;
   private readonly connected: Promise<void>;
 
   constructor(
@@ -98,6 +113,10 @@ export class cordnClient implements coordinatorClient {
       relayHandler,
       isStateless: true,
       logLevel: "silent",
+      encryptionMode: EncryptionMode.DISABLED,
+      openStream: {
+        enabled: true,
+      },
       ...rest,
     });
 
@@ -110,7 +129,7 @@ export class cordnClient implements coordinatorClient {
 
   async disconnect(): Promise<void> {
     await this.connected.catch(() => undefined);
-    await this.transport.close();
+    await this.transport.close().catch(() => undefined);
   }
 
   private async call<T = unknown>(
@@ -241,5 +260,45 @@ export class cordnClient implements coordinatorClient {
       input,
       fetchGroupMessagesOutputSchema,
     );
+  }
+
+  async SubscribeGroupMessages(
+    input: SubscribeGroupMessagesInput,
+  ): Promise<{
+    stream: AsyncIterable<GroupMessage>;
+    result: Promise<SubscribeGroupMessagesOutput>;
+    abort: (reason?: string) => Promise<void>;
+  }> {
+    await this.connected;
+
+    const call = await callToolStream<CallToolResult>({
+      client: this.client,
+      transport: this.transport,
+      name: CONTEXTVM_COORDINATOR_TOOLS.subscribeGroupMessages,
+      arguments: { ...input },
+    });
+    void call.stream.closed.catch(() => undefined);
+
+    const stream: AsyncIterable<GroupMessage> = {
+      async *[Symbol.asyncIterator]() {
+        for await (const chunk of call.stream) {
+          yield groupMessageSchema.parse(JSON.parse(chunk.value));
+        }
+      },
+    };
+
+    return {
+      stream,
+      result: call.result.then((result) =>
+        subscribeGroupMessagesOutputSchema.parse(result.structuredContent),
+      ),
+      abort: async (reason?: string) => {
+        try {
+          await call.abort(reason);
+        } catch {
+          return;
+        }
+      },
+    };
   }
 }

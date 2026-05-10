@@ -6,6 +6,7 @@ import type {
   PostGroupMessageInput,
   PublishedKeyPackageRecord,
   PublishKeyPackageInput,
+  SubscribeGroupMessagesInput,
   StoreWelcomeInput,
   WelcomeQueueRecord,
 } from "./types.ts";
@@ -78,9 +79,94 @@ function resolveLatestHandshakeEpoch(
     : epoch;
 }
 
+class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
+  private readonly values: GroupMessageRecord[] = [];
+  private readonly waiters: Array<{
+    resolve: (result: IteratorResult<GroupMessageRecord>) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  private closed = false;
+  private aborted: unknown = null;
+
+  push(value: GroupMessageRecord): void {
+    if (this.closed || this.aborted) {
+      return;
+    }
+
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter.resolve({ value, done: false });
+      return;
+    }
+
+    this.values.push(value);
+  }
+
+  close(): void {
+    if (this.closed || this.aborted) {
+      return;
+    }
+
+    this.closed = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.resolve({ value: undefined, done: true });
+    }
+  }
+
+  abort(error: unknown): void {
+    if (this.aborted || this.closed) {
+      return;
+    }
+
+    this.aborted = error;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.reject(error);
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<GroupMessageRecord> {
+    return {
+      next: async (): Promise<IteratorResult<GroupMessageRecord>> => {
+        if (this.values.length > 0) {
+          const value = this.values.shift();
+          if (!value) {
+            throw new Error("Queue invariant violated");
+          }
+
+          return { value, done: false };
+        }
+
+        if (this.aborted) {
+          throw this.aborted;
+        }
+
+        if (this.closed) {
+          return { value: undefined, done: true };
+        }
+
+        return new Promise<IteratorResult<GroupMessageRecord>>(
+          (resolve, reject) => {
+            this.waiters.push({ resolve, reject });
+          },
+        );
+      },
+      return: async (): Promise<IteratorResult<GroupMessageRecord>> => {
+        this.close();
+        return { value: undefined, done: true };
+      },
+    };
+  }
+}
+
+interface GroupMessageSubscription {
+  messages: AsyncIterable<GroupMessageRecord>;
+  unsubscribe: () => void;
+}
+
 export class Coordinator {
   private readonly storage: CoordinatorStorage;
   private readonly now: () => number;
+  private readonly groupSubscribers = new Map<string, Set<AsyncMessageQueue>>();
 
   constructor(options: CoordinatorOptions = {}) {
     this.storage = options.storage ?? new InMemoryCoordinatorStorage();
@@ -159,17 +245,56 @@ export class Coordinator {
       handshakeMessage,
     );
 
-    return this.storage.appendGroupMessage({
+    const record = this.storage.appendGroupMessage({
       groupId,
       latestHandshakeEpoch,
       ephemeralSenderPubkey: input.ephemeralSenderPubkey,
       opaqueMessage: input.opaqueMessage,
       createdAt: this.now(),
     });
+
+    this.publishLiveGroupMessage(record);
+
+    return record;
   }
 
   fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[] {
     return this.storage.fetchGroupMessages(input);
+  }
+
+  subscribeGroupMessages(
+    input: SubscribeGroupMessagesInput,
+  ): GroupMessageSubscription {
+    const queue = new AsyncMessageQueue();
+    const subscribers = this.groupSubscribers.get(input.groupId) ?? new Set();
+
+    if (!this.groupSubscribers.has(input.groupId)) {
+      this.groupSubscribers.set(input.groupId, subscribers);
+    }
+
+    subscribers.add(queue);
+
+    return {
+      messages: queue,
+      unsubscribe: () => {
+        queue.close();
+        subscribers.delete(queue);
+        if (subscribers.size === 0) {
+          this.groupSubscribers.delete(input.groupId);
+        }
+      },
+    };
+  }
+
+  private publishLiveGroupMessage(record: GroupMessageRecord): void {
+    const subscribers = this.groupSubscribers.get(record.groupId);
+    if (!subscribers) {
+      return;
+    }
+
+    for (const subscriber of subscribers) {
+      subscriber.push(record);
+    }
   }
 
   getGroupRouting(groupId: string): GroupRoutingRecord | null {

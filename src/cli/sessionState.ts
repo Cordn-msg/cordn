@@ -44,6 +44,7 @@ export interface StoredMessage {
   direction: "inbound" | "outbound";
   sender: string;
   plaintext: string;
+  opaqueMessageBase64?: string;
 }
 
 export interface SyncIssue {

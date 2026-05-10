@@ -6,6 +6,20 @@ import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
 import { PrivateKeySigner } from "@contextvm/sdk";
 
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt >= timeoutMs) {
+      throw new Error("Timed out waiting for condition");
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("CliSession", () => {
   const sessions: CliSession[] = [];
 
@@ -633,6 +647,137 @@ describe("CliSession", () => {
 
       expect(carol.listGroups()).toHaveLength(1);
       expect(dave.listGroups()).toEqual([]);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("establishes a post-welcome baseline before watch mode starts", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      const inviterSync = await alice.syncGroup("demo");
+
+      expect(inviterSync).toEqual([]);
+
+      await bob.fetchWelcomes();
+      const joined = await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      expect(joined.alias).toBe("demo");
+      expect(bob.getGroup("demo").fetchCursor).toBe(1);
+      expect(bob.listSyncIssues("demo")).toEqual([]);
+
+      expect(bob.listSyncIssues("demo")).toEqual([]);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("keeps receiving live messages after sending while watch mode is active", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      const watchEvents: Array<{
+        received: string[];
+        issues: string[];
+        watchStatus: string;
+        error?: string;
+      }> = [];
+      const unsubscribe = bob.onWatchEvent((event) => {
+        watchEvents.push({
+          received: event.received.map((message) => message.plaintext),
+          issues: event.issues.map((issue) => issue.detail),
+          watchStatus: event.watchStatus,
+          error: event.error,
+        });
+      });
+
+      try {
+        await bob.watchGroup("demo");
+        await waitForCondition(() => bob.getWatchStatus("demo") === "watching");
+
+        expect(bob.getWatchStatus("demo")).toBe("watching");
+
+        await bob.sendMessage("demo", "hello alice from bob");
+        await alice.syncGroup("demo");
+
+        await alice.sendMessage("demo", "hello bob after your send");
+        await waitForCondition(() =>
+          bob
+            .listMessages("demo")
+            .some(
+              (message) =>
+                message.direction === "inbound" &&
+                message.plaintext === "hello bob after your send",
+            ),
+        );
+
+        expect(bob.getWatchStatus("demo")).toBe("watching");
+        expect(
+          bob
+            .listMessages("demo")
+            .filter((message) => message.direction === "inbound")
+            .map((message) => message.plaintext),
+        ).toContain("hello bob after your send");
+        expect(
+          watchEvents.some((event) =>
+            event.received.includes("hello bob after your send"),
+          ),
+        ).toBe(true);
+        expect(
+          watchEvents.find((event) => event.watchStatus === "errored"),
+        ).toBeUndefined();
+      } finally {
+        unsubscribe();
+      }
     } finally {
       await server.transport.close();
     }
@@ -1329,20 +1474,8 @@ describe("CliSession", () => {
 
       expect(alice.listSyncIssues("group-a")).toEqual([]);
       expect(alice.listSyncIssues("group-b")).toEqual([]);
-      expect(bob.listSyncIssues("group-a")).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            detail: expect.stringMatching(/epoch too old|former epoch/),
-          }),
-        ]),
-      );
-      expect(bob.listSyncIssues("group-b")).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            detail: expect.stringMatching(/epoch too old|former epoch/),
-          }),
-        ]),
-      );
+      expect(bob.listSyncIssues("group-a")).toEqual([]);
+      expect(bob.listSyncIssues("group-b")).toEqual([]);
 
       expect(
         carol

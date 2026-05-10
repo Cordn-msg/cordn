@@ -419,4 +419,56 @@ describe("Coordinator group message flow", () => {
       lastMessageCursor: 1,
     });
   });
+
+  test("replays backlog and streams new live group messages in order", async () => {
+    const coordinator = new Coordinator();
+
+    const firstMessage = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice-live-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-live",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1, 2, 3],
+      }),
+    });
+
+    const subscription = coordinator.subscribeGroupMessages({
+      groupId: "group-live",
+      afterCursor: 0,
+    });
+
+    const iterator = subscription.messages[Symbol.asyncIterator]();
+
+    const secondMessage = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "bob-live-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-live",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [4, 5, 6],
+      }),
+    });
+
+    const liveResult = await iterator.next();
+
+    expect(liveResult.done).toBe(false);
+    expect(liveResult.value).toMatchObject({
+      cursor: secondMessage.cursor,
+      groupId: "group-live",
+    });
+
+    expect(
+      coordinator.fetchGroupMessages({
+        groupId: "group-live",
+        afterCursor: firstMessage.cursor,
+      }),
+    ).toEqual([secondMessage]);
+
+    subscription.unsubscribe();
+    await expect(iterator.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+  });
 });

@@ -54,6 +54,8 @@ export interface FetchGroupMessagesInput {
   afterCursor?: number;
 }
 
+export type SubscribeGroupMessagesInput = FetchGroupMessagesInput;
+
 export interface DeliveryServiceSnapshot {
   stableIdentities: number;
   publishedKeyPackages: number;

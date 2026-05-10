@@ -35,6 +35,7 @@ export const knownCommands = new Set([
   "group",
   "use",
   "leave",
+  "unwatch",
   "add-member",
   "fetch-welcomes",
   "welcomes",
@@ -43,6 +44,7 @@ export const knownCommands = new Set([
   "send-to",
   "sync",
   "sync-all",
+  "watch-all",
   "messages",
   "issues",
   "exit",
@@ -79,6 +81,7 @@ export function parseCreateGroupArgs(args: string[]): {
   alias: string;
   keyPackageAlias?: string;
   metadata?: CordnGroupMetadata;
+  watch: boolean;
 } {
   const alias = args[0];
 
@@ -90,6 +93,7 @@ export function parseCreateGroupArgs(args: string[]): {
 
   let index = 1;
   let keyPackageAlias: string | undefined;
+  let watch = false;
 
   if (args[index] && !args[index]!.startsWith("--")) {
     keyPackageAlias = args[index];
@@ -108,6 +112,10 @@ export function parseCreateGroupArgs(args: string[]): {
     }
 
     switch (flag) {
+      case "--watch":
+        watch = true;
+        index += 1;
+        break;
       case "--name":
         if (!value) throw new CliUsageError("Missing value for --name");
         metadata.name = value;
@@ -151,6 +159,7 @@ export function parseCreateGroupArgs(args: string[]): {
     alias,
     keyPackageAlias,
     metadata: metadataProvided ? metadata : undefined,
+    watch,
   };
 }
 
@@ -230,6 +239,9 @@ export async function executeReplCommand(
         keyPackageAlias: parsed.keyPackageAlias,
         metadata: parsed.metadata,
       });
+      if (parsed.watch) {
+        await session.watchGroup(group.alias);
+      }
       selectedGroupAlias = group.alias;
       output.write(
         `${colorize("created group", ansi.green)} ${colorize(group.alias, ansi.cyan)} ${formatGroupMetadata(group.metadata)}\n`,
@@ -238,7 +250,7 @@ export async function executeReplCommand(
     }
     case "groups": {
       output.write(
-        `${formatList(session.listGroups().map((group) => `${formatGroupAlias(group.alias)} cursor=${colorize(String(group.lastCursor), ansi.bold)} messages=${colorize(String(group.messages.length), ansi.bold)} ${formatGroupMetadata(group.metadata)}`))}\n`,
+        `${formatList(session.listGroupEntries().map((group) => `${formatGroupAlias(group.alias)} cursor=${colorize(String(group.lastCursor), ansi.bold)} messages=${colorize(String(group.messageCount), ansi.bold)} watching=${group.watchStatus === "idle" ? colorize("no", ansi.yellow) : colorize(group.watchStatus, group.watchStatus === "errored" ? ansi.red : ansi.green)}${group.watchStatus === "errored" && group.error ? ` error=${colorize(group.error, ansi.red)}` : ""} ${formatGroupMetadata(group.metadata)}`))}\n`,
       );
       break;
     }
@@ -252,6 +264,9 @@ export async function executeReplCommand(
     case "use": {
       if (!args[0]) throw new CliUsageError("Usage: use <groupAlias>");
       const group = session.getGroup(args[0]);
+      if (args.includes("--watch")) {
+        await session.watchGroup(args[0]);
+      }
       selectedGroupAlias = args[0];
       output.write(
         `${colorize("selected group", ansi.green)} ${colorize(selectedGroupAlias, ansi.cyan)} ${formatGroupMetadata(group.metadata)}\n`,
@@ -261,6 +276,14 @@ export async function executeReplCommand(
     case "leave": {
       selectedGroupAlias = undefined;
       output.write(`${colorize("left", ansi.yellow)} group context\n`);
+      break;
+    }
+    case "unwatch": {
+      if (!args[0]) throw new CliUsageError("Usage: unwatch <groupAlias>");
+      await session.unwatchGroup(args[0]);
+      output.write(
+        `${colorize("unwatched", ansi.yellow)} ${colorize(args[0], ansi.cyan)}\n`,
+      );
       break;
     }
     case "add-member": {
@@ -290,12 +313,18 @@ export async function executeReplCommand(
       break;
     }
     case "accept-welcome": {
-      if (!args[0]) {
+      if (!positionalArgs[0]) {
         throw new CliUsageError(
-          "Usage: accept-welcome <keyPackageReference> [groupAlias]",
+          "Usage: accept-welcome <keyPackageReference> [groupAlias] [--watch]",
         );
       }
-      const group = await session.acceptWelcome(args[0], args[1]);
+      const group = await session.acceptWelcome(
+        positionalArgs[0],
+        positionalArgs[1],
+      );
+      if (args.includes("--watch")) {
+        await session.watchGroup(group.alias);
+      }
       selectedGroupAlias = group.alias;
       output.write(
         `${colorize("accepted welcome into", ansi.green)} ${colorize(group.alias, ansi.cyan)} ${formatGroupMetadata(group.metadata)}\n`,
@@ -342,6 +371,11 @@ export async function executeReplCommand(
     case "sync-all": {
       const result = await session.syncAll();
       output.write(`${JSON.stringify(result, null, 2)}\n`);
+      break;
+    }
+    case "watch-all": {
+      await session.watchAllGroups();
+      output.write(`${colorize("watching", ansi.green)} all groups\n`);
       break;
     }
     case "messages": {

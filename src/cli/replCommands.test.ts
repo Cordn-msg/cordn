@@ -26,6 +26,16 @@ describe("parseCreateGroupArgs", () => {
         description: "hello",
         adminPubkeys: ["a".repeat(64)],
       },
+      watch: false,
+    });
+  });
+
+  test("parses the --watch flag", () => {
+    expect(parseCreateGroupArgs(["demo", "--watch"])).toEqual({
+      alias: "demo",
+      keyPackageAlias: undefined,
+      metadata: undefined,
+      watch: true,
     });
   });
 
@@ -128,5 +138,77 @@ describe("executeReplCommand", () => {
     expect(deleteKeyPackage).toHaveBeenCalledWith("alice-main", {
       localOnly: false,
     });
+  });
+
+  test("starts watching after create-group --watch", async () => {
+    const output = new PassThrough();
+    const createGroup = vi.fn().mockResolvedValue({
+      alias: "demo",
+      metadata: undefined,
+    });
+    const watchGroup = vi.fn().mockResolvedValue(undefined);
+    const session = {
+      createGroup,
+      watchGroup,
+    } as never;
+
+    await executeReplCommand("create-group", ["demo", "--watch"], {
+      session,
+      output,
+    });
+
+    expect(watchGroup).toHaveBeenCalledWith("demo");
+  });
+
+  test("supports watch-all", async () => {
+    const output = new PassThrough();
+    const watchAllGroups = vi.fn().mockResolvedValue(undefined);
+    const session = {
+      watchAllGroups,
+    } as never;
+
+    await executeReplCommand("watch-all", [], {
+      session,
+      output,
+    });
+
+    expect(watchAllGroups).toHaveBeenCalledOnce();
+  });
+
+  test("supports unwatch", async () => {
+    const output = new PassThrough();
+    const unwatchGroup = vi.fn().mockResolvedValue(undefined);
+    const session = {
+      unwatchGroup,
+    } as never;
+
+    await executeReplCommand("unwatch", ["demo"], {
+      session,
+      output,
+    });
+
+    expect(unwatchGroup).toHaveBeenCalledWith("demo");
+  });
+
+  test("accept-welcome --watch does not treat the flag as the alias", async () => {
+    const output = new PassThrough();
+    const acceptWelcome = vi.fn().mockResolvedValue({
+      alias: "demo",
+      metadata: undefined,
+    });
+    const watchGroup = vi.fn().mockResolvedValue(undefined);
+    const session = {
+      acceptWelcome,
+      watchGroup,
+    } as never;
+
+    await executeReplCommand(
+      "accept-welcome",
+      ["kp-ref", "--watch"],
+      { session, output },
+    );
+
+    expect(acceptWelcome).toHaveBeenCalledWith("kp-ref", undefined);
+    expect(watchGroup).toHaveBeenCalledWith("demo");
   });
 });

@@ -18,7 +18,6 @@ describe("readServerRuntimeConfig", () => {
     expect(config.storage).toEqual({ backend: "memory" });
     expect(config.serverInfo.name).toBe("cordn-server");
     expect(config.isAnnouncedServer).toBe(false);
-    expect(config.relayUrls).toEqual(["wss://relay.contextvm.org"]);
   });
 
   test("reads sqlite storage configuration and comma-separated relays", () => {

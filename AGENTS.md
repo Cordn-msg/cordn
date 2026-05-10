@@ -18,6 +18,7 @@ Coordinator contract notes:
 
 - Group delivery cursors are monotonic per group, never global across all groups.
 - [`fetchGroupMessages({ groupId, afterCursor })`](src/coordinator/coordinator.ts:160) must treat `afterCursor` as a cursor within that group only.
+- [`subscribeGroupMessages({ groupId, afterCursor })`](src/coordinator/coordinator.ts:265) must preserve the same cursor semantics while replaying backlog before live delivery.
 - Keep storage backends behaviorally aligned; changes in [`src/coordinator/storage/inMemoryStorage.ts`](src/coordinator/storage/inMemoryStorage.ts) and [`src/coordinator/storage/sqliteStorage.ts`](src/coordinator/storage/sqliteStorage.ts) require parity coverage in [`src/coordinator/storage/storage.test.ts`](src/coordinator/storage/storage.test.ts).
 
 ## Setup commands
@@ -58,6 +59,7 @@ Test locations:
 Agent expectations:
 
 - add or update tests when changing coordinator, server, CLI, or contract behavior
+- when changing group-message streaming, cover backlog replay and live delivery behavior
 - run targeted Vitest commands for touched areas before finishing
 - run `pnpm run typecheck` when changing public types, contracts, or entrypoints
 

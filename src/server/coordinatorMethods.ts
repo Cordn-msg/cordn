@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { OpenStreamWriter } from "@contextvm/sdk/transport";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   ServerNotification,
@@ -23,6 +24,7 @@ import {
   fetchGroupMessagesOutputSchema,
   fetchPendingWelcomesInputSchema,
   fetchPendingWelcomesOutputSchema,
+  groupMessageSchema,
   listAvailableKeyPackagesInputSchema,
   listAvailableKeyPackagesOutputSchema,
   postGroupMessageInputSchema,
@@ -33,6 +35,8 @@ import {
   removeKeyPackagesOutputSchema,
   storeWelcomeInputSchema,
   storeWelcomeOutputSchema,
+  subscribeGroupMessagesInputSchema,
+  subscribeGroupMessagesOutputSchema,
 } from "../contracts/index.ts";
 import { decodeExact, decodeWelcome, encodeWelcome } from "../mlsCodec.ts";
 import { assertNonEmptyBase64, encodeBase64 } from "./base64.ts";
@@ -146,6 +150,31 @@ function mapAvailableKeyPackage(record: {
     isLastResort: record.isLastResort,
     publishedAt: record.publishedAt,
   };
+}
+
+function getOpenStreamWriter(extra: ToolExtra): OpenStreamWriter {
+  const stream = (extra._meta as { stream?: OpenStreamWriter } | undefined)
+    ?.stream;
+
+  if (!stream) {
+    throw new Error("Expected open stream writer in _meta.stream");
+  }
+
+  return stream;
+}
+
+function mapGroupMessage(record: {
+  cursor: number;
+  groupId: string;
+  opaqueMessage: Uint8Array;
+  createdAt: number;
+}) {
+  return groupMessageSchema.parse({
+    cursor: record.cursor,
+    groupId: record.groupId,
+    opaqueMessageBase64: encodeBase64(record.opaqueMessage),
+    createdAt: record.createdAt,
+  });
 }
 
 export class CoordinatorAdapter {
@@ -320,12 +349,57 @@ export class CoordinatorAdapter {
     return {
       content: [],
       structuredContent: {
-        messages: records.map((record) => ({
-          cursor: record.cursor,
-          groupId: record.groupId,
-          opaqueMessageBase64: encodeBase64(record.opaqueMessage),
-          createdAt: record.createdAt,
-        })),
+        messages: records.map(mapGroupMessage),
+      },
+    };
+  }
+
+  async subscribeGroupMessages(
+    input: z.infer<typeof subscribeGroupMessagesInputSchema>,
+    extra: ToolExtra,
+  ) {
+    const stream = getOpenStreamWriter(extra);
+    const backlog = this.coordinator.fetchGroupMessages(input);
+    const subscription = this.coordinator.subscribeGroupMessages(input);
+    let lastEmittedCursor = input.afterCursor ?? 0;
+
+    try {
+      await stream.start();
+
+      for (const record of backlog) {
+        const message = mapGroupMessage(record);
+        await stream.write(JSON.stringify(message));
+        lastEmittedCursor = record.cursor;
+      }
+
+      for await (const record of subscription.messages) {
+        if (record.cursor <= lastEmittedCursor) {
+          continue;
+        }
+
+        const message = mapGroupMessage(record);
+        await stream.write(JSON.stringify(message));
+        lastEmittedCursor = record.cursor;
+      }
+
+      await stream.close();
+    } catch (error) {
+      try {
+        await stream.abort(
+          error instanceof Error ? error.message : "Stream aborted",
+        );
+      } catch {
+        // Ignore secondary abort cleanup failures.
+      }
+      throw error;
+    } finally {
+      subscription.unsubscribe();
+    }
+
+    return {
+      content: [],
+      structuredContent: {
+        subscribed: true,
       },
     };
   }
@@ -421,5 +495,16 @@ export function registerCoordinatorMethods(
       outputSchema: fetchGroupMessagesOutputSchema,
     },
     (input) => adapter.fetchGroupMessages(input),
+  );
+
+  server.registerTool(
+    CONTEXTVM_COORDINATOR_TOOLS.subscribeGroupMessages,
+    {
+      description:
+        "Replay and stream MLS opaque group messages by group and optional cursor.",
+      inputSchema: subscribeGroupMessagesInputSchema,
+      outputSchema: subscribeGroupMessagesOutputSchema,
+    },
+    (input, extra) => adapter.subscribeGroupMessages(input, extra),
   );
 }

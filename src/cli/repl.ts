@@ -18,15 +18,52 @@ import {
 export async function startCliRepl(session: CliSession): Promise<void> {
   const rl = createInterface({ input, output });
   let selectedGroupAlias: string | undefined;
+  let currentPrompt = "cordn> ";
+
+  const renderPrompt = (): void => {
+    currentPrompt = selectedGroupAlias
+      ? `cordn:${formatPromptGroupLabel(session, selectedGroupAlias)}> `
+      : "cordn> ";
+  };
+
+  const redrawAfterAsyncOutput = (): void => {
+    output.write("\n");
+    rl.prompt(true);
+  };
+
+  const unsubscribeWatchEvents = session.onWatchEvent((event) => {
+    if (event.groupAlias !== selectedGroupAlias) {
+      return;
+    }
+
+    if (event.error) {
+      output.write(
+        `${colorize(`watch error: ${event.error}`, ansi.red)} ${formatPromptGroupLabel(session, event.groupAlias)}\n`,
+      );
+      redrawAfterAsyncOutput();
+    }
+
+    for (const issue of event.issues) {
+      output.write(
+        `${colorize(issue.detail, ansi.yellow)} ${formatPromptGroupLabel(session, event.groupAlias)} ${formatSyncResult(session, event.groupAlias, [])}\n`,
+      );
+    }
+
+    if (event.received.length === 0) {
+      return;
+    }
+
+    output.write(`${formatSyncResult(session, event.groupAlias, event.received)}\n`);
+    redrawAfterAsyncOutput();
+  });
 
   printHelp();
 
   try {
     while (true) {
-      const prompt = selectedGroupAlias
-        ? `cordn:${formatPromptGroupLabel(session, selectedGroupAlias)}> `
-        : "cordn> ";
-      const line = (await rl.question(prompt)).trim();
+      renderPrompt();
+      rl.setPrompt(currentPrompt);
+      const line = (await rl.question(currentPrompt)).trim();
 
       if (!line) {
         if (selectedGroupAlias) {
@@ -67,6 +104,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
         });
 
         selectedGroupAlias = result.selectedGroupAlias;
+        renderPrompt();
 
         if (result.shouldExit) {
           return;
@@ -78,6 +116,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
       }
     }
   } finally {
+    unsubscribeWatchEvents();
     rl.close();
   }
 }

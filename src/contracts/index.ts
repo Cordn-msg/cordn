@@ -19,6 +19,7 @@ export const CONTEXTVM_COORDINATOR_TOOLS = {
   storeWelcome: "store_welcome",
   postGroupMessage: "post_group_message",
   fetchGroupMessages: "fetch_group_messages",
+  subscribeGroupMessages: "subscribe_group_messages",
 } as const;
 
 export const emptyInputSchema = z.object({});
@@ -119,6 +120,13 @@ export const fetchGroupMessagesOutputSchema = z.object({
   messages: z.array(groupMessageSchema),
 });
 
+export const subscribeGroupMessagesInputSchema =
+  fetchGroupMessagesInputSchema;
+
+export const subscribeGroupMessagesOutputSchema = z.object({
+  subscribed: z.literal(true),
+});
+
 export type PublishKeyPackageInput = z.infer<
   typeof publishKeyPackageInputSchema
 >;
@@ -160,6 +168,12 @@ export type FetchGroupMessagesInput = z.infer<
 >;
 export type FetchGroupMessagesOutput = z.infer<
   typeof fetchGroupMessagesOutputSchema
+>;
+export type SubscribeGroupMessagesInput = z.infer<
+  typeof subscribeGroupMessagesInputSchema
+>;
+export type SubscribeGroupMessagesOutput = z.infer<
+  typeof subscribeGroupMessagesOutputSchema
 >;
 export type AvailableKeyPackage = z.infer<typeof availableKeyPackageSchema>;
 export type PendingWelcome = z.infer<typeof pendingWelcomeSchema>;
