@@ -202,11 +202,10 @@ describe("executeReplCommand", () => {
       watchGroup,
     } as never;
 
-    await executeReplCommand(
-      "accept-welcome",
-      ["kp-ref", "--watch"],
-      { session, output },
-    );
+    await executeReplCommand("accept-welcome", ["kp-ref", "--watch"], {
+      session,
+      output,
+    });
 
     expect(acceptWelcome).toHaveBeenCalledWith("kp-ref", undefined);
     expect(watchGroup).toHaveBeenCalledWith("demo");

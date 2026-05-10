@@ -65,9 +65,7 @@ export type coordinatorClient = {
   FetchGroupMessages: (
     input: FetchGroupMessagesInput,
   ) => Promise<FetchGroupMessagesOutput>;
-  SubscribeGroupMessages: (
-    input: SubscribeGroupMessagesInput,
-  ) => Promise<{
+  SubscribeGroupMessages: (input: SubscribeGroupMessagesInput) => Promise<{
     stream: AsyncIterable<GroupMessage>;
     result: Promise<SubscribeGroupMessagesOutput>;
     abort: (reason?: string) => Promise<void>;
@@ -262,9 +260,7 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  async SubscribeGroupMessages(
-    input: SubscribeGroupMessagesInput,
-  ): Promise<{
+  async SubscribeGroupMessages(input: SubscribeGroupMessagesInput): Promise<{
     stream: AsyncIterable<GroupMessage>;
     result: Promise<SubscribeGroupMessagesOutput>;
     abort: (reason?: string) => Promise<void>;

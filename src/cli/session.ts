@@ -18,7 +18,8 @@ import {
   type ListAvailableKeyPackagesOutput,
 } from "../contracts/index.ts";
 import { cordnClient } from "./coordinatorClient.ts";
-import { applyGroupSync } from "./groupSync.ts";
+import { ingestGroupMessages } from "./groupSync.ts";
+import { runGroupWatch } from "./groupWatch.ts";
 import { acceptStoredWelcome, prepareAddMember } from "./membershipFlow.ts";
 import type {
   CliSessionOptions,
@@ -72,6 +73,23 @@ export interface WatchEvent {
   error?: string;
 }
 
+export type GroupEvent =
+  | {
+      type: "watch-status-changed";
+      groupAlias: string;
+      watchStatus: GroupWatchStatus | "idle";
+      error?: string;
+    }
+  | {
+      type: "messages-ingested";
+      groupAlias: string;
+      watchStatus: GroupWatchStatus | "idle";
+      received: StoredMessage[];
+      reconciled: StoredMessage[];
+      issues: SyncIssue[];
+      error?: string;
+    };
+
 interface GroupWatchHandle {
   abort: (reason?: string) => Promise<void>;
   task: Promise<void>;
@@ -87,7 +105,7 @@ export class CliSession {
   private readonly store = new CliSessionStore();
   private readonly groupIdDecoder = new TextDecoder();
   private readonly watchHandles = new Map<string, GroupWatchHandle>();
-  private readonly watchListeners = new Set<(event: WatchEvent) => void>();
+  private readonly groupEventListeners = new Set<(event: GroupEvent) => void>();
 
   constructor(options: CliSessionOptions = {}) {
     this.privateKey = options.privateKey ?? createPrivateKeyHex();
@@ -143,9 +161,36 @@ export class CliSession {
   }
 
   onWatchEvent(listener: (event: WatchEvent) => void): () => void {
-    this.watchListeners.add(listener);
+    const unsubscribe = this.onGroupEvent((event) => {
+      if (event.type === "watch-status-changed") {
+        listener({
+          groupAlias: event.groupAlias,
+          received: [],
+          issues: [],
+          watchStatus: event.watchStatus,
+          error: event.error,
+        });
+        return;
+      }
+
+      listener({
+        groupAlias: event.groupAlias,
+        received: event.received,
+        issues: event.issues,
+        watchStatus: event.watchStatus,
+        error: event.error,
+      });
+    });
+
     return () => {
-      this.watchListeners.delete(listener);
+      unsubscribe();
+    };
+  }
+
+  onGroupEvent(listener: (event: GroupEvent) => void): () => void {
+    this.groupEventListeners.add(listener);
+    return () => {
+      this.groupEventListeners.delete(listener);
     };
   }
 
@@ -409,7 +454,10 @@ export class CliSession {
       this.deriveGroupId(group.state),
       group.fetchCursor,
     );
-    const { received } = await this.applyIncomingMessages(group, result.messages);
+    const { received } = await this.applyIncomingMessages(
+      group,
+      result.messages,
+    );
     return received;
   }
 
@@ -421,42 +469,50 @@ export class CliSession {
     const group = this.getGroup(groupAlias);
     const groupId = this.deriveGroupId(group.state);
 
-    const task = (async () => {
-      this.setWatchStatus(groupAlias, "connecting");
-
-      const catchup = await this.fetchRawGroupMessages(groupId, group.fetchCursor);
-      const catchupResult = await this.applyIncomingMessages(group, catchup.messages);
-      this.emitWatchEvent(groupAlias, catchupResult.received, catchupResult.issues);
-
-      const subscription = await this.client.SubscribeGroupMessages({
-        groupId,
-        afterCursor: group.fetchCursor > 0 ? group.fetchCursor : undefined,
-      });
-      void subscription.result.catch(() => undefined);
-
-      const handle = this.watchHandles.get(groupAlias);
-      if (handle) {
-        handle.abort = async (reason?: string) => {
-          await subscription.abort(reason).catch(() => undefined);
-        };
-      }
-
-      this.setWatchStatus(groupAlias, "watching");
-
-      for await (const message of subscription.stream) {
-        const streamed = await this.applyIncomingMessages(group, [message]);
-        this.emitWatchEvent(groupAlias, streamed.received, streamed.issues);
-      }
-    })().catch((error) => {
-      const reason = error instanceof Error ? error.message : String(error);
-      this.setWatchStatus(groupAlias, "errored", reason);
-    });
-
     this.watchHandles.set(groupAlias, {
       abort: async () => undefined,
-      task,
+      task: Promise.resolve(),
       status: "connecting",
     });
+
+    const watch = runGroupWatch({
+      client: this.client,
+      groupId,
+      getAfterCursor: () => group.fetchCursor,
+      fetchMessages: async (afterCursor) => {
+        const result = await this.fetchRawGroupMessages(groupId, afterCursor);
+        return result.messages;
+      },
+      callbacks: {
+        onConnecting: () => {
+          this.setWatchStatus(groupAlias, "connecting");
+        },
+        onWatching: () => {
+          this.setWatchStatus(groupAlias, "watching");
+        },
+        onMessages: async (messages) => {
+          const result = await this.applyIncomingMessages(group, messages);
+          this.emitMessageEvent(
+            groupAlias,
+            result.received,
+            result.reconciled,
+            result.issues,
+          );
+        },
+      },
+    });
+
+    const task = watch.task.catch((error) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.setWatchStatus(groupAlias, "errored", reason);
+      throw error;
+    });
+
+    const handle = this.watchHandles.get(groupAlias);
+    if (handle) {
+      handle.abort = watch.abort;
+      handle.task = task;
+    }
   }
 
   async unwatchGroup(groupAlias: string): Promise<void> {
@@ -468,7 +524,7 @@ export class CliSession {
     this.watchHandles.delete(groupAlias);
     await handle.abort("user requested stop").catch(() => undefined);
     await handle.task.catch(() => undefined);
-    this.emitWatchEvent(groupAlias, [], []);
+    this.emitStatusEvent(groupAlias);
   }
 
   async watchAllGroups(): Promise<void> {
@@ -514,7 +570,7 @@ export class CliSession {
   ): Promise<FetchGroupMessagesOutput> {
     return this.client.FetchGroupMessages({
       groupId,
-      afterCursor: afterCursor > 0 ? afterCursor : undefined,
+      afterCursor: this.toOptionalCursor(afterCursor),
     });
   }
 
@@ -549,18 +605,25 @@ export class CliSession {
     return this.groupIdDecoder.decode(state.groupContext.groupId);
   }
 
+  private toOptionalCursor(cursor: number): number | undefined {
+    return cursor > 0 ? cursor : undefined;
+  }
+
   private async applyIncomingMessages(
     group: GroupSessionState,
     messages: FetchGroupMessagesOutput["messages"],
     options: {
       suppressIssue?: (issue: SyncIssue) => boolean;
     } = {},
-  ): Promise<{ received: StoredMessage[]; issues: SyncIssue[] }> {
-    const previousIssueCount = group.syncIssues.length;
-    const sync = await applyGroupSync({
+  ): Promise<{
+    received: StoredMessage[];
+    reconciled: StoredMessage[];
+    issues: SyncIssue[];
+  }> {
+    const sync = await ingestGroupMessages({
       group,
       messages,
-      hasPendingEpochOperation: (opaqueMessageBase64) =>
+      hasPendingEpochOperation: (opaqueMessageBase64: string) =>
         hasPendingEpochOperation(
           this.store.pendingOperations,
           group.alias,
@@ -586,13 +649,14 @@ export class CliSession {
 
     return {
       received: sync.received,
+      reconciled: sync.reconciled,
       issues: options.suppressIssue
         ? this.removeSuppressedIssues(
             group,
-            previousIssueCount,
+            group.syncIssues.length - sync.issues.length,
             options.suppressIssue,
           )
-        : group.syncIssues.slice(previousIssueCount),
+        : sync.issues,
     };
   }
 
@@ -608,7 +672,8 @@ export class CliSession {
     await this.applyIncomingMessages(group, result.messages, {
       suppressIssue: (issue) =>
         issue.createdAt <= welcomeCreatedAt &&
-        (issue.detail === "Cannot process commit or proposal from former epoch" ||
+        (issue.detail ===
+          "Cannot process commit or proposal from former epoch" ||
           issue.detail === "Cannot process message, epoch too old"),
     });
   }
@@ -637,24 +702,41 @@ export class CliSession {
 
     handle.status = status;
     handle.lastError = lastError;
-    this.emitWatchEvent(groupAlias, [], []);
+    this.emitStatusEvent(groupAlias);
   }
 
-  private emitWatchEvent(
+  private emitStatusEvent(groupAlias: string): void {
+    const handle = this.watchHandles.get(groupAlias);
+    const event: GroupEvent = {
+      type: "watch-status-changed",
+      groupAlias,
+      watchStatus: handle?.status ?? "idle",
+      error: handle?.lastError,
+    };
+
+    for (const listener of this.groupEventListeners) {
+      listener(event);
+    }
+  }
+
+  private emitMessageEvent(
     groupAlias: string,
     received: StoredMessage[],
+    reconciled: StoredMessage[],
     issues: SyncIssue[],
   ): void {
     const handle = this.watchHandles.get(groupAlias);
-    const event: WatchEvent = {
+    const event: GroupEvent = {
+      type: "messages-ingested",
       groupAlias,
       received,
+      reconciled,
       issues,
       watchStatus: handle?.status ?? "idle",
       error: handle?.lastError,
     };
 
-    for (const listener of this.watchListeners) {
+    for (const listener of this.groupEventListeners) {
       listener(event);
     }
   }

@@ -26,6 +26,15 @@ Active clients should prefer a fetch-then-subscribe flow:
 1. call [`FetchGroupMessages`](src/cli/coordinatorClient.ts:258) for bounded catch-up
 2. then call [`SubscribeGroupMessages`](src/cli/coordinatorClient.ts:269) from the freshest known cursor for CEP-41 live delivery
 
+The reference client logic in [`src/cli/`](src/cli/) is intentionally opinionated about synchronization strategy:
+
+- fetch backlog first, then open the live subscription
+- feed both fetch and live stream records through one shared ingestion pipeline
+- reconcile self-authored echoed ciphertext by identity instead of reprocessing it through MLS
+- finalize pending local epoch operations only after the matching inbound commit is observed
+
+These rules are documented in more detail in [`src/cli/README.md`](src/cli/README.md:54).
+
 ## Run the server
 
 Start the runnable entrypoint:

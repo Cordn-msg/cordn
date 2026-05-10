@@ -120,8 +120,7 @@ export const fetchGroupMessagesOutputSchema = z.object({
   messages: z.array(groupMessageSchema),
 });
 
-export const subscribeGroupMessagesInputSchema =
-  fetchGroupMessagesInputSchema;
+export const subscribeGroupMessagesInputSchema = fetchGroupMessagesInputSchema;
 
 export const subscribeGroupMessagesOutputSchema = z.object({
   subscribed: z.literal(true),

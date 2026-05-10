@@ -12,19 +12,31 @@ export interface RawGroupMessage {
   opaqueMessageBase64: string;
 }
 
-export interface GroupSyncResult {
+export interface GroupIngestionResult {
   received: StoredMessage[];
+  reconciled: StoredMessage[];
+  issues: GroupSessionState["syncIssues"];
+  cursorAdvancedTo: number;
   appliedPendingCommitMessages: Set<string>;
   rejectedPendingCommitMessages: Set<string>;
 }
 
-export async function applyGroupSync(params: {
+function isFormerEpochIssue(detail: string): boolean {
+  return (
+    detail === "Cannot process commit or proposal from former epoch" ||
+    detail === "Cannot process message, epoch too old"
+  );
+}
+
+export async function ingestGroupMessages(params: {
   group: GroupSessionState;
   messages: RawGroupMessage[];
   hasPendingEpochOperation: (opaqueMessageBase64: string) => boolean;
-}): Promise<GroupSyncResult> {
+}): Promise<GroupIngestionResult> {
   const { group, messages, hasPendingEpochOperation } = params;
   const received: StoredMessage[] = [];
+  const reconciled: StoredMessage[] = [];
+  const issues: GroupSessionState["syncIssues"] = [];
   const appliedPendingCommitMessages = new Set<string>();
   const rejectedPendingCommitMessages = new Set<string>();
 
@@ -50,6 +62,7 @@ export async function applyGroupSync(params: {
       if (existingOutbound) {
         existingOutbound.cursor = message.cursor;
         existingOutbound.createdAt = message.createdAt;
+        reconciled.push(existingOutbound);
       }
 
       group.fetchCursor = message.cursor;
@@ -67,17 +80,16 @@ export async function applyGroupSync(params: {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
 
-      if (
-        detail === "Cannot process commit or proposal from former epoch" ||
-        detail === "Cannot process message, epoch too old"
-      ) {
+      if (isFormerEpochIssue(detail)) {
         group.fetchCursor = message.cursor;
         group.lastCursor = Math.max(group.lastCursor, message.cursor);
-        group.syncIssues.push({
+        const issue = {
           cursor: message.cursor,
           createdAt: message.createdAt,
           detail,
-        });
+        };
+        group.syncIssues.push(issue);
+        issues.push(issue);
 
         if (isPendingOperationMessage) {
           rejectedPendingCommitMessages.add(message.opaqueMessageBase64);
@@ -129,6 +141,9 @@ export async function applyGroupSync(params: {
 
   return {
     received,
+    reconciled,
+    issues,
+    cursorAdvancedTo: group.fetchCursor,
     appliedPendingCommitMessages,
     rejectedPendingCommitMessages,
   };

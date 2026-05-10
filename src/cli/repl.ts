@@ -31,16 +31,21 @@ export async function startCliRepl(session: CliSession): Promise<void> {
     rl.prompt(true);
   };
 
-  const unsubscribeWatchEvents = session.onWatchEvent((event) => {
+  const unsubscribeWatchEvents = session.onGroupEvent((event) => {
     if (event.groupAlias !== selectedGroupAlias) {
       return;
     }
 
-    if (event.error) {
+    if (event.type === "watch-status-changed") {
+      if (!event.error) {
+        return;
+      }
+
       output.write(
         `${colorize(`watch error: ${event.error}`, ansi.red)} ${formatPromptGroupLabel(session, event.groupAlias)}\n`,
       );
       redrawAfterAsyncOutput();
+      return;
     }
 
     for (const issue of event.issues) {
@@ -53,7 +58,9 @@ export async function startCliRepl(session: CliSession): Promise<void> {
       return;
     }
 
-    output.write(`${formatSyncResult(session, event.groupAlias, event.received)}\n`);
+    output.write(
+      `${formatSyncResult(session, event.groupAlias, event.received)}\n`,
+    );
     redrawAfterAsyncOutput();
   });
 

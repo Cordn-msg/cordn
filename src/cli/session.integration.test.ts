@@ -682,7 +682,10 @@ describe("CliSession", () => {
       expect(inviterSync).toEqual([]);
 
       await bob.fetchWelcomes();
-      const joined = await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+      const joined = await bob.acceptWelcome(
+        invitation.keyPackageReference,
+        "demo",
+      );
 
       expect(joined.alias).toBe("demo");
       expect(bob.getGroup("demo").fetchCursor).toBe(1);
@@ -775,6 +778,72 @@ describe("CliSession", () => {
         expect(
           watchEvents.find((event) => event.watchStatus === "errored"),
         ).toBeUndefined();
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("emits semantic group events for watch status and message ingestion", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      const events: Array<string> = [];
+      const unsubscribe = bob.onGroupEvent((event) => {
+        if (event.type === "watch-status-changed") {
+          events.push(`status:${event.watchStatus}`);
+          return;
+        }
+
+        if (event.received.length > 0) {
+          events.push(
+            `received:${event.received.map((message) => message.plaintext).join(",")}`,
+          );
+        }
+      });
+
+      try {
+        await bob.watchGroup("demo");
+        await waitForCondition(() => bob.getWatchStatus("demo") === "watching");
+
+        await alice.sendMessage("demo", "semantic-event-check");
+
+        await waitForCondition(() =>
+          events.includes("received:semantic-event-check"),
+        );
+
+        expect(events).toContain("status:connecting");
+        expect(events).toContain("status:watching");
+        expect(events).toContain("received:semantic-event-check");
       } finally {
         unsubscribe();
       }

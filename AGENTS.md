@@ -62,6 +62,7 @@ Agent expectations:
 - when changing group-message streaming, cover backlog replay and live delivery behavior
 - run targeted Vitest commands for touched areas before finishing
 - run `pnpm run typecheck` when changing public types, contracts, or entrypoints
+- preserve the CLI reference-client model in [`src/cli/README.md`](src/cli/README.md:54): fetch first, then subscribe; use one shared inbound ingestion path for fetch and live stream records; reconcile self-echoes without MLS reprocessing; finalize pending epoch operations only after inbound confirmation
 
 ## Code style
 

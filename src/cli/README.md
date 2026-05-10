@@ -50,3 +50,14 @@ Useful commands:
 - Watching keeps a CEP-41 subscription alive in the background so watched groups stay locally synchronized without repeated bounded fetches.
 - Live messages are rendered immediately when a watched group is currently selected in the REPL.
 - This client is intentionally small and focused on development workflows rather than polished end-user UX.
+
+## Reference client algorithm
+
+The CLI is intended to act as a reference client for the core local sync logic.
+
+- Every group tracks a monotonic local fetch cursor.
+- Bounded catch-up still uses [`FetchGroupMessages()`](src/cli/coordinatorClient.ts:255) as the canonical recovery API.
+- Watch mode follows a strict `fetch first, then subscribe` flow matching [`design/group-message-stream-subscription-plan.md`](design/group-message-stream-subscription-plan.md:200).
+- Fetched backlog and streamed live records are both treated as the same raw group-message input and are processed through one shared ingestion pipeline in [`ingestGroupMessages()`](src/cli/groupSync.ts:31).
+- Outbound self-echoes are reconciled by ciphertext identity instead of being MLS-processed again, so local send state is not corrupted by coordinator replay.
+- Pending epoch operations such as add-member commits are only finalized after the corresponding inbound commit is observed and classified by the ingestion pipeline.
