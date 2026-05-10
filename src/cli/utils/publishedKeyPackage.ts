@@ -21,14 +21,16 @@ function readKeyPackageBase64FromPublicationEvent(
   publicationEvent: NostrEvent,
 ): Uint8Array {
   const parsed = JSON.parse(publicationEvent.content);
-  const keyPackageBase64 = parsed.params?.arguments?.keyPackageBase64;
+  const keyPackageBase64 =
+    parsed.params?.arguments?.kp_64 ??
+    parsed.params?.arguments?.keyPackageBase64;
   if (typeof keyPackageBase64 !== "string") {
-    throw new Error("Missing keyPackageBase64 in publication event");
+    throw new Error("Missing kp_64 in publication event");
   }
 
   return assertNonEmptyBase64(
     keyPackageBase64,
-    "publicationEvent.params.arguments.keyPackageBase64",
+    "publicationEvent.params.arguments.kp_64",
   );
 }
 

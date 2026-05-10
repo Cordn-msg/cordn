@@ -88,7 +88,7 @@ export async function acceptStoredWelcome(params: {
   ) => GroupSessionState;
 }): Promise<GroupSessionState> {
   const joinState = await joinGroupFromWelcome({
-    welcome: decodeWelcomeBase64(params.welcome.welcomeBase64),
+    welcome: decodeWelcomeBase64(params.welcome.welcome_64),
     keyPackage: params.keyPackage.keyPackage,
     privateKeyPackage: params.keyPackage.privateKeyPackage,
   });

@@ -302,13 +302,13 @@ export async function executeReplCommand(
     case "fetch-welcomes": {
       const welcomes = await session.fetchWelcomes();
       output.write(
-        `${formatList(welcomes.map((welcome) => `${formatWelcomeKeyPackageReference(welcome.keyPackageReference)} keyPackageRef=${formatKeyPackageRef(welcome.keyPackageReference)}`))}\n`,
+        `${formatList(welcomes.map((welcome) => `${formatWelcomeKeyPackageReference(welcome.kp_ref)} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)}`))}\n`,
       );
       break;
     }
     case "welcomes": {
       output.write(
-        `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeKeyPackageReference(welcome.keyPackageReference)} keyPackageRef=${formatKeyPackageRef(welcome.keyPackageReference)}`))}\n`,
+        `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeKeyPackageReference(welcome.kp_ref)} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)}`))}\n`,
       );
       break;
     }

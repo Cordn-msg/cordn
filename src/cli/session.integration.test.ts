@@ -614,9 +614,9 @@ describe("CliSession", () => {
       await carol.fetchWelcomes();
       await dave.fetchWelcomes();
 
-      expect(
-        carol.listWelcomes().map((welcome) => welcome.keyPackageReference),
-      ).toEqual([carolInvitation.keyPackageReference]);
+      expect(carol.listWelcomes().map((welcome) => welcome.kp_ref)).toEqual([
+        carolInvitation.keyPackageReference,
+      ]);
       expect(dave.listWelcomes()).toEqual([]);
 
       expect(alice.listSyncIssues("demo")).toEqual([
@@ -1119,8 +1119,8 @@ describe("CliSession", () => {
       await dave.fetchWelcomes();
 
       const deliveredRefs = [
-        ...carol.listWelcomes().map((welcome) => welcome.keyPackageReference),
-        ...dave.listWelcomes().map((welcome) => welcome.keyPackageReference),
+        ...carol.listWelcomes().map((welcome) => welcome.kp_ref),
+        ...dave.listWelcomes().map((welcome) => welcome.kp_ref),
       ];
 
       expect(deliveredRefs).toHaveLength(1);
@@ -1138,9 +1138,7 @@ describe("CliSession", () => {
         carol
           .listWelcomes()
           .find(
-            (welcome) =>
-              welcome.keyPackageReference ===
-              carolInvitation.keyPackageReference,
+            (welcome) => welcome.kp_ref === carolInvitation.keyPackageReference,
           ) !== undefined;
 
       if (carolJoined) {
@@ -1311,7 +1309,7 @@ describe("CliSession", () => {
 
       expect(await rejectedSession.fetchWelcomes()).toEqual([
         expect.objectContaining({
-          keyPackageReference: recoveryInvitation.keyPackageReference,
+          kp_ref: recoveryInvitation.keyPackageReference,
         }),
       ]);
       await rejectedSession.acceptWelcome(
@@ -1426,16 +1424,12 @@ describe("CliSession", () => {
         const carolCanJoin = carol
           .listWelcomes()
           .some(
-            (welcome) =>
-              welcome.keyPackageReference ===
-              carolInvitation.keyPackageReference,
+            (welcome) => welcome.kp_ref === carolInvitation.keyPackageReference,
           );
         const daveCanJoin = dave
           .listWelcomes()
           .some(
-            (welcome) =>
-              welcome.keyPackageReference ===
-              daveInvitation.keyPackageReference,
+            (welcome) => welcome.kp_ref === daveInvitation.keyPackageReference,
           );
 
         expect(Number(carolCanJoin) + Number(daveCanJoin)).toBe(1);
@@ -1579,12 +1573,12 @@ describe("CliSession", () => {
 
       expect(carol.listWelcomes()).toEqual([
         expect.objectContaining({
-          keyPackageReference: carolIntoA.keyPackageReference,
+          kp_ref: carolIntoA.keyPackageReference,
         }),
       ]);
       expect(dave.listWelcomes()).toEqual([
         expect.objectContaining({
-          keyPackageReference: daveIntoB.keyPackageReference,
+          kp_ref: daveIntoB.keyPackageReference,
         }),
       ]);
 
@@ -1618,13 +1612,13 @@ describe("CliSession", () => {
 
       expect(erin.listWelcomes()).toEqual([
         expect.objectContaining({
-          keyPackageReference: erinIntoA.keyPackageReference,
+          kp_ref: erinIntoA.keyPackageReference,
         }),
       ]);
       expect(
         carol
           .listWelcomes()
-          .map((welcome) => welcome.keyPackageReference)
+          .map((welcome) => welcome.kp_ref)
           .filter((ref) => ref === carolIntoB.keyPackageReference),
       ).toEqual([carolIntoB.keyPackageReference]);
 
@@ -1793,30 +1787,18 @@ describe("CliSession", () => {
       const acceptedA = [
         carol
           .listWelcomes()
-          .some(
-            (welcome) =>
-              welcome.keyPackageReference === carolIntoA.keyPackageReference,
-          ),
+          .some((welcome) => welcome.kp_ref === carolIntoA.keyPackageReference),
         dave
           .listWelcomes()
-          .some(
-            (welcome) =>
-              welcome.keyPackageReference === daveIntoA.keyPackageReference,
-          ),
+          .some((welcome) => welcome.kp_ref === daveIntoA.keyPackageReference),
       ];
       const acceptedB = [
         erin
           .listWelcomes()
-          .some(
-            (welcome) =>
-              welcome.keyPackageReference === erinIntoB.keyPackageReference,
-          ),
+          .some((welcome) => welcome.kp_ref === erinIntoB.keyPackageReference),
         frank
           .listWelcomes()
-          .some(
-            (welcome) =>
-              welcome.keyPackageReference === frankIntoB.keyPackageReference,
-          ),
+          .some((welcome) => welcome.kp_ref === frankIntoB.keyPackageReference),
       ];
 
       expect(acceptedA.filter(Boolean)).toHaveLength(1);

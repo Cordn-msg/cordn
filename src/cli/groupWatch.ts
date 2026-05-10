@@ -31,8 +31,8 @@ export function runGroupWatch(params: {
 
     const afterCursor = getAfterCursor();
     const subscription = await client.SubscribeGroupMessages({
-      groupId,
-      afterCursor: afterCursor > 0 ? afterCursor : undefined,
+      gid: groupId,
+      after: afterCursor > 0 ? afterCursor : undefined,
     });
     void subscription.result.catch(() => undefined);
 

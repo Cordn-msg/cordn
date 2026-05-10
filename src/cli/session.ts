@@ -250,11 +250,11 @@ export class CliSession {
     }
 
     const result = await this.client.PublishKeyPackage({
-      keyPackageRef: stored.keyPackageRef,
-      keyPackageBase64: stored.keyPackageBase64,
+      kp_ref: stored.keyPackageRef,
+      kp_64: stored.keyPackageBase64,
     });
-    stored.isLastResort = result.isLastResort;
-    stored.publishedAt = result.publishedAt;
+    stored.isLastResort = result.last_resort;
+    stored.publishedAt = result.at;
     return stored;
   }
 
@@ -282,7 +282,7 @@ export class CliSession {
       if (!byRef && !byAlias) {
         const available = await this.listAvailableKeyPackages();
         const existsRemotely = available.some(
-          (entry) => entry.keyPackageRef === keyPackageRef,
+          (entry) => entry.kp_ref === keyPackageRef,
         );
 
         if (!existsRemotely) {
@@ -290,7 +290,7 @@ export class CliSession {
         }
       }
 
-      await this.client.RemoveKeyPackages({ keyPackageRefs: [keyPackageRef] });
+      await this.client.RemoveKeyPackages({ kp_refs: [keyPackageRef] });
     }
 
     return { keyPackageRef, removedLocal };
@@ -327,7 +327,21 @@ export class CliSession {
       groupAlias,
       group,
       identifier,
-      consumeKeyPackage: (params) => this.client.ConsumeKeyPackage(params),
+      consumeKeyPackage: async (params) => {
+        const result = await this.client.ConsumeKeyPackage({
+          id: params.identifier,
+        });
+
+        return {
+          keyPackage: result.keyPackage
+            ? {
+                keyPackageRef: result.keyPackage.kp_ref,
+                stablePubkey: result.keyPackage.pk,
+                publicationEvent: result.keyPackage.event,
+              }
+            : null,
+        };
+      },
       deriveGroupId: (state) => this.deriveGroupId(state),
     });
 
@@ -337,7 +351,7 @@ export class CliSession {
     );
 
     await this.client.PostGroupMessage({
-      opaqueMessageBase64: prepared.commitMessageBase64,
+      msg_64: prepared.commitMessageBase64,
     });
 
     return { keyPackageReference: prepared.keyPackageReference };
@@ -362,10 +376,10 @@ export class CliSession {
   async listAvailableKeyPackageSummaries(): Promise<KeyPackageSummary[]> {
     const keyPackages = await this.listAvailableKeyPackages();
     return keyPackages.map((entry) => ({
-      stablePubkey: entry.stablePubkey,
-      keyPackageRef: entry.keyPackageRef,
-      isLastResort: entry.isLastResort,
-      publishedAt: entry.publishedAt,
+      stablePubkey: entry.pk,
+      keyPackageRef: entry.kp_ref,
+      isLastResort: entry.last_resort,
+      publishedAt: entry.at,
       supportsGroupMetadata: true,
     }));
   }
@@ -375,14 +389,10 @@ export class CliSession {
     groupAlias?: string,
   ): Promise<GroupSessionState> {
     const welcome = this.store.getWelcome(keyPackageReference);
-    const keyPackage = this.store.findKeyPackageByRef(
-      welcome.keyPackageReference,
-    );
+    const keyPackage = this.store.findKeyPackageByRef(welcome.kp_ref);
 
     if (!keyPackage) {
-      throw new MissingLocalKeyPackageForWelcomeError(
-        welcome.keyPackageReference,
-      );
+      throw new MissingLocalKeyPackageForWelcomeError(welcome.kp_ref);
     }
 
     const alias = groupAlias ?? `group-${this.store.groupCount + 1}`;
@@ -397,7 +407,7 @@ export class CliSession {
     });
 
     this.store.addGroup(group);
-    await this.establishPostWelcomeBaseline(group, welcome.createdAt);
+    await this.establishPostWelcomeBaseline(group, welcome.at);
     this.store.deleteWelcome(keyPackageReference);
 
     return this.getGroup(alias);
@@ -427,11 +437,11 @@ export class CliSession {
     group.messages.push(stored);
     try {
       const posted = await this.client.PostGroupMessage({
-        opaqueMessageBase64: outbound.opaqueMessageBase64,
+        msg_64: outbound.opaqueMessageBase64,
       });
 
       stored.cursor = posted.cursor;
-      stored.createdAt = posted.createdAt;
+      stored.createdAt = posted.at;
       group.lastCursor = Math.max(group.lastCursor, posted.cursor);
     } catch (error) {
       const index = group.messages.indexOf(stored);
@@ -569,8 +579,8 @@ export class CliSession {
     afterCursor: number,
   ): Promise<FetchGroupMessagesOutput> {
     return this.client.FetchGroupMessages({
-      groupId,
-      afterCursor: this.toOptionalCursor(afterCursor),
+      gid: groupId,
+      after: this.toOptionalCursor(afterCursor),
     });
   }
 
@@ -622,7 +632,12 @@ export class CliSession {
   }> {
     const sync = await ingestGroupMessages({
       group,
-      messages,
+      messages: messages.map((message) => ({
+        cursor: message.cursor,
+        groupId: message.gid,
+        createdAt: message.at,
+        opaqueMessageBase64: message.msg_64,
+      })),
       hasPendingEpochOperation: (opaqueMessageBase64: string) =>
         hasPendingEpochOperation(
           this.store.pendingOperations,

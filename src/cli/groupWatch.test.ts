@@ -23,9 +23,9 @@ describe("runGroupWatch", () => {
     let releaseLiveMessage: (() => void) | undefined;
     const stream: AsyncIterable<{
       cursor: number;
-      groupId: string;
-      createdAt: number;
-      opaqueMessageBase64: string;
+      gid: string;
+      at: number;
+      msg_64: string;
     }> = {
       async *[Symbol.asyncIterator]() {
         await new Promise<void>((resolve) => {
@@ -34,9 +34,9 @@ describe("runGroupWatch", () => {
 
         yield {
           cursor: 5,
-          groupId: "demo",
-          createdAt: 101,
-          opaqueMessageBase64: "live-1",
+          gid: "demo",
+          at: 101,
+          msg_64: "live-1",
         };
       },
     };
@@ -54,9 +54,9 @@ describe("runGroupWatch", () => {
       fetchMessages: async () => [
         {
           cursor: 4,
-          groupId: "demo",
-          createdAt: 100,
-          opaqueMessageBase64: "catchup",
+          gid: "demo",
+          at: 100,
+          msg_64: "catchup",
         },
       ],
       callbacks: {
@@ -85,7 +85,7 @@ describe("runGroupWatch", () => {
   });
 
   test("subscribes from the cursor after catchup ingestion advances progress", async () => {
-    const subscribeCalls: Array<{ groupId: string; afterCursor?: number }> = [];
+    const subscribeCalls: Array<{ gid: string; after?: number }> = [];
     let currentCursor = 3;
 
     const watch = runGroupWatch({
@@ -110,9 +110,9 @@ describe("runGroupWatch", () => {
         return [
           {
             cursor: 8,
-            groupId: "demo",
-            createdAt: 100,
-            opaqueMessageBase64: "catchup-8",
+            gid: "demo",
+            at: 100,
+            msg_64: "catchup-8",
           },
         ];
       },
@@ -130,7 +130,7 @@ describe("runGroupWatch", () => {
 
     await watch.task;
 
-    expect(subscribeCalls).toEqual([{ groupId: "demo", afterCursor: 8 }]);
+    expect(subscribeCalls).toEqual([{ gid: "demo", after: 8 }]);
   });
 
   test("preserves the fetch subscribe seam when the stream starts at the current cursor boundary", async () => {
@@ -143,15 +143,15 @@ describe("runGroupWatch", () => {
             async *[Symbol.asyncIterator]() {
               yield {
                 cursor: 4,
-                groupId: "demo",
-                createdAt: 101,
-                opaqueMessageBase64: "replayed-boundary",
+                gid: "demo",
+                at: 101,
+                msg_64: "replayed-boundary",
               };
               yield {
                 cursor: 5,
-                groupId: "demo",
-                createdAt: 102,
-                opaqueMessageBase64: "live-5",
+                gid: "demo",
+                at: 102,
+                msg_64: "live-5",
               };
             },
           },
@@ -164,9 +164,9 @@ describe("runGroupWatch", () => {
       fetchMessages: async () => [
         {
           cursor: 4,
-          groupId: "demo",
-          createdAt: 100,
-          opaqueMessageBase64: "catchup-4",
+          gid: "demo",
+          at: 100,
+          msg_64: "catchup-4",
         },
       ],
       callbacks: {

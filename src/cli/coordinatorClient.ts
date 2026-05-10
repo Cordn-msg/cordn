@@ -6,13 +6,12 @@ import {
   type NostrTransportOptions,
   PrivateKeySigner,
   ApplesauceRelayPool,
-  EncryptionMode,
 } from "@contextvm/sdk";
 import type { ZodType } from "zod";
 import {
   type ConsumeKeyPackageInput,
   consumeKeyPackageOutputSchema,
-  CONTEXTVM_COORDINATOR_TOOLS,
+  COORDINATOR_METHODS,
   type FetchGroupMessagesInput,
   fetchGroupMessagesOutputSchema,
   fetchPendingWelcomesOutputSchema,
@@ -147,15 +146,15 @@ export class cordnClient implements coordinatorClient {
 
   /**
    * Publish an MLS key package for the injected caller identity.
-   * @param {string} keyPackageRef The key package ref parameter
-   * @param {string} keyPackageBase64 The key package base64 parameter
-   * @returns {Promise<PublishKeyPackageOutput>} The result of the publish_key_package operation
+   * @param {string} kp_ref The key package ref parameter
+   * @param {string} kp_64 The key package base64 parameter
+   * @returns {Promise<PublishKeyPackageOutput>} The result of the kp_publish operation
    */
   async PublishKeyPackage(
     input: PublishKeyPackageInput,
   ): Promise<PublishKeyPackageOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.publishKeyPackage,
+      COORDINATOR_METHODS.publishKeyPackage,
       input,
       publishKeyPackageOutputSchema,
     );
@@ -163,14 +162,14 @@ export class cordnClient implements coordinatorClient {
 
   /**
    * Consume the next published MLS key package by stable identity or exact key package ref.
-   * @param {string} identifier The stable pubkey or key package ref parameter
-   * @returns {Promise<ConsumeKeyPackageOutput>} The result of the consume_key_package operation
+   * @param {string} id The stable pubkey or key package ref parameter
+   * @returns {Promise<ConsumeKeyPackageOutput>} The result of the kp_take operation
    */
   async ConsumeKeyPackage(
     input: ConsumeKeyPackageInput,
   ): Promise<ConsumeKeyPackageOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.consumeKeyPackage,
+      COORDINATOR_METHODS.consumeKeyPackage,
       input,
       consumeKeyPackageOutputSchema,
     );
@@ -180,7 +179,7 @@ export class cordnClient implements coordinatorClient {
     input: RemoveKeyPackagesInput,
   ): Promise<RemoveKeyPackagesOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.removeKeyPackages,
+      COORDINATOR_METHODS.removeKeyPackages,
       input,
       removeKeyPackagesOutputSchema,
     );
@@ -188,13 +187,13 @@ export class cordnClient implements coordinatorClient {
 
   /**
    * List currently available published MLS key packages discoverable on the coordinator.
-   * @returns {Promise<ListAvailableKeyPackagesOutput>} The result of the list_available_key_packages operation
+   * @returns {Promise<ListAvailableKeyPackagesOutput>} The result of the kp_list operation
    */
   async ListAvailableKeyPackages(
     args: ListAvailableKeyPackagesInput = {},
   ): Promise<ListAvailableKeyPackagesOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.listAvailableKeyPackages,
+      COORDINATOR_METHODS.listAvailableKeyPackages,
       args,
       listAvailableKeyPackagesOutputSchema,
     );
@@ -202,13 +201,13 @@ export class cordnClient implements coordinatorClient {
 
   /**
    * Fetch and drain welcomes queued for the injected caller identity.
-   * @returns {Promise<FetchPendingWelcomesOutput>} The result of the fetch_pending_welcomes operation
+   * @returns {Promise<FetchPendingWelcomesOutput>} The result of the welcome_take operation
    */
   async FetchPendingWelcomes(
     args: FetchPendingWelcomesInput,
   ): Promise<FetchPendingWelcomesOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.fetchPendingWelcomes,
+      COORDINATOR_METHODS.fetchPendingWelcomes,
       args,
       fetchPendingWelcomesOutputSchema,
     );
@@ -216,14 +215,14 @@ export class cordnClient implements coordinatorClient {
 
   /**
    * Store an MLS welcome for a target stable identity.
-   * @param {string} targetStablePubkey The target stable pubkey parameter
-   * @param {string} keyPackageReference The key package reference parameter
-   * @param {string} welcomeBase64 The welcome base64 parameter
-   * @returns {Promise<StoreWelcomeOutput>} The result of the store_welcome operation
+   * @param {string} target_pk The target stable pubkey parameter
+   * @param {string} kp_ref The key package reference parameter
+   * @param {string} welcome_64 The welcome base64 parameter
+   * @returns {Promise<StoreWelcomeOutput>} The result of the welcome_store operation
    */
   async StoreWelcome(input: StoreWelcomeInput): Promise<StoreWelcomeOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.storeWelcome,
+      COORDINATOR_METHODS.storeWelcome,
       input,
       storeWelcomeOutputSchema,
     );
@@ -231,14 +230,14 @@ export class cordnClient implements coordinatorClient {
 
   /**
    * Queue an MLS opaque group message for the injected caller identity.
-   * @param {string} opaqueMessageBase64 The opaque message base64 parameter
-   * @returns {Promise<PostGroupMessageOutput>} The result of the post_group_message operation
+   * @param {string} msg_64 The opaque message base64 parameter
+   * @returns {Promise<PostGroupMessageOutput>} The result of the msg_post operation
    */
   async PostGroupMessage(
     input: PostGroupMessageInput,
   ): Promise<PostGroupMessageOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.postGroupMessage,
+      COORDINATOR_METHODS.postGroupMessage,
       input,
       postGroupMessageOutputSchema,
     );
@@ -246,15 +245,15 @@ export class cordnClient implements coordinatorClient {
 
   /**
    * Fetch queued MLS opaque group messages by group and optional cursor.
-   * @param {string} groupId The group id parameter
-   * @param {number} afterCursor [optional] The after cursor parameter
-   * @returns {Promise<FetchGroupMessagesOutput>} The result of the fetch_group_messages operation
+   * @param {string} gid The group id parameter
+   * @param {number} after [optional] The after cursor parameter
+   * @returns {Promise<FetchGroupMessagesOutput>} The result of the msg_fetch operation
    */
   async FetchGroupMessages(
     input: FetchGroupMessagesInput,
   ): Promise<FetchGroupMessagesOutput> {
     return this.call(
-      CONTEXTVM_COORDINATOR_TOOLS.fetchGroupMessages,
+      COORDINATOR_METHODS.fetchGroupMessages,
       input,
       fetchGroupMessagesOutputSchema,
     );
@@ -270,7 +269,7 @@ export class cordnClient implements coordinatorClient {
     const call = await callToolStream<CallToolResult>({
       client: this.client,
       transport: this.transport,
-      name: CONTEXTVM_COORDINATOR_TOOLS.subscribeGroupMessages,
+      name: COORDINATOR_METHODS.subscribeGroupMessages,
       arguments: { ...input },
     });
     void call.stream.closed.catch(() => undefined);

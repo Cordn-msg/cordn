@@ -35,7 +35,7 @@ function createPublicationEvent(params: {
       content: JSON.stringify({
         params: {
           arguments: {
-            keyPackageBase64: params.keyPackageBase64,
+            kp_64: params.keyPackageBase64,
           },
         },
       }),
@@ -94,31 +94,25 @@ describe("CoordinatorAdapter", () => {
 
     const published = await adapter.publishKeyPackage(
       {
-        keyPackageRef: "kp-ref-alice",
-        keyPackageBase64: encodeBase64(
-          encode(keyPackageEncoder, alice.keyPackage),
-        ),
+        kp_ref: "kp-ref-alice",
+        kp_64: encodeBase64(encode(keyPackageEncoder, alice.keyPackage)),
       },
       createExtra(alice.actor.stablePubkey, publicationEvent.id),
     );
 
     expect(published.content).toEqual([]);
-    expect(published.structuredContent.keyPackageRef).toBe("kp-ref-alice");
+    expect(published.structuredContent.kp_ref).toBe("kp-ref-alice");
 
     const consumed = adapter.consumeKeyPackage({
-      identifier: alice.actor.stablePubkey,
+      id: alice.actor.stablePubkey,
     });
 
     expect(consumed.content).toEqual([]);
-    expect(consumed.structuredContent.keyPackage?.stablePubkey).toBe(
+    expect(consumed.structuredContent.keyPackage?.pk).toBe(
       alice.actor.stablePubkey,
     );
-    expect(consumed.structuredContent.keyPackage?.keyPackageRef).toBe(
-      "kp-ref-alice",
-    );
-    expect(
-      consumed.structuredContent.keyPackage?.publicationEvent,
-    ).toMatchObject({
+    expect(consumed.structuredContent.keyPackage?.kp_ref).toBe("kp-ref-alice");
+    expect(consumed.structuredContent.keyPackage?.event).toMatchObject({
       id: publicationEvent.id,
       pubkey: publicationEvent.pubkey,
       created_at: publicationEvent.created_at,
@@ -159,20 +153,16 @@ describe("CoordinatorAdapter", () => {
 
     await adapter.publishKeyPackage(
       {
-        keyPackageRef: "kp-ref-alice",
-        keyPackageBase64: encodeBase64(
-          encode(keyPackageEncoder, alice.keyPackage),
-        ),
+        kp_ref: "kp-ref-alice",
+        kp_64: encodeBase64(encode(keyPackageEncoder, alice.keyPackage)),
       },
       createExtra(alice.actor.stablePubkey, aliceEvent.id),
     );
 
     await adapter.publishKeyPackage(
       {
-        keyPackageRef: "kp-ref-bob",
-        keyPackageBase64: encodeBase64(
-          encode(keyPackageEncoder, bob.keyPackage),
-        ),
+        kp_ref: "kp-ref-bob",
+        kp_64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
       },
       createExtra(bob.actor.stablePubkey, bobEvent.id),
     );
@@ -182,13 +172,13 @@ describe("CoordinatorAdapter", () => {
     expect(listed.content).toEqual([]);
     expect(listed.structuredContent.keyPackages).toHaveLength(2);
     expect(
-      listed.structuredContent.keyPackages.map((entry) => entry.stablePubkey),
+      listed.structuredContent.keyPackages.map((entry) => entry.pk),
     ).toEqual([alice.actor.stablePubkey, bob.actor.stablePubkey]);
 
     const consumed = adapter.consumeKeyPackage({
-      identifier: alice.actor.stablePubkey,
+      id: alice.actor.stablePubkey,
     });
-    expect(consumed.structuredContent.keyPackage?.stablePubkey).toBe(
+    expect(consumed.structuredContent.keyPackage?.pk).toBe(
       alice.actor.stablePubkey,
     );
   });
@@ -223,39 +213,35 @@ describe("CoordinatorAdapter", () => {
 
     await adapter.publishKeyPackage(
       {
-        keyPackageRef: "kp-ref-alice-remove",
-        keyPackageBase64: encodeBase64(
-          encode(keyPackageEncoder, alice.keyPackage),
-        ),
+        kp_ref: "kp-ref-alice-remove",
+        kp_64: encodeBase64(encode(keyPackageEncoder, alice.keyPackage)),
       },
       createExtra(alice.actor.stablePubkey, aliceEvent.id),
     );
     await adapter.publishKeyPackage(
       {
-        keyPackageRef: "kp-ref-bob-remove",
-        keyPackageBase64: encodeBase64(
-          encode(keyPackageEncoder, bob.keyPackage),
-        ),
+        kp_ref: "kp-ref-bob-remove",
+        kp_64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
       },
       createExtra(bob.actor.stablePubkey, bobEvent.id),
     );
 
     expect(
       adapter.removeKeyPackages(
-        { keyPackageRefs: ["kp-ref-alice-remove"] },
+        { kp_refs: ["kp-ref-alice-remove"] },
         createExtra(alice.actor.stablePubkey),
-      ).structuredContent.removedKeyPackageRefs,
+      ).structuredContent.kp_refs,
     ).toEqual(["kp-ref-alice-remove"]);
     expect(coordinator.getKeyPackage("kp-ref-alice-remove")).toBeNull();
     expect(() =>
       adapter.removeKeyPackages(
-        { keyPackageRefs: ["kp-ref-bob-remove"] },
+        { kp_refs: ["kp-ref-bob-remove"] },
         createExtra(alice.actor.stablePubkey),
       ),
     ).toThrow("Unauthorized key package ref: kp-ref-bob-remove");
     expect(() =>
       adapter.removeKeyPackages(
-        { keyPackageRefs: ["kp-ref-missing-remove"] },
+        { kp_refs: ["kp-ref-missing-remove"] },
         createExtra(alice.actor.stablePubkey),
       ),
     ).toThrow("Unknown key package ref: kp-ref-missing-remove");
@@ -269,10 +255,8 @@ describe("CoordinatorAdapter", () => {
     await expect(
       adapter.publishKeyPackage(
         {
-          keyPackageRef: "kp-ref-alice",
-          keyPackageBase64: encodeBase64(
-            encode(keyPackageEncoder, alice.keyPackage),
-          ),
+          kp_ref: "kp-ref-alice",
+          kp_64: encodeBase64(encode(keyPackageEncoder, alice.keyPackage)),
         },
         createExtra(),
       ),
@@ -287,21 +271,21 @@ describe("CoordinatorAdapter", () => {
     await expect(
       adapter.publishKeyPackage(
         {
-          keyPackageRef: "kp-ref-alice",
-          keyPackageBase64: "!!!",
+          kp_ref: "kp-ref-alice",
+          kp_64: "!!!",
         },
         createExtra(alice.actor.stablePubkey),
       ),
-    ).rejects.toThrowError("Invalid keyPackageBase64");
+    ).rejects.toThrowError("Invalid kp_64");
 
     expect(() =>
       adapter.postGroupMessage(
         {
-          opaqueMessageBase64: encodeBase64(Uint8Array.from([1, 2, 3])),
+          msg_64: encodeBase64(Uint8Array.from([1, 2, 3])),
         },
         createExtra(alice.actor.stablePubkey),
       ),
-    ).toThrowError("Invalid opaqueMessageBase64");
+    ).toThrowError("Invalid msg_64");
   });
 
   test("round-trips welcomes and queued group messages as base64 structured outputs", async () => {
@@ -323,22 +307,22 @@ describe("CoordinatorAdapter", () => {
     });
 
     const stored = adapter.storeWelcome({
-      targetStablePubkey: bob.actor.stablePubkey,
-      keyPackageReference: group.keyPackageRefHex,
-      welcomeBase64: encodeWelcomeAsBase64(group.welcome),
+      target_pk: bob.actor.stablePubkey,
+      kp_ref: group.keyPackageRefHex,
+      welcome_64: encodeWelcomeAsBase64(group.welcome),
     });
 
     expect(stored.content).toEqual([]);
-    expect(stored.structuredContent.createdAt).toBeTypeOf("number");
+    expect(stored.structuredContent.at).toBeTypeOf("number");
 
     const fetchedWelcomes = adapter.fetchPendingWelcomes(
       {},
       createExtra(bob.actor.stablePubkey),
     );
     expect(fetchedWelcomes.structuredContent.welcomes).toHaveLength(1);
-    expect(
-      fetchedWelcomes.structuredContent.welcomes[0]?.keyPackageReference,
-    ).toBe(group.keyPackageRefHex);
+    expect(fetchedWelcomes.structuredContent.welcomes[0]?.kp_ref).toBe(
+      group.keyPackageRefHex,
+    );
 
     const messageBytes = await createApplicationMessageBytes({
       state: group.senderState,
@@ -347,7 +331,7 @@ describe("CoordinatorAdapter", () => {
 
     const posted = adapter.postGroupMessage(
       {
-        opaqueMessageBase64: encodeBase64(messageBytes.encodedMessage),
+        msg_64: encodeBase64(messageBytes.encodedMessage),
       },
       createExtra(alice.actor.stablePubkey),
     );
@@ -355,14 +339,14 @@ describe("CoordinatorAdapter", () => {
     expect(posted.content).toEqual([]);
 
     const fetchedMessages = adapter.fetchGroupMessages({
-      groupId: posted.structuredContent.groupId,
+      gid: posted.structuredContent.gid,
     });
 
     expect(fetchedMessages.content).toEqual([]);
     expect(fetchedMessages.structuredContent.messages).toHaveLength(1);
-    expect(
-      fetchedMessages.structuredContent.messages[0]?.opaqueMessageBase64,
-    ).toBe(encodeBase64(messageBytes.encodedMessage));
+    expect(fetchedMessages.structuredContent.messages[0]?.msg_64).toBe(
+      encodeBase64(messageBytes.encodedMessage),
+    );
   });
 
   test("streams backlog and live group messages as JSON chunks", async () => {
@@ -390,7 +374,7 @@ describe("CoordinatorAdapter", () => {
 
     const backlogPosted = adapter.postGroupMessage(
       {
-        opaqueMessageBase64: encodeBase64(backlogMessageBytes.encodedMessage),
+        msg_64: encodeBase64(backlogMessageBytes.encodedMessage),
       },
       createExtra(alice.actor.stablePubkey),
     );
@@ -402,8 +386,8 @@ describe("CoordinatorAdapter", () => {
 
     const subscribePromise = adapter.subscribeGroupMessages(
       {
-        groupId: backlogPosted.structuredContent.groupId,
-        afterCursor: 0,
+        gid: backlogPosted.structuredContent.gid,
+        after: 0,
       },
       {
         _meta: {
@@ -437,7 +421,7 @@ describe("CoordinatorAdapter", () => {
 
     const livePosted = adapter.postGroupMessage(
       {
-        opaqueMessageBase64: encodeBase64(liveMessageBytes.encodedMessage),
+        msg_64: encodeBase64(liveMessageBytes.encodedMessage),
       },
       createExtra(alice.actor.stablePubkey),
     );
@@ -452,19 +436,19 @@ describe("CoordinatorAdapter", () => {
 
     expect(parsedFirst).toMatchObject({
       cursor: 1,
-      groupId: backlogPosted.structuredContent.groupId,
-      createdAt: expect.any(Number),
+      gid: backlogPosted.structuredContent.gid,
+      at: expect.any(Number),
     });
-    expect(decodeBase64(parsedFirst.opaqueMessageBase64)).toEqual(
+    expect(decodeBase64(parsedFirst.msg_64)).toEqual(
       backlogMessageBytes.encodedMessage,
     );
 
     expect(parsedSecond).toMatchObject({
       cursor: livePosted.structuredContent.cursor,
-      groupId: livePosted.structuredContent.groupId,
-      createdAt: expect.any(Number),
+      gid: livePosted.structuredContent.gid,
+      at: expect.any(Number),
     });
-    expect(decodeBase64(parsedSecond.opaqueMessageBase64)).toEqual(
+    expect(decodeBase64(parsedSecond.msg_64)).toEqual(
       liveMessageBytes.encodedMessage,
     );
 

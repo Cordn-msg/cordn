@@ -38,9 +38,9 @@ function createGroup(alias: string): GroupSessionState {
 
 function createWelcome(keyPackageReference: string): StoredWelcome {
   return {
-    keyPackageReference,
-    welcomeBase64: "welcome-base64",
-    createdAt: 1,
+    kp_ref: keyPackageReference,
+    welcome_64: "welcome-base64",
+    at: 1,
   };
 }
 
@@ -79,12 +79,13 @@ describe("CliSessionStore", () => {
     const available = createKeyPackage("available");
     store.addKeyPackage(consumed);
     store.addKeyPackage(available);
-    store.putWelcome({ ...createWelcome("b-ref"), createdAt: 2 });
-    store.putWelcome({ ...createWelcome("a-ref"), createdAt: 1 });
+    store.putWelcome({ ...createWelcome("b-ref"), at: 2 });
+    store.putWelcome({ ...createWelcome("a-ref"), at: 1 });
 
     expect(store.findUnconsumedKeyPackage()?.alias).toBe("available");
-    expect(
-      store.listWelcomes().map((welcome) => welcome.keyPackageReference),
-    ).toEqual(["a-ref", "b-ref"]);
+    expect(store.listWelcomes().map((welcome) => welcome.kp_ref)).toEqual([
+      "a-ref",
+      "b-ref",
+    ]);
   });
 });

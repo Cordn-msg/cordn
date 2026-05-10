@@ -83,13 +83,11 @@ export class CliSessionStore {
   }
 
   listWelcomes(): StoredWelcome[] {
-    return [...this.welcomes.values()].sort(
-      (a, b) => a.createdAt - b.createdAt,
-    );
+    return [...this.welcomes.values()].sort((a, b) => a.at - b.at);
   }
 
   putWelcome(welcome: StoredWelcome): void {
-    this.welcomes.set(welcome.keyPackageReference, welcome);
+    this.welcomes.set(welcome.kp_ref, welcome);
   }
 
   getWelcome(keyPackageReference: string): StoredWelcome {

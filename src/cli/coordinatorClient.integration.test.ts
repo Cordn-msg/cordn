@@ -79,36 +79,30 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       clients.push(aliceClient, bobClient, carolClient);
 
       const bobPublished = await bobClient.PublishKeyPackage({
-        keyPackageRef: scenario.bobKeyPackageRef,
-        keyPackageBase64: encodeBase64(
-          encode(keyPackageEncoder, scenario.bob.keyPackage),
-        ),
+        kp_ref: scenario.bobKeyPackageRef,
+        kp_64: encodeBase64(encode(keyPackageEncoder, scenario.bob.keyPackage)),
       });
       const carolPublished = await carolClient.PublishKeyPackage({
-        keyPackageRef: scenario.carolKeyPackageRef,
-        keyPackageBase64: encodeBase64(
+        kp_ref: scenario.carolKeyPackageRef,
+        kp_64: encodeBase64(
           encode(keyPackageEncoder, scenario.carol.keyPackage),
         ),
       });
 
       const consumedBob = await aliceClient.ConsumeKeyPackage({
-        identifier: bob.actor.stablePubkey,
+        id: bob.actor.stablePubkey,
       });
       const consumedCarol = await aliceClient.ConsumeKeyPackage({
-        identifier: carol.actor.stablePubkey,
+        id: carol.actor.stablePubkey,
       });
 
-      expect(consumedBob.keyPackage?.keyPackageRef).toBe(
-        bobPublished.keyPackageRef,
-      );
-      expect(consumedCarol.keyPackage?.keyPackageRef).toBe(
-        carolPublished.keyPackageRef,
-      );
+      expect(consumedBob.keyPackage?.kp_ref).toBe(bobPublished.kp_ref);
+      expect(consumedCarol.keyPackage?.kp_ref).toBe(carolPublished.kp_ref);
 
       await aliceClient.StoreWelcome({
-        targetStablePubkey: bob.actor.stablePubkey,
-        keyPackageReference: scenario.bobKeyPackageRef,
-        welcomeBase64: encodeBase64(
+        target_pk: bob.actor.stablePubkey,
+        kp_ref: scenario.bobKeyPackageRef,
+        welcome_64: encodeBase64(
           encode(mlsMessageEncoder, {
             version: protocolVersions.mls10,
             wireformat: wireformats.mls_welcome,
@@ -117,9 +111,9 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         ),
       });
       await aliceClient.StoreWelcome({
-        targetStablePubkey: carol.actor.stablePubkey,
-        keyPackageReference: scenario.carolKeyPackageRef,
-        welcomeBase64: encodeBase64(
+        target_pk: carol.actor.stablePubkey,
+        kp_ref: scenario.carolKeyPackageRef,
+        welcome_64: encodeBase64(
           encode(mlsMessageEncoder, {
             version: protocolVersions.mls10,
             wireformat: wireformats.mls_welcome,
@@ -133,31 +127,29 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
 
       expect(bobWelcomes.welcomes).toHaveLength(1);
       expect(carolWelcomes.welcomes).toHaveLength(1);
-      expect(bobWelcomes.welcomes[0]?.keyPackageReference).toBe(
-        scenario.bobKeyPackageRef,
-      );
-      expect(carolWelcomes.welcomes[0]?.keyPackageReference).toBe(
+      expect(bobWelcomes.welcomes[0]?.kp_ref).toBe(scenario.bobKeyPackageRef);
+      expect(carolWelcomes.welcomes[0]?.kp_ref).toBe(
         scenario.carolKeyPackageRef,
       );
       expect((await bobClient.FetchPendingWelcomes({})).welcomes).toEqual([]);
       expect((await carolClient.FetchPendingWelcomes({})).welcomes).toEqual([]);
 
       const postedCommit = await aliceClient.PostGroupMessage({
-        opaqueMessageBase64: encodeBase64(scenario.commitMessageBytes),
+        msg_64: encodeBase64(scenario.commitMessageBytes),
       });
       const postedAliceMessage = await aliceClient.PostGroupMessage({
-        opaqueMessageBase64: encodeBase64(scenario.aliceApplicationBytes),
+        msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
       const postedBobMessage = await bobClient.PostGroupMessage({
-        opaqueMessageBase64: encodeBase64(scenario.bobApplicationBytes),
+        msg_64: encodeBase64(scenario.bobApplicationBytes),
       });
 
       const allMessages = await aliceClient.FetchGroupMessages({
-        groupId: postedCommit.groupId,
+        gid: postedCommit.gid,
       });
       const newerMessages = await aliceClient.FetchGroupMessages({
-        groupId: postedCommit.groupId,
-        afterCursor: postedCommit.cursor,
+        gid: postedCommit.gid,
+        after: postedCommit.cursor,
       });
 
       expect(allMessages.messages).toHaveLength(3);
@@ -208,10 +200,10 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       clients.push(aliceClient, bobClient, carolClient);
 
       const posted = await aliceClient.PostGroupMessage({
-        opaqueMessageBase64: encodeBase64(scenario.aliceApplicationBytes),
+        msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
       const fetched = await bobClient.FetchGroupMessages({
-        groupId: posted.groupId,
+        gid: posted.gid,
       });
       const [message] = fetched.messages;
 
@@ -219,11 +211,11 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
 
       const bobResult = await processMessageBytes({
         state: scenario.bob.state,
-        encodedMessage: decodeBase64(message!.opaqueMessageBase64),
+        encodedMessage: decodeBase64(message!.msg_64),
       });
       const carolResult = await processMessageBytes({
         state: scenario.carol.state,
-        encodedMessage: decodeBase64(message!.opaqueMessageBase64),
+        encodedMessage: decodeBase64(message!.msg_64),
       });
 
       expect(bobResult.kind).toBe("applicationMessage");
@@ -280,14 +272,14 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         wireAsPublicMessage: true,
       });
       const postedProposal = await aliceClient.PostGroupMessage({
-        opaqueMessageBase64: encodeBase64(proposal.encodedMessage),
+        msg_64: encodeBase64(proposal.encodedMessage),
       });
 
       const commit = await createCommitMessageBytes({
         state: proposal.newState,
       });
       const postedCommit = await aliceClient.PostGroupMessage({
-        opaqueMessageBase64: encodeBase64(commit.encodedMessage),
+        msg_64: encodeBase64(commit.encodedMessage),
       });
 
       const application = await createApplicationMessageBytes({
@@ -295,11 +287,11 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         plaintext: "ordered traffic",
       });
       const postedApplication = await bobClient.PostGroupMessage({
-        opaqueMessageBase64: encodeBase64(application.encodedMessage),
+        msg_64: encodeBase64(application.encodedMessage),
       });
 
       const queued = await bobClient.FetchGroupMessages({
-        groupId: postedProposal.groupId,
+        gid: postedProposal.gid,
       });
       expect(queued.messages.map((message) => message.cursor)).toEqual([
         postedProposal.cursor,
@@ -314,7 +306,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         },
         state: scenario.bob.state,
         message: decodeMlsFramedMessage(
-          decodeBase64(queued.messages[0]!.opaqueMessageBase64),
+          decodeBase64(queued.messages[0]!.msg_64),
         ),
       });
       expect(bobProposalResult.kind).toBe("newState");
@@ -329,7 +321,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         },
         state: bobProposalResult.newState,
         message: decodeMlsFramedMessage(
-          decodeBase64(queued.messages[1]!.opaqueMessageBase64),
+          decodeBase64(queued.messages[1]!.msg_64),
         ),
       });
       expect(bobCommitResult.kind).toBe("newState");
@@ -344,7 +336,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         },
         state: bobCommitResult.newState,
         message: decodeMlsFramedMessage(
-          decodeBase64(queued.messages[2]!.opaqueMessageBase64),
+          decodeBase64(queued.messages[2]!.msg_64),
         ),
       });
       expect(bobApplicationResult.kind).toBe("applicationMessage");

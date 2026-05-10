@@ -19,7 +19,7 @@ import { Coordinator } from "../coordinator/coordinator.ts";
 import {
   consumeKeyPackageInputSchema,
   consumeKeyPackageOutputSchema,
-  CONTEXTVM_COORDINATOR_TOOLS,
+  COORDINATOR_METHODS,
   fetchGroupMessagesInputSchema,
   fetchGroupMessagesOutputSchema,
   fetchPendingWelcomesInputSchema,
@@ -44,26 +44,26 @@ import { assertNonEmptyBase64, encodeBase64 } from "./base64.ts";
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 export type ResolveRequestEvent = (requestEventId: string) => NostrEvent | null;
 
-function decodeKeyPackageBase64(keyPackageBase64: string): KeyPackage {
+function decodeKeyPackageBase64(kp_64: string): KeyPackage {
   try {
     return decodeExact(
-      assertNonEmptyBase64(keyPackageBase64, "keyPackageBase64"),
+      assertNonEmptyBase64(kp_64, "kp_64"),
       keyPackageDecoder,
-      "keyPackageBase64",
+      "kp_64",
     );
   } catch {
-    throw new Error("Invalid keyPackageBase64");
+    throw new Error("Invalid kp_64");
   }
 }
 
-function decodeWelcomeBase64(welcomeBase64: string): Welcome {
+function decodeWelcomeBase64(welcome_64: string): Welcome {
   try {
     return decodeWelcome(
-      assertNonEmptyBase64(welcomeBase64, "welcomeBase64"),
-      "welcomeBase64",
+      assertNonEmptyBase64(welcome_64, "welcome_64"),
+      "welcome_64",
     );
   } catch {
-    throw new Error("Invalid welcomeBase64");
+    throw new Error("Invalid welcome_64");
   }
 }
 
@@ -71,16 +71,13 @@ function encodeWelcomeBase64(welcome: Welcome): string {
   return encodeBase64(encodeWelcome(welcome));
 }
 
-function decodeOpaqueMessageBase64(opaqueMessageBase64: string): Uint8Array {
+function decodeOpaqueMessageBase64(msg_64: string): Uint8Array {
   try {
-    const bytes = assertNonEmptyBase64(
-      opaqueMessageBase64,
-      "opaqueMessageBase64",
-    );
-    decodeExact(bytes, mlsMessageDecoder, "opaqueMessageBase64");
+    const bytes = assertNonEmptyBase64(msg_64, "msg_64");
+    decodeExact(bytes, mlsMessageDecoder, "msg_64");
     return bytes;
   } catch {
-    throw new Error("Invalid opaqueMessageBase64");
+    throw new Error("Invalid msg_64");
   }
 }
 
@@ -145,10 +142,10 @@ function mapAvailableKeyPackage(record: {
   publishedAt: number;
 }) {
   return {
-    stablePubkey: record.stablePubkey,
-    keyPackageRef: record.keyPackageRef,
-    isLastResort: record.isLastResort,
-    publishedAt: record.publishedAt,
+    pk: record.stablePubkey,
+    kp_ref: record.keyPackageRef,
+    last_resort: record.isLastResort,
+    at: record.publishedAt,
   };
 }
 
@@ -171,9 +168,9 @@ function mapGroupMessage(record: {
 }) {
   return groupMessageSchema.parse({
     cursor: record.cursor,
-    groupId: record.groupId,
-    opaqueMessageBase64: encodeBase64(record.opaqueMessage),
-    createdAt: record.createdAt,
+    gid: record.groupId,
+    msg_64: encodeBase64(record.opaqueMessage),
+    at: record.createdAt,
   });
 }
 
@@ -194,7 +191,7 @@ export class CoordinatorAdapter {
     extra: ToolExtra,
   ) {
     const clientPubkey = requireClientPubkey(extra);
-    const keyPackage = decodeKeyPackageBase64(input.keyPackageBase64);
+    const keyPackage = decodeKeyPackageBase64(input.kp_64);
     const requestEventId = getRequestEventId(extra);
     const publicationEvent = requestEventId
       ? this.resolveRequestEvent?.(requestEventId)
@@ -211,7 +208,7 @@ export class CoordinatorAdapter {
 
     const record = this.coordinator.publishKeyPackage({
       stablePubkey,
-      keyPackageRef: input.keyPackageRef,
+      keyPackageRef: input.kp_ref,
       keyPackage,
       publicationEvent,
     });
@@ -219,26 +216,26 @@ export class CoordinatorAdapter {
     return {
       content: [],
       structuredContent: {
-        keyPackageRef: record.keyPackageRef,
-        isLastResort: record.isLastResort,
-        publishedAt: record.publishedAt,
+        kp_ref: record.keyPackageRef,
+        last_resort: record.isLastResort,
+        at: record.publishedAt,
       },
     };
   }
 
   consumeKeyPackage(input: z.infer<typeof consumeKeyPackageInputSchema>) {
-    const record = this.coordinator.consumeKeyPackage(input.identifier);
+    const record = this.coordinator.consumeKeyPackage(input.id);
 
     return {
       content: [],
       structuredContent: {
         keyPackage: record
           ? {
-              stablePubkey: record.stablePubkey,
-              keyPackageRef: record.keyPackageRef,
-              isLastResort: record.isLastResort,
-              publishedAt: record.publishedAt,
-              publicationEvent: record.publicationEvent,
+              pk: record.stablePubkey,
+              kp_ref: record.keyPackageRef,
+              last_resort: record.isLastResort,
+              at: record.publishedAt,
+              event: record.publicationEvent,
             }
           : null,
       },
@@ -263,14 +260,14 @@ export class CoordinatorAdapter {
     extra: ToolExtra,
   ) {
     const clientPubkey = requireClientPubkey(extra);
-    const records = input.keyPackageRefs.map((keyPackageRef) => {
-      const record = this.coordinator.getKeyPackage(keyPackageRef);
+    const records = input.kp_refs.map((kp_ref) => {
+      const record = this.coordinator.getKeyPackage(kp_ref);
       if (!record) {
-        throw new Error(`Unknown key package ref: ${keyPackageRef}`);
+        throw new Error(`Unknown key package ref: ${kp_ref}`);
       }
 
       if (record.stablePubkey !== clientPubkey) {
-        throw new Error(`Unauthorized key package ref: ${keyPackageRef}`);
+        throw new Error(`Unauthorized key package ref: ${kp_ref}`);
       }
 
       return record;
@@ -279,7 +276,7 @@ export class CoordinatorAdapter {
     return {
       content: [],
       structuredContent: {
-        removedKeyPackageRefs: records.map((record) => {
+        kp_refs: records.map((record) => {
           return (
             this.coordinator.removeKeyPackage(record.keyPackageRef)
               ?.keyPackageRef ?? record.keyPackageRef
@@ -301,9 +298,9 @@ export class CoordinatorAdapter {
       content: [],
       structuredContent: {
         welcomes: records.map((record) => ({
-          keyPackageReference: record.keyPackageReference,
-          welcomeBase64: encodeWelcomeBase64(record.welcome),
-          createdAt: record.createdAt,
+          kp_ref: record.keyPackageReference,
+          welcome_64: encodeWelcomeBase64(record.welcome),
+          at: record.createdAt,
         })),
       },
     };
@@ -311,15 +308,15 @@ export class CoordinatorAdapter {
 
   storeWelcome(input: z.infer<typeof storeWelcomeInputSchema>) {
     const record = this.coordinator.storeWelcome({
-      targetStablePubkey: input.targetStablePubkey,
-      keyPackageReference: input.keyPackageReference,
-      welcome: decodeWelcomeBase64(input.welcomeBase64),
+      targetStablePubkey: input.target_pk,
+      keyPackageReference: input.kp_ref,
+      welcome: decodeWelcomeBase64(input.welcome_64),
     });
 
     return {
       content: [],
       structuredContent: {
-        createdAt: record.createdAt,
+        at: record.createdAt,
       },
     };
   }
@@ -330,21 +327,24 @@ export class CoordinatorAdapter {
   ) {
     const record = this.coordinator.postGroupMessage({
       ephemeralSenderPubkey: requireClientPubkey(extra),
-      opaqueMessage: decodeOpaqueMessageBase64(input.opaqueMessageBase64),
+      opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
     });
 
     return {
       content: [],
       structuredContent: {
         cursor: record.cursor,
-        groupId: record.groupId,
-        createdAt: record.createdAt,
+        gid: record.groupId,
+        at: record.createdAt,
       },
     };
   }
 
   fetchGroupMessages(input: z.infer<typeof fetchGroupMessagesInputSchema>) {
-    const records = this.coordinator.fetchGroupMessages(input);
+    const records = this.coordinator.fetchGroupMessages({
+      groupId: input.gid,
+      afterCursor: input.after,
+    });
 
     return {
       content: [],
@@ -359,9 +359,15 @@ export class CoordinatorAdapter {
     extra: ToolExtra,
   ) {
     const stream = getOpenStreamWriter(extra);
-    const backlog = this.coordinator.fetchGroupMessages(input);
-    const subscription = this.coordinator.subscribeGroupMessages(input);
-    let lastEmittedCursor = input.afterCursor ?? 0;
+    const backlog = this.coordinator.fetchGroupMessages({
+      groupId: input.gid,
+      afterCursor: input.after,
+    });
+    const subscription = this.coordinator.subscribeGroupMessages({
+      groupId: input.gid,
+      afterCursor: input.after,
+    });
+    let lastEmittedCursor = input.after ?? 0;
 
     try {
       await stream.start();
@@ -411,7 +417,7 @@ export function registerCoordinatorMethods(
 ): void {
   // TODO: Store the entire key package publish event
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.publishKeyPackage,
+    COORDINATOR_METHODS.publishKeyPackage,
     {
       description:
         "Publish an MLS key package for the injected caller identity.",
@@ -422,7 +428,7 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.listAvailableKeyPackages,
+    COORDINATOR_METHODS.listAvailableKeyPackages,
     {
       description:
         "List currently available published MLS key packages discoverable on the coordinator.",
@@ -433,7 +439,7 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.removeKeyPackages,
+    COORDINATOR_METHODS.removeKeyPackages,
     {
       description:
         "Remove published MLS key packages owned by the injected caller identity.",
@@ -444,7 +450,7 @@ export function registerCoordinatorMethods(
   );
   // TODO: Return the entire key package publish event
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.consumeKeyPackage,
+    COORDINATOR_METHODS.consumeKeyPackage,
     {
       description:
         "Consume the next published MLS key package by stable identity or exact key package ref.",
@@ -455,7 +461,7 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.fetchPendingWelcomes,
+    COORDINATOR_METHODS.fetchPendingWelcomes,
     {
       description:
         "Fetch and drain welcomes queued for the injected caller identity.",
@@ -466,7 +472,7 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.storeWelcome,
+    COORDINATOR_METHODS.storeWelcome,
     {
       description: "Store an MLS welcome for a target stable identity.",
       inputSchema: storeWelcomeInputSchema,
@@ -476,7 +482,7 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.postGroupMessage,
+    COORDINATOR_METHODS.postGroupMessage,
     {
       description:
         "Queue an MLS opaque group message for the injected caller identity.",
@@ -487,7 +493,7 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.fetchGroupMessages,
+    COORDINATOR_METHODS.fetchGroupMessages,
     {
       description:
         "Fetch queued MLS opaque group messages by group and optional cursor.",
@@ -498,7 +504,7 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    CONTEXTVM_COORDINATOR_TOOLS.subscribeGroupMessages,
+    COORDINATOR_METHODS.subscribeGroupMessages,
     {
       description:
         "Replay and stream MLS opaque group messages by group and optional cursor.",

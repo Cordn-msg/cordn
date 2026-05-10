@@ -36,9 +36,9 @@ const pendingEpochOperationFinalizers: Record<
 > = {
   "add-member": async (operation, context) => {
     await context.client.StoreWelcome({
-      targetStablePubkey: operation.targetStablePubkey,
-      keyPackageReference: operation.keyPackageReference,
-      welcomeBase64: operation.welcomeBase64,
+      target_pk: operation.targetStablePubkey,
+      kp_ref: operation.keyPackageReference,
+      welcome_64: operation.welcomeBase64,
     });
   },
 };

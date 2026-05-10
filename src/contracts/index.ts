@@ -10,41 +10,41 @@ export const nostrEventSchema = z.object({
   sig: z.string().min(1),
 });
 
-export const CONTEXTVM_COORDINATOR_TOOLS = {
-  publishKeyPackage: "publish_key_package",
-  listAvailableKeyPackages: "list_available_key_packages",
-  consumeKeyPackage: "consume_key_package",
-  removeKeyPackages: "remove_key_packages",
-  fetchPendingWelcomes: "fetch_pending_welcomes",
-  storeWelcome: "store_welcome",
-  postGroupMessage: "post_group_message",
-  fetchGroupMessages: "fetch_group_messages",
-  subscribeGroupMessages: "subscribe_group_messages",
+export const COORDINATOR_METHODS = {
+  publishKeyPackage: "kp_publish",
+  listAvailableKeyPackages: "kp_list",
+  consumeKeyPackage: "kp_take",
+  removeKeyPackages: "kp_remove",
+  fetchPendingWelcomes: "welcome_take",
+  storeWelcome: "welcome_store",
+  postGroupMessage: "msg_post",
+  fetchGroupMessages: "msg_fetch",
+  subscribeGroupMessages: "msg_sub",
 } as const;
 
 export const emptyInputSchema = z.object({});
 
 export const publishKeyPackageInputSchema = z.object({
-  keyPackageRef: z.string().min(1),
-  keyPackageBase64: z.string().min(1),
+  kp_ref: z.string().min(1),
+  kp_64: z.string().min(1),
 });
 
 export const publishKeyPackageOutputSchema = z.object({
-  keyPackageRef: z.string(),
-  isLastResort: z.boolean(),
-  publishedAt: z.number(),
+  kp_ref: z.string(),
+  last_resort: z.boolean(),
+  at: z.number(),
 });
 
 export const consumeKeyPackageInputSchema = z.object({
-  identifier: z.string().min(1),
+  id: z.string().min(1),
 });
 
 export const consumedKeyPackageSchema = z.object({
-  stablePubkey: z.string(),
-  keyPackageRef: z.string(),
-  isLastResort: z.boolean(),
-  publishedAt: z.number(),
-  publicationEvent: nostrEventSchema,
+  pk: z.string(),
+  kp_ref: z.string(),
+  last_resort: z.boolean(),
+  at: z.number(),
+  event: nostrEventSchema,
 });
 
 export const consumeKeyPackageOutputSchema = z.object({
@@ -52,18 +52,18 @@ export const consumeKeyPackageOutputSchema = z.object({
 });
 
 export const availableKeyPackageSchema = z.object({
-  stablePubkey: z.string(),
-  keyPackageRef: z.string(),
-  isLastResort: z.boolean(),
-  publishedAt: z.number(),
+  pk: z.string(),
+  kp_ref: z.string(),
+  last_resort: z.boolean(),
+  at: z.number(),
 });
 
 export const removeKeyPackagesInputSchema = z.object({
-  keyPackageRefs: z.array(z.string().min(1)).min(1),
+  kp_refs: z.array(z.string().min(1)).min(1),
 });
 
 export const removeKeyPackagesOutputSchema = z.object({
-  removedKeyPackageRefs: z.array(z.string()),
+  kp_refs: z.array(z.string()),
 });
 
 export const listAvailableKeyPackagesInputSchema = emptyInputSchema;
@@ -73,9 +73,9 @@ export const listAvailableKeyPackagesOutputSchema = z.object({
 });
 
 export const pendingWelcomeSchema = z.object({
-  keyPackageReference: z.string(),
-  welcomeBase64: z.string(),
-  createdAt: z.number(),
+  kp_ref: z.string(),
+  welcome_64: z.string(),
+  at: z.number(),
 });
 
 export const fetchPendingWelcomesInputSchema = emptyInputSchema;
@@ -85,35 +85,35 @@ export const fetchPendingWelcomesOutputSchema = z.object({
 });
 
 export const storeWelcomeInputSchema = z.object({
-  targetStablePubkey: z.string().min(1),
-  keyPackageReference: z.string().min(1),
-  welcomeBase64: z.string().min(1),
+  target_pk: z.string().min(1),
+  kp_ref: z.string().min(1),
+  welcome_64: z.string().min(1),
 });
 
 export const storeWelcomeOutputSchema = z.object({
-  createdAt: z.number(),
+  at: z.number(),
 });
 
 export const postGroupMessageInputSchema = z.object({
-  opaqueMessageBase64: z.string().min(1),
+  msg_64: z.string().min(1),
 });
 
 export const postGroupMessageOutputSchema = z.object({
   cursor: z.number(),
-  groupId: z.string(),
-  createdAt: z.number(),
+  gid: z.string(),
+  at: z.number(),
 });
 
 export const fetchGroupMessagesInputSchema = z.object({
-  groupId: z.string().min(1),
-  afterCursor: z.number().int().positive().optional(),
+  gid: z.string().min(1),
+  after: z.number().int().positive().optional(),
 });
 
 export const groupMessageSchema = z.object({
   cursor: z.number(),
-  groupId: z.string(),
-  opaqueMessageBase64: z.string(),
-  createdAt: z.number(),
+  gid: z.string(),
+  msg_64: z.string(),
+  at: z.number(),
 });
 
 export const fetchGroupMessagesOutputSchema = z.object({
