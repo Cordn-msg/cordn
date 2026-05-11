@@ -1,4 +1,5 @@
 import type { ClientState, KeyPackage, PrivateKeyPackage } from "ts-mls";
+import type { UnsignedEvent } from "nostr-tools";
 
 import type { PendingWelcome } from "../contracts/index.ts";
 import type { CordnGroupMetadata } from "./groupMetadata.ts";
@@ -43,8 +44,10 @@ export interface StoredMessage {
   createdAt: number;
   direction: "inbound" | "outbound";
   sender: string;
-  plaintext: string;
-  opaqueMessageBase64?: string;
+  id: string;
+  kind: UnsignedEvent["kind"];
+  tags: UnsignedEvent["tags"];
+  content: string;
 }
 
 export interface SyncIssue {

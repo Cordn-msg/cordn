@@ -50,6 +50,25 @@ async function finalizePendingEpochOperation(
   await pendingEpochOperationFinalizers[operation.kind](operation, context);
 }
 
+function partitionPendingEpochOperations(
+  pending: PendingEpochOperation[],
+  opaqueMessageBase64s: string[],
+): {
+  matched: PendingEpochOperation[];
+  remaining: PendingEpochOperation[];
+} {
+  const seen = new Set(opaqueMessageBase64s);
+
+  return {
+    matched: pending.filter((operation) =>
+      seen.has(operation.commitMessageBase64),
+    ),
+    remaining: pending.filter(
+      (operation) => !seen.has(operation.commitMessageBase64),
+    ),
+  };
+}
+
 export function enqueuePendingEpochOperation(
   pendingEpochOperations: Map<string, PendingEpochOperation[]>,
   operation: PendingEpochOperation,
@@ -77,14 +96,9 @@ export async function confirmPendingEpochOperations(
     return;
   }
 
-  const seen = new Set(params.opaqueMessageBase64s);
-
-  const confirmed = pending.filter((operation) =>
-    seen.has(operation.commitMessageBase64),
-  );
-
-  const remaining = pending.filter(
-    (operation) => !seen.has(operation.commitMessageBase64),
+  const { matched: confirmed, remaining } = partitionPendingEpochOperations(
+    pending,
+    params.opaqueMessageBase64s,
   );
 
   for (const operation of confirmed) {
@@ -133,16 +147,13 @@ export async function rejectPendingEpochOperations(
     return;
   }
 
-  const rejected = new Set(params.opaqueMessageBase64s);
-
-  const remaining = pending.filter(
-    (operation) => !rejected.has(operation.commitMessageBase64),
+  const { matched: rejected, remaining } = partitionPendingEpochOperations(
+    pending,
+    params.opaqueMessageBase64s,
   );
 
-  for (const operation of pending) {
-    if (rejected.has(operation.commitMessageBase64)) {
-      operation.status = "rejected";
-    }
+  for (const operation of rejected) {
+    operation.status = "rejected";
   }
 
   if (remaining.length === 0) {

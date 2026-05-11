@@ -147,14 +147,14 @@ export function formatChatLine(
   direction: "inbound" | "outbound",
   cursor: number,
   sender: string,
-  plaintext: string,
+  content: string,
 ): string {
   const credential = formatCredentialLabel(sender);
   const label =
     direction === "outbound"
       ? `${colorize("you", ansi.green)}/${credential}`
       : credential;
-  return `${formatCursor(cursor)} ${label}: ${plaintext}`;
+  return `${formatCursor(cursor)} ${label}: ${content}`;
 }
 
 export function formatChatHistory(
@@ -169,7 +169,7 @@ export function formatChatHistory(
           message.direction,
           message.cursor,
           message.sender,
-          message.plaintext,
+          message.content,
         ),
       ),
   );

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { getEventHash, type UnsignedEvent } from "nostr-tools";
 
 const { processMessageBase64 } = vi.hoisted(() => ({
   processMessageBase64: vi.fn(),
@@ -6,7 +7,6 @@ const { processMessageBase64 } = vi.hoisted(() => ({
 
 vi.mock("./utils/mlsMessages.ts", () => ({
   processMessageBase64,
-  decodeApplicationData: (bytes: Uint8Array) => new TextDecoder().decode(bytes),
   decodeAuthenticatedSender: (bytes: Uint8Array) =>
     new TextDecoder().decode(bytes),
 }));
@@ -35,15 +35,17 @@ describe("ingestGroupMessages", () => {
     processMessageBase64.mockReset();
   });
 
-  test("reconciles self-echoed outbound messages by ciphertext identity", async () => {
+  test("skips self-echoed outbound messages by cursor", async () => {
     const group = createGroupState();
     const outbound = {
-      cursor: 0,
+      cursor: 7,
       createdAt: 50,
       direction: "outbound" as const,
       sender: "alice",
-      plaintext: "hello",
-      opaqueMessageBase64: "cipher-1",
+      id: "event-1",
+      kind: 9,
+      tags: [],
+      content: "hello",
     };
     group.messages.push(outbound);
 
@@ -53,16 +55,13 @@ describe("ingestGroupMessages", () => {
         {
           cursor: 7,
           createdAt: 70,
-          opaqueMessageBase64: "cipher-1",
+          opaqueMessageBase64: "different-ciphertext",
         },
       ],
       hasPendingEpochOperation: () => false,
     });
 
     expect(result.received).toEqual([]);
-    expect(result.reconciled).toEqual([outbound]);
-    expect(outbound.cursor).toBe(7);
-    expect(outbound.createdAt).toBe(70);
     expect(group.fetchCursor).toBe(7);
     expect(group.lastCursor).toBe(7);
   });
@@ -127,8 +126,47 @@ describe("ingestGroupMessages", () => {
       },
     ]);
     expect(result.received).toEqual([]);
-    expect(result.reconciled).toEqual([]);
     expect(group.fetchCursor).toBe(9);
     expect(group.lastCursor).toBe(9);
+  });
+
+  test("rejects application messages whose envelope pubkey does not match sender", async () => {
+    const group = createGroupState();
+    const event: UnsignedEvent = {
+      pubkey:
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      created_at: 1,
+      kind: 9,
+      tags: [],
+      content: "hello",
+    };
+
+    processMessageBase64.mockResolvedValueOnce({
+      kind: "applicationMessage",
+      newState: group.state,
+      aad: new TextEncoder().encode(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      ),
+      message: new TextEncoder().encode(
+        JSON.stringify({
+          ...event,
+          id: getEventHash(event),
+        }),
+      ),
+    });
+
+    await expect(
+      ingestGroupMessages({
+        group,
+        messages: [
+          {
+            cursor: 2,
+            createdAt: 20,
+            opaqueMessageBase64: "cipher-2",
+          },
+        ],
+        hasPendingEpochOperation: () => false,
+      }),
+    ).rejects.toThrow("Cordn message envelope pubkey does not match sender");
   });
 });

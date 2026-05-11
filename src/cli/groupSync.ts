@@ -1,7 +1,7 @@
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
+import { decodeCordnMessageEvent } from "./messageEnvelope.ts";
 import type { GroupSessionState, StoredMessage } from "./sessionState.ts";
 import {
-  decodeApplicationData,
   decodeAuthenticatedSender,
   processMessageBase64,
 } from "./utils/mlsMessages.ts";
@@ -14,7 +14,6 @@ export interface RawGroupMessage {
 
 export interface GroupIngestionResult {
   received: StoredMessage[];
-  reconciled: StoredMessage[];
   issues: GroupSessionState["syncIssues"];
   cursorAdvancedTo: number;
   appliedPendingCommitMessages: Set<string>;
@@ -39,7 +38,6 @@ export async function ingestGroupMessages(params: {
 }): Promise<GroupIngestionResult> {
   const { group, messages, hasPendingEpochOperation } = params;
   const received: StoredMessage[] = [];
-  const reconciled: StoredMessage[] = [];
   const issues: GroupSessionState["syncIssues"] = [];
   const appliedPendingCommitMessages = new Set<string>();
   const rejectedPendingCommitMessages = new Set<string>();
@@ -52,23 +50,9 @@ export async function ingestGroupMessages(params: {
     if (
       group.messages.some(
         (stored) =>
-          stored.direction === "outbound" &&
-          (stored.cursor === message.cursor ||
-            stored.opaqueMessageBase64 === message.opaqueMessageBase64),
+          stored.direction === "outbound" && stored.cursor === message.cursor,
       )
     ) {
-      const existingOutbound = group.messages.find(
-        (stored) =>
-          stored.direction === "outbound" &&
-          stored.opaqueMessageBase64 === message.opaqueMessageBase64,
-      );
-
-      if (existingOutbound) {
-        existingOutbound.cursor = message.cursor;
-        existingOutbound.createdAt = message.createdAt;
-        reconciled.push(existingOutbound);
-      }
-
       group.fetchCursor = message.cursor;
       group.lastCursor = Math.max(group.lastCursor, message.cursor);
       continue;
@@ -108,17 +92,27 @@ export async function ingestGroupMessages(params: {
     if (processed.kind === "applicationMessage") {
       group.state = processed.newState;
       group.metadata = getCordnGroupMetadataExtension(processed.newState);
-      group.lastCursor = message.cursor;
+      if (processed.aad.length === 0) {
+        throw new Error(
+          "Cordn application message missing authenticated sender",
+        );
+      }
+
+      const sender = decodeAuthenticatedSender(processed.aad);
+      const event = decodeCordnMessageEvent(processed.message);
+      if (event.pubkey !== sender) {
+        throw new Error("Cordn message envelope pubkey does not match sender");
+      }
 
       const stored: StoredMessage = {
         cursor: message.cursor,
         createdAt: message.createdAt,
         direction: "inbound",
-        sender:
-          processed.aad.length > 0
-            ? decodeAuthenticatedSender(processed.aad)
-            : "peer",
-        plaintext: decodeApplicationData(processed.message),
+        sender,
+        id: event.id,
+        kind: event.kind,
+        tags: event.tags,
+        content: event.content,
       };
 
       group.messages.push(stored);
@@ -145,7 +139,6 @@ export async function ingestGroupMessages(params: {
 
   return {
     received,
-    reconciled,
     issues,
     cursorAdvancedTo: group.fetchCursor,
     appliedPendingCommitMessages,

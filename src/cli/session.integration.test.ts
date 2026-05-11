@@ -63,14 +63,14 @@ describe("CliSession", () => {
       const synced = await bob.syncGroup("demo");
 
       expect(synced).toHaveLength(1);
-      expect(synced[0]?.plaintext).toBe("hello bob");
+      expect(synced[0]?.content).toBe("hello bob");
       expect(synced[0]?.sender).toBe(alice.stablePubkey);
 
       await bob.sendMessage("demo", "hello alice");
       const aliceSynced = await alice.syncGroup("demo");
 
       expect(aliceSynced).toHaveLength(1);
-      expect(aliceSynced[0]?.plaintext).toBe("hello alice");
+      expect(aliceSynced[0]?.content).toBe("hello alice");
       expect(aliceSynced[0]?.sender).toBe(bob.stablePubkey);
     } finally {
       await server.transport.close();
@@ -117,7 +117,7 @@ describe("CliSession", () => {
 
       const bobReceived = await bob.syncGroup("demo");
 
-      expect(bobReceived.map((message) => message.plaintext)).toEqual([
+      expect(bobReceived.map((message) => message.content)).toEqual([
         "alice-1",
         "alice-2",
         "alice-3",
@@ -126,7 +126,7 @@ describe("CliSession", () => {
         bob
           .listMessages("demo")
           .filter((message) => message.direction === "inbound")
-          .map((message) => message.plaintext),
+          .map((message) => message.content),
       ).toEqual(["alice-1", "alice-2", "alice-3"]);
     } finally {
       await server.transport.close();
@@ -236,7 +236,7 @@ describe("CliSession", () => {
 
       expect(invitation.keyPackageReference).toBe(published.keyPackageRef);
       expect(synced).toHaveLength(1);
-      expect(synced[0]?.plaintext).toBe("hello exact key package");
+      expect(synced[0]?.content).toBe("hello exact key package");
     } finally {
       await server.transport.close();
     }
@@ -386,7 +386,7 @@ describe("CliSession", () => {
       const carolSynced = await carol.syncGroup("demo");
 
       expect(carolSynced).toHaveLength(1);
-      expect(carolSynced[0]?.plaintext).toBe("hello carol");
+      expect(carolSynced[0]?.content).toBe("hello carol");
       expect(carolSynced[0]?.cursor).toBe(2);
       expect(carol.getGroup("demo").lastCursor).toBe(2);
       expect(alice.getGroup("demo").lastCursor).toBe(2);
@@ -498,16 +498,16 @@ describe("CliSession", () => {
       const aliceReceived = await alice.syncGroup("demo");
       const bobReceived = await bob.syncGroup("demo");
 
-      expect(aliceReceived.map((message) => message.plaintext)).toEqual([
+      expect(aliceReceived.map((message) => message.content)).toEqual([
         "hello everyone",
       ]);
-      expect(bobReceived.map((message) => message.plaintext)).toEqual([
+      expect(bobReceived.map((message) => message.content)).toEqual([
         "hello everyone",
       ]);
       expect(aliceReceived[0]?.sender).toBe(carol.stablePubkey);
       expect(bobReceived[0]?.sender).toBe(carol.stablePubkey);
       expect(
-        alice.listMessages("demo").map((message) => message.plaintext),
+        alice.listMessages("demo").map((message) => message.content),
       ).toEqual(["hello bob", "hello alice", "hello everyone"]);
     } finally {
       await server.transport.close();
@@ -641,7 +641,7 @@ describe("CliSession", () => {
       await alice.sendMessage("demo", "post-conflict hello");
       const bobReceived = await bob.syncGroup("demo");
 
-      expect(bobReceived.map((message) => message.plaintext)).toEqual([
+      expect(bobReceived.map((message) => message.content)).toEqual([
         "post-conflict hello",
       ]);
 
@@ -736,7 +736,7 @@ describe("CliSession", () => {
       }> = [];
       const unsubscribe = bob.onWatchEvent((event) => {
         watchEvents.push({
-          received: event.received.map((message) => message.plaintext),
+          received: event.received.map((message) => message.content),
           issues: event.issues.map((issue) => issue.detail),
           watchStatus: event.watchStatus,
           error: event.error,
@@ -759,7 +759,7 @@ describe("CliSession", () => {
             .some(
               (message) =>
                 message.direction === "inbound" &&
-                message.plaintext === "hello bob after your send",
+                message.content === "hello bob after your send",
             ),
         );
 
@@ -768,7 +768,7 @@ describe("CliSession", () => {
           bob
             .listMessages("demo")
             .filter((message) => message.direction === "inbound")
-            .map((message) => message.plaintext),
+            .map((message) => message.content),
         ).toContain("hello bob after your send");
         expect(
           watchEvents.some((event) =>
@@ -778,6 +778,9 @@ describe("CliSession", () => {
         expect(
           watchEvents.find((event) => event.watchStatus === "errored"),
         ).toBeUndefined();
+        expect(watchEvents.flatMap((event) => event.issues)).not.toContain(
+          "Desired gen in the past",
+        );
       } finally {
         unsubscribe();
       }
@@ -932,7 +935,7 @@ describe("CliSession", () => {
 
         if (event.received.length > 0) {
           events.push(
-            `received:${event.received.map((message) => message.plaintext).join(",")}`,
+            `received:${event.received.map((message) => message.content).join(",")}`,
           );
         }
       });
@@ -950,6 +953,159 @@ describe("CliSession", () => {
         expect(events).toContain("status:connecting");
         expect(events).toContain("status:watching");
         expect(events).toContain("received:semantic-event-check");
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("watch mode does not report stale-generation issues when sending before older inbound traffic is replayed", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await alice.sendMessage("demo", "hey");
+
+      const watchIssues: string[] = [];
+      const unsubscribe = bob.onWatchEvent((event) => {
+        watchIssues.push(...event.issues.map((issue) => issue.detail));
+      });
+
+      try {
+        await bob.watchGroup("demo");
+        await waitForCondition(() => bob.getWatchStatus("demo") === "watching");
+
+        await bob.sendMessage("demo", "hey");
+
+        await waitForCondition(() =>
+          bob.listMessages("demo").some((message) => message.content === "hey"),
+        );
+
+        expect(watchIssues).not.toContain("Desired gen in the past");
+        expect(bob.listSyncIssues("demo")).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ detail: "Desired gen in the past" }),
+          ]),
+        );
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("watch mode drains a multi-message backlog before a local send without stale-generation issues", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await alice.sendMessage("demo", "alice-backlog-1");
+      await alice.sendMessage("demo", "alice-backlog-2");
+      await alice.sendMessage("demo", "alice-backlog-3");
+
+      const watchIssues: string[] = [];
+      const unsubscribe = bob.onWatchEvent((event) => {
+        watchIssues.push(...event.issues.map((issue) => issue.detail));
+      });
+
+      try {
+        await bob.watchGroup("demo");
+        await waitForCondition(() => bob.getWatchStatus("demo") === "watching");
+
+        await waitForCondition(() =>
+          ["alice-backlog-1", "alice-backlog-2", "alice-backlog-3"].every(
+            (content) =>
+              bob
+                .listMessages("demo")
+                .some(
+                  (message) =>
+                    message.direction === "inbound" &&
+                    message.content === content,
+                ),
+          ),
+        );
+
+        await bob.sendMessage("demo", "bob-after-backlog");
+        await alice.syncGroup("demo");
+        await alice.sendMessage("demo", "alice-after-bob-send");
+
+        await waitForCondition(() =>
+          bob
+            .listMessages("demo")
+            .some(
+              (message) =>
+                message.direction === "inbound" &&
+                message.content === "alice-after-bob-send",
+            ),
+        );
+
+        expect(watchIssues).not.toContain("Desired gen in the past");
+        expect(
+          bob
+            .listMessages("demo")
+            .filter((message) => message.direction === "inbound")
+            .map((message) => message.content),
+        ).toEqual([
+          "alice-backlog-1",
+          "alice-backlog-2",
+          "alice-backlog-3",
+          "alice-after-bob-send",
+        ]);
       } finally {
         unsubscribe();
       }
@@ -1088,7 +1244,7 @@ describe("CliSession", () => {
         bob.sendMessage("demo", "bob-concurrent-1"),
       ]);
 
-      expect(concurrentSends.map((message) => message.plaintext)).toEqual([
+      expect(concurrentSends.map((message) => message.content)).toEqual([
         "alice-concurrent-1",
         "bob-concurrent-1",
       ]);
@@ -1102,10 +1258,10 @@ describe("CliSession", () => {
       const aliceRoundOne = await alice.syncGroup("demo");
       const bobRoundOne = await bob.syncGroup("demo");
 
-      expect(aliceRoundOne.map((message) => message.plaintext)).toEqual(
+      expect(aliceRoundOne.map((message) => message.content)).toEqual(
         expect.arrayContaining(["bob-concurrent-1"]),
       );
-      expect(bobRoundOne.map((message) => message.plaintext)).toEqual(
+      expect(bobRoundOne.map((message) => message.content)).toEqual(
         expect.arrayContaining(["alice-concurrent-1"]),
       );
       expect(alice.getGroup("demo").fetchCursor).toBeGreaterThan(
@@ -1192,12 +1348,12 @@ describe("CliSession", () => {
 
       const survivorMessages = await survivor.syncGroup("demo");
 
-      expect(survivorMessages.map((message) => message.plaintext)).toEqual([
+      expect(survivorMessages.map((message) => message.content)).toEqual([
         `post-reconcile-from-alice-to-${survivorName}`,
         `post-reconcile-from-bob-to-${survivorName}`,
       ]);
       expect(
-        survivor.listMessages("demo").map((message) => message.plaintext),
+        survivor.listMessages("demo").map((message) => message.content),
       ).toEqual([
         `post-reconcile-from-alice-to-${survivorName}`,
         `post-reconcile-from-bob-to-${survivorName}`,
@@ -1211,7 +1367,7 @@ describe("CliSession", () => {
           (a, b) => a - b,
         ),
       );
-      expect(aliceHistory.map((message) => message.plaintext)).toEqual(
+      expect(aliceHistory.map((message) => message.content)).toEqual(
         expect.arrayContaining([
           "bootstrap-from-alice",
           `post-reconcile-from-alice-to-${survivorName}`,
@@ -1244,7 +1400,7 @@ describe("CliSession", () => {
       await survivor.sendMessage("demo", `welcome-erin-via-${survivorName}`);
       const erinMessages = await erin.syncGroup("demo");
 
-      expect(erinMessages.map((message) => message.plaintext)).toEqual([
+      expect(erinMessages.map((message) => message.content)).toEqual([
         `welcome-erin-via-${survivorName}`,
       ]);
       expect(erin.listGroups()).toHaveLength(1);
@@ -1264,10 +1420,10 @@ describe("CliSession", () => {
         survivor.getGroup("demo").fetchCursor;
 
       expect(
-        (await alice.syncGroup("demo")).map((message) => message.plaintext),
+        (await alice.syncGroup("demo")).map((message) => message.content),
       ).toEqual(expect.arrayContaining([`welcome-erin-via-${survivorName}`]));
       expect(
-        (await bob.syncGroup("demo")).map((message) => message.plaintext),
+        (await bob.syncGroup("demo")).map((message) => message.content),
       ).toEqual(expect.arrayContaining([`welcome-erin-via-${survivorName}`]));
       expect(await survivor.syncGroup("demo")).toEqual([]);
 
@@ -1321,7 +1477,7 @@ describe("CliSession", () => {
       const recoveredMessages =
         await rejectedSession.syncGroup("demo-recovery");
 
-      expect(recoveredMessages.map((message) => message.plaintext)).toEqual([
+      expect(recoveredMessages.map((message) => message.content)).toEqual([
         `reinvited-${rejectedName}-hello`,
       ]);
       expect(rejectedSession.listGroups()).toHaveLength(1);
@@ -1474,7 +1630,7 @@ describe("CliSession", () => {
         await bob.sendMessage("demo", "post-order-bob");
         const survivorReceived = await survivor.syncGroup("demo");
 
-        expect(survivorReceived.map((message) => message.plaintext)).toEqual([
+        expect(survivorReceived.map((message) => message.content)).toEqual([
           "post-order-alice",
           "post-order-bob",
         ]);
@@ -1634,10 +1790,10 @@ describe("CliSession", () => {
       const erinReceived = await erin.syncGroup("group-a-erin");
       const carolGroupBReceived = await carol.syncGroup("group-b-carol");
 
-      expect(erinReceived.map((message) => message.plaintext)).toEqual([
+      expect(erinReceived.map((message) => message.content)).toEqual([
         "group-a-post-join",
       ]);
-      expect(carolGroupBReceived.map((message) => message.plaintext)).toEqual([
+      expect(carolGroupBReceived.map((message) => message.content)).toEqual([
         "group-b-post-join",
       ]);
 
@@ -1668,7 +1824,7 @@ describe("CliSession", () => {
         [dave, "group-b", "a-msg-1"],
       ] as const) {
         expect(
-          session.listMessages(alias).map((message) => message.plaintext),
+          session.listMessages(alias).map((message) => message.content),
         ).not.toContain(forbidden);
       }
 
@@ -1684,6 +1840,120 @@ describe("CliSession", () => {
       expect(bob.getGroup("group-b").fetchCursor).toBeLessThanOrEqual(
         bob.getGroup("group-b").lastCursor,
       );
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("per-group serialization does not block independent group progress during syncAll", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-a");
+      await bob.generateKeyPackage("bob-b");
+      await bob.publishKeyPackage("bob-a");
+      await bob.publishKeyPackage("bob-b");
+
+      await alice.createGroup("group-a", { keyPackageAlias: "alice-main" });
+      await alice.createGroup("group-b", { keyPackageAlias: "alice-main" });
+
+      const bobIntoA = await alice.addMember("group-a", bob.stablePubkey);
+      await alice.syncGroup("group-a");
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobIntoA.keyPackageReference, "group-a");
+
+      const bobIntoB = await alice.addMember("group-b", bob.stablePubkey);
+      await alice.syncGroup("group-b");
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobIntoB.keyPackageReference, "group-b");
+
+      await bob.watchGroup("group-a");
+      await waitForCondition(
+        () => bob.getWatchStatus("group-a") === "watching",
+      );
+
+      await alice.sendMessage("group-a", "a-backlog-1");
+      await alice.sendMessage("group-a", "a-backlog-2");
+      await alice.sendMessage("group-b", "b-independent-1");
+
+      await waitForCondition(() =>
+        bob
+          .listMessages("group-a")
+          .some((message) => message.content === "a-backlog-2"),
+      );
+
+      const synced = await bob.syncAll();
+
+      expect(synced["group-a"]).toEqual([]);
+      expect(synced["group-b"]?.map((message) => message.content)).toEqual([
+        "b-independent-1",
+      ]);
+      expect(bob.listSyncIssues("group-a")).toEqual([]);
+      expect(bob.listSyncIssues("group-b")).toEqual([]);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("completed group operations do not retain queue entries", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await bob.publishKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await alice.sendMessage("demo", "first");
+      await bob.syncGroup("demo");
+      await bob.sendMessage("demo", "second");
+      await alice.syncGroup("demo");
+
+      const queue = (
+        alice as unknown as { groupOperations: Map<string, Promise<void>> }
+      ).groupOperations;
+
+      expect(queue.size).toBe(0);
+      expect(queue.has("demo")).toBe(false);
     } finally {
       await server.transport.close();
     }
@@ -1845,18 +2115,18 @@ describe("CliSession", () => {
       const survivorAReceived = await survivorA.syncGroup("group-a");
       const survivorBReceived = await survivorB.syncGroup("group-b");
 
-      expect(survivorAReceived.map((message) => message.plaintext)).toEqual([
+      expect(survivorAReceived.map((message) => message.content)).toEqual([
         `group-a-post-${survivorAAlias}`,
       ]);
-      expect(survivorBReceived.map((message) => message.plaintext)).toEqual([
+      expect(survivorBReceived.map((message) => message.content)).toEqual([
         `group-b-post-${survivorBAlias}`,
       ]);
 
       expect(
-        survivorA.listMessages("group-a").map((message) => message.plaintext),
+        survivorA.listMessages("group-a").map((message) => message.content),
       ).not.toContain(`group-b-post-${survivorBAlias}`);
       expect(
-        survivorB.listMessages("group-b").map((message) => message.plaintext),
+        survivorB.listMessages("group-b").map((message) => message.content),
       ).not.toContain(`group-a-post-${survivorAAlias}`);
 
       expect(alice.listSyncIssues("group-a")).toEqual(
@@ -1990,10 +2260,10 @@ describe("CliSession", () => {
       const bobBootstrap = await bob.syncAll();
 
       expect(
-        bobBootstrap["group-a"]?.map((message) => message.plaintext),
+        bobBootstrap["group-a"]?.map((message) => message.content),
       ).toEqual(["a-bootstrap-1"]);
       expect(
-        bobBootstrap["group-b"]?.map((message) => message.plaintext),
+        bobBootstrap["group-b"]?.map((message) => message.content),
       ).toEqual(["b-bootstrap-1"]);
 
       const carolIntoA = await alice.addMember("group-a", carol.stablePubkey);
@@ -2009,11 +2279,11 @@ describe("CliSession", () => {
       const bobRoundOne = await bob.syncAll();
 
       expect(
-        aliceRoundOne["group-a"]?.map((message) => message.plaintext),
+        aliceRoundOne["group-a"]?.map((message) => message.content),
       ).toEqual(expect.arrayContaining(["a-round-1-from-bob"]));
-      expect(
-        bobRoundOne["group-b"]?.map((message) => message.plaintext),
-      ).toEqual(expect.arrayContaining(["b-round-1-from-alice"]));
+      expect(bobRoundOne["group-b"]?.map((message) => message.content)).toEqual(
+        expect.arrayContaining(["b-round-1-from-alice"]),
+      );
 
       await carol.fetchWelcomes();
       await dave.fetchWelcomes();
@@ -2048,11 +2318,11 @@ describe("CliSession", () => {
       const carolSecondJoinedSync = await carol.syncAll();
 
       expect(
-        erinJoinedSync["group-a-erin"]?.map((message) => message.plaintext),
+        erinJoinedSync["group-a-erin"]?.map((message) => message.content),
       ).toEqual(["a-post-erin-join"]);
       expect(
         carolSecondJoinedSync["group-b-carol"]?.map(
-          (message) => message.plaintext,
+          (message) => message.content,
         ),
       ).toEqual(["b-post-carol-join"]);
 
@@ -2071,7 +2341,7 @@ describe("CliSession", () => {
       await bob.sendMessage("group-a", "a-reinvite-msg");
       const carolRejoinSync = await carol.syncAll();
       expect(
-        carolRejoinSync["group-a-rejoin"]?.map((message) => message.plaintext),
+        carolRejoinSync["group-a-rejoin"]?.map((message) => message.content),
       ).toEqual(["a-reinvite-msg"]);
 
       const frankIntoA = await bob.addMember("group-a", frank.stablePubkey);
@@ -2085,7 +2355,7 @@ describe("CliSession", () => {
       await bob.sendMessage("group-a", "a-post-frank-join");
       const frankJoinedSync = await frank.syncAll();
       expect(
-        frankJoinedSync["group-a-frank"]?.map((message) => message.plaintext),
+        frankJoinedSync["group-a-frank"]?.map((message) => message.content),
       ).toEqual(["a-post-frank-join"]);
 
       await expect(
@@ -2106,7 +2376,7 @@ describe("CliSession", () => {
       await bob.sendMessage("group-b", "b-post-dave-rejoin");
       const daveRejoinSync = await dave.syncAll();
       expect(
-        daveRejoinSync["group-b-rejoin"]?.map((message) => message.plaintext),
+        daveRejoinSync["group-b-rejoin"]?.map((message) => message.content),
       ).toEqual(["b-post-dave-rejoin"]);
 
       await expect(
@@ -2120,18 +2390,16 @@ describe("CliSession", () => {
       const erinDrain = await erin.syncAll();
       const frankDrain = await frank.syncAll();
 
-      expect(
-        aliceDrain["group-a"]?.map((message) => message.plaintext),
-      ).toEqual(
+      expect(aliceDrain["group-a"]?.map((message) => message.content)).toEqual(
         expect.arrayContaining(["a-reinvite-msg", "a-post-frank-join"]),
       );
       expect(bobDrain["group-b"] ?? []).toEqual([]);
       expect(
-        carolDrain["group-a-rejoin"]?.map((message) => message.plaintext),
+        carolDrain["group-a-rejoin"]?.map((message) => message.content),
       ).toEqual(expect.arrayContaining(["a-post-frank-join"]));
       expect(daveDrain["group-b-rejoin"] ?? []).toEqual([]);
       expect(
-        erinDrain["group-a-erin"]?.map((message) => message.plaintext),
+        erinDrain["group-a-erin"]?.map((message) => message.content),
       ).toEqual(
         expect.arrayContaining(["a-reinvite-msg", "a-post-frank-join"]),
       );
@@ -2183,7 +2451,7 @@ describe("CliSession", () => {
       ] as const) {
         const plaintexts = session
           .listMessages(alias)
-          .map((message) => message.plaintext);
+          .map((message) => message.content);
         expect(plaintexts).toContain(expected);
         expect(plaintexts).not.toContain(forbidden);
       }
@@ -2270,7 +2538,7 @@ describe("CliSession", () => {
 
       const conversation = await carol.getConversation("demo");
 
-      expect(conversation.synced.map((message) => message.plaintext)).toEqual([
+      expect(conversation.synced.map((message) => message.content)).toEqual([
         "welcome carol",
         "glad you joined",
       ]);
@@ -2278,9 +2546,10 @@ describe("CliSession", () => {
         alice.stablePubkey,
         bob.stablePubkey,
       ]);
-      expect(conversation.messages.map((message) => message.plaintext)).toEqual(
-        ["welcome carol", "glad you joined"],
-      );
+      expect(conversation.messages.map((message) => message.content)).toEqual([
+        "welcome carol",
+        "glad you joined",
+      ]);
     } finally {
       await server.transport.close();
     }

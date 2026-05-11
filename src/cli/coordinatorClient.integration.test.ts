@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  createUnsignedCordnMessageEvent,
+  decodeCordnMessageEvent,
+  finalizeCordnMessageEvent,
+} from "./messageEnvelope.ts";
+import {
   encode,
   defaultProposalTypes,
   keyPackageEncoder,
@@ -282,9 +287,16 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         msg_64: encodeBase64(commit.encodedMessage),
       });
 
+      const orderedTrafficEvent = finalizeCordnMessageEvent(
+        createUnsignedCordnMessageEvent({
+          pubkey: scenario.bob.actor.stablePubkey,
+          content: "ordered traffic",
+          createdAt: 1,
+        }),
+      );
       const application = await createApplicationMessageBytes({
         state: commit.newState,
-        plaintext: "ordered traffic",
+        plaintext: JSON.stringify(orderedTrafficEvent),
       });
       const postedApplication = await bobClient.PostGroupMessage({
         msg_64: encodeBase64(application.encodedMessage),
@@ -344,9 +356,9 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         throw new Error("Expected ordered application delivery");
       }
 
-      expect(new TextDecoder().decode(bobApplicationResult.message)).toBe(
-        "ordered traffic",
-      );
+      expect(
+        decodeCordnMessageEvent(bobApplicationResult.message).content,
+      ).toBe("ordered traffic");
     } finally {
       await server.transport.close();
     }

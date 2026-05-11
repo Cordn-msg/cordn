@@ -1,6 +1,7 @@
 import { type ClientState } from "ts-mls";
 
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
+import { createUnsignedCordnMessageEvent } from "./messageEnvelope.ts";
 import {
   createApplicationMessageBase64,
   encodeAuthenticatedSender,
@@ -85,7 +86,6 @@ export type GroupEvent =
       groupAlias: string;
       watchStatus: GroupWatchStatus | "idle";
       received: StoredMessage[];
-      reconciled: StoredMessage[];
       issues: SyncIssue[];
       error?: string;
     };
@@ -106,6 +106,7 @@ export class CliSession {
   private readonly groupIdDecoder = new TextDecoder();
   private readonly watchHandles = new Map<string, GroupWatchHandle>();
   private readonly groupEventListeners = new Set<(event: GroupEvent) => void>();
+  private readonly groupOperations = new Map<string, Promise<void>>();
 
   constructor(options: CliSessionOptions = {}) {
     this.privateKey = options.privateKey ?? createPrivateKeyHex();
@@ -415,43 +416,39 @@ export class CliSession {
 
   async sendMessage(
     groupAlias: string,
-    plaintext: string,
+    content: string,
   ): Promise<StoredMessage> {
-    const group = this.getGroup(groupAlias);
-    const outbound = await createApplicationMessageBase64({
-      state: group.state,
-      plaintext,
-      authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
-    });
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      const outbound = await createApplicationMessageBase64({
+        state: group.state,
+        event: createUnsignedCordnMessageEvent({
+          pubkey: this.stablePubkey,
+          content,
+        }),
+        authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
+      });
 
-    group.state = outbound.newState;
-    const stored: StoredMessage = {
-      cursor: 0,
-      createdAt: Date.now(),
-      direction: "outbound",
-      sender: this.stablePubkey,
-      plaintext,
-      opaqueMessageBase64: outbound.opaqueMessageBase64,
-    };
-
-    group.messages.push(stored);
-    try {
+      group.state = outbound.newState;
       const posted = await this.client.PostGroupMessage({
         msg_64: outbound.opaqueMessageBase64,
       });
 
-      stored.cursor = posted.cursor;
-      stored.createdAt = posted.at;
-      group.lastCursor = Math.max(group.lastCursor, posted.cursor);
-    } catch (error) {
-      const index = group.messages.indexOf(stored);
-      if (index >= 0) {
-        group.messages.splice(index, 1);
-      }
-      throw error;
-    }
+      const stored: StoredMessage = {
+        cursor: posted.cursor,
+        createdAt: posted.at,
+        direction: "outbound",
+        sender: this.stablePubkey,
+        id: outbound.event.id,
+        kind: outbound.event.kind,
+        tags: outbound.event.tags,
+        content: outbound.event.content,
+      };
 
-    return stored;
+      group.messages.push(stored);
+      group.lastCursor = Math.max(group.lastCursor, posted.cursor);
+      return stored;
+    });
   }
 
   async syncGroup(groupAlias: string): Promise<StoredMessage[]> {
@@ -459,16 +456,18 @@ export class CliSession {
       return [];
     }
 
-    const group = this.getGroup(groupAlias);
-    const result = await this.fetchRawGroupMessages(
-      this.deriveGroupId(group.state),
-      group.fetchCursor,
-    );
-    const { received } = await this.applyIncomingMessages(
-      group,
-      result.messages,
-    );
-    return received;
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      const result = await this.fetchRawGroupMessages(
+        this.deriveGroupId(group.state),
+        group.fetchCursor,
+      );
+      const { received } = await this.applyIncomingMessages(
+        group,
+        result.messages,
+      );
+      return received;
+    });
   }
 
   async watchGroup(groupAlias: string): Promise<void> {
@@ -501,13 +500,10 @@ export class CliSession {
           this.setWatchStatus(groupAlias, "watching");
         },
         onMessages: async (messages) => {
-          const result = await this.applyIncomingMessages(group, messages);
-          this.emitMessageEvent(
-            groupAlias,
-            result.received,
-            result.reconciled,
-            result.issues,
-          );
+          await this.runGroupOperation(groupAlias, async () => {
+            const result = await this.applyIncomingMessages(group, messages);
+            this.emitMessageEvent(groupAlias, result.received, result.issues);
+          });
         },
       },
     });
@@ -599,6 +595,32 @@ export class CliSession {
     };
   }
 
+  private async runGroupOperation<T>(
+    groupAlias: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.groupOperations.get(groupAlias) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lane = previous.catch(() => undefined).then(() => current);
+
+    this.groupOperations.set(groupAlias, lane);
+
+    await previous.catch(() => undefined);
+
+    try {
+      return await operation();
+    } finally {
+      release();
+
+      if (this.groupOperations.get(groupAlias) === lane) {
+        this.groupOperations.delete(groupAlias);
+      }
+    }
+  }
+
   private requireKeyPackage(alias: string): StoredKeyPackage {
     return this.store.getKeyPackage(alias);
   }
@@ -627,14 +649,12 @@ export class CliSession {
     } = {},
   ): Promise<{
     received: StoredMessage[];
-    reconciled: StoredMessage[];
     issues: SyncIssue[];
   }> {
     const sync = await ingestGroupMessages({
       group,
       messages: messages.map((message) => ({
         cursor: message.cursor,
-        groupId: message.gid,
         createdAt: message.at,
         opaqueMessageBase64: message.msg_64,
       })),
@@ -664,7 +684,6 @@ export class CliSession {
 
     return {
       received: sync.received,
-      reconciled: sync.reconciled,
       issues: options.suppressIssue
         ? this.removeSuppressedIssues(
             group,
@@ -737,7 +756,6 @@ export class CliSession {
   private emitMessageEvent(
     groupAlias: string,
     received: StoredMessage[],
-    reconciled: StoredMessage[],
     issues: SyncIssue[],
   ): void {
     const handle = this.watchHandles.get(groupAlias);
@@ -745,7 +763,6 @@ export class CliSession {
       type: "messages-ingested",
       groupAlias,
       received,
-      reconciled,
       issues,
       watchStatus: handle?.status ?? "idle",
       error: handle?.lastError,
