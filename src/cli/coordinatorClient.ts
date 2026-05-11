@@ -74,39 +74,53 @@ export type coordinatorClient = {
 export class cordnClient implements coordinatorClient {
   static readonly SERVER_PUBKEY =
     "24f092697f908abd8b950438ea01055b43d2cb84757474dca395c4be20329257";
-  // static readonly DEFAULT_RELAYS = ["ws://localhost:10547"];
-  static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
-  private client: Client;
-  private readonly transport: NostrClientTransport;
-  private readonly connected: Promise<void>;
+  static readonly DEFAULT_RELAYS = ["ws://localhost:10547"];
+  // static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
+  private readonly stableClient: Client;
+  private readonly stableTransport: NostrClientTransport;
+  private readonly stableConnected: Promise<void>;
+  private readonly ephemeralClient: Client;
+  private readonly ephemeralTransport: NostrClientTransport;
+  private readonly ephemeralConnected: Promise<void>;
 
   constructor(
     options: Partial<NostrTransportOptions> & {
       privateKey?: string;
+      ephemeralPrivateKey?: string;
       relays?: string[];
     } = {},
   ) {
-    this.client = new Client({
+    this.stableClient = new Client({
       name: "CvmMlsDeliveryServiceClient",
+      version: "1.0.0",
+    });
+    this.ephemeralClient = new Client({
+      name: "CvmMlsDeliveryServiceClientEphemeral",
       version: "1.0.0",
     });
 
     // Private key precedence: constructor options > config file
     const resolvedPrivateKey = options.privateKey || "";
+    const resolvedEphemeralPrivateKey = options.ephemeralPrivateKey;
 
-    // Use options.signer if provided, otherwise create from resolved private key
-    const signer = options.signer || new PrivateKeySigner(resolvedPrivateKey);
     // Use options.relays if provided, otherwise use class DEFAULT_RELAYS
     const relays = options.relays || cordnClient.DEFAULT_RELAYS;
     // Use options.relayHandler if provided, otherwise create from relays
     const relayHandler =
       options.relayHandler || new ApplesauceRelayPool(relays);
     const serverPubkey = options.serverPubkey ?? cordnClient.SERVER_PUBKEY;
-    const { privateKey: _, serverPubkey: __, relays: ___, ...rest } = options;
+    const {
+      privateKey: _,
+      ephemeralPrivateKey: ____,
+      serverPubkey: __,
+      relays: ___,
+      signer: providedSigner,
+      ...rest
+    } = options;
 
-    this.transport = new NostrClientTransport({
+    this.stableTransport = new NostrClientTransport({
       serverPubkey,
-      signer,
+      signer: providedSigner || new PrivateKeySigner(resolvedPrivateKey),
       relayHandler,
       isStateless: true,
       logLevel: "silent",
@@ -114,28 +128,71 @@ export class cordnClient implements coordinatorClient {
       openStream: {
         enabled: true,
       },
+      oversizedTransfer: {
+        enabled: true,
+      },
+      ...rest,
+    });
+
+    this.ephemeralTransport = new NostrClientTransport({
+      serverPubkey,
+      signer: resolvedEphemeralPrivateKey
+        ? new PrivateKeySigner(resolvedEphemeralPrivateKey)
+        : new PrivateKeySigner(),
+      relayHandler,
+      isStateless: true,
+      logLevel: "silent",
+      // encryptionMode: EncryptionMode.DISABLED,
+      openStream: {
+        enabled: true,
+      },
+      oversizedTransfer: {
+        enabled: true,
+      },
       ...rest,
     });
 
     // Auto-connect in constructor
-    this.connected = this.client.connect(this.transport).catch((error) => {
-      console.error(`Failed to connect to server: ${error}`);
-      throw error;
-    });
+    this.stableConnected = this.stableClient
+      .connect(this.stableTransport)
+      .catch((error) => {
+        console.error(`Failed to connect stable client to server: ${error}`);
+        throw error;
+      });
+    this.ephemeralConnected = this.ephemeralClient
+      .connect(this.ephemeralTransport)
+      .catch((error) => {
+        console.error(`Failed to connect ephemeral client to server: ${error}`);
+        throw error;
+      });
   }
 
   async disconnect(): Promise<void> {
-    await this.connected.catch(() => undefined);
-    await this.transport.close().catch(() => undefined);
+    await Promise.all([
+      this.stableConnected.catch(() => undefined),
+      this.ephemeralConnected.catch(() => undefined),
+    ]);
+    await Promise.all([
+      this.stableTransport.close().catch(() => undefined),
+      this.ephemeralTransport.close().catch(() => undefined),
+    ]);
   }
 
   private async call<T = unknown>(
+    transportKind: "stable" | "ephemeral",
     name: string,
     args: Record<string, unknown>,
     schema?: ZodType<T>,
   ): Promise<T> {
-    await this.connected;
-    const result = await this.client.callTool({
+    const client =
+      transportKind === "stable" ? this.stableClient : this.ephemeralClient;
+    const connected =
+      transportKind === "stable"
+        ? this.stableConnected
+        : this.ephemeralConnected;
+
+    await connected;
+    const result = await client.callTool({
       name,
       arguments: { ...args },
     });
@@ -154,6 +211,7 @@ export class cordnClient implements coordinatorClient {
     input: PublishKeyPackageInput,
   ): Promise<PublishKeyPackageOutput> {
     return this.call(
+      "stable",
       COORDINATOR_METHODS.publishKeyPackage,
       input,
       publishKeyPackageOutputSchema,
@@ -169,6 +227,7 @@ export class cordnClient implements coordinatorClient {
     input: ConsumeKeyPackageInput,
   ): Promise<ConsumeKeyPackageOutput> {
     return this.call(
+      "ephemeral",
       COORDINATOR_METHODS.consumeKeyPackage,
       input,
       consumeKeyPackageOutputSchema,
@@ -179,6 +238,7 @@ export class cordnClient implements coordinatorClient {
     input: RemoveKeyPackagesInput,
   ): Promise<RemoveKeyPackagesOutput> {
     return this.call(
+      "stable",
       COORDINATOR_METHODS.removeKeyPackages,
       input,
       removeKeyPackagesOutputSchema,
@@ -193,6 +253,7 @@ export class cordnClient implements coordinatorClient {
     args: ListAvailableKeyPackagesInput = {},
   ): Promise<ListAvailableKeyPackagesOutput> {
     return this.call(
+      "ephemeral",
       COORDINATOR_METHODS.listAvailableKeyPackages,
       args,
       listAvailableKeyPackagesOutputSchema,
@@ -207,6 +268,7 @@ export class cordnClient implements coordinatorClient {
     args: FetchPendingWelcomesInput,
   ): Promise<FetchPendingWelcomesOutput> {
     return this.call(
+      "stable",
       COORDINATOR_METHODS.fetchPendingWelcomes,
       args,
       fetchPendingWelcomesOutputSchema,
@@ -222,6 +284,7 @@ export class cordnClient implements coordinatorClient {
    */
   async StoreWelcome(input: StoreWelcomeInput): Promise<StoreWelcomeOutput> {
     return this.call(
+      "ephemeral",
       COORDINATOR_METHODS.storeWelcome,
       input,
       storeWelcomeOutputSchema,
@@ -237,6 +300,7 @@ export class cordnClient implements coordinatorClient {
     input: PostGroupMessageInput,
   ): Promise<PostGroupMessageOutput> {
     return this.call(
+      "ephemeral",
       COORDINATOR_METHODS.postGroupMessage,
       input,
       postGroupMessageOutputSchema,
@@ -253,6 +317,7 @@ export class cordnClient implements coordinatorClient {
     input: FetchGroupMessagesInput,
   ): Promise<FetchGroupMessagesOutput> {
     return this.call(
+      "ephemeral",
       COORDINATOR_METHODS.fetchGroupMessages,
       input,
       fetchGroupMessagesOutputSchema,
@@ -264,11 +329,11 @@ export class cordnClient implements coordinatorClient {
     result: Promise<SubscribeGroupMessagesOutput>;
     abort: (reason?: string) => Promise<void>;
   }> {
-    await this.connected;
+    await this.ephemeralConnected;
 
     const call = await callToolStream<CallToolResult>({
-      client: this.client,
-      transport: this.transport,
+      client: this.ephemeralClient,
+      transport: this.ephemeralTransport,
       name: COORDINATOR_METHODS.subscribeGroupMessages,
       arguments: { ...input },
     });

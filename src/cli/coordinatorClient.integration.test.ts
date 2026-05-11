@@ -20,27 +20,49 @@ import { MockRelayHub } from "../test/mockRelay.ts";
 import {
   createApplicationMessageBytes,
   createCommitMessageBytes,
+  createKeyPackageRef,
   createProposalMessageBytes,
   createThreeActorGroupScenario,
   decodeMlsFramedMessage,
   getTestCiphersuite,
   processMessageBytes,
 } from "../coordinator/testUtils.ts";
-import { PrivateKeySigner, type RelayHandler } from "@contextvm/sdk";
+import {
+  EncryptionMode,
+  PrivateKeySigner,
+  type RelayHandler,
+} from "@contextvm/sdk";
+import { verifyEvent } from "nostr-tools";
 import { bytesToHex } from "nostr-tools/utils";
 import { decodeBase64, encodeBase64 } from "../server/base64.ts";
 import { cordnClient } from "./coordinatorClient.ts";
 
 async function createClient(params: {
   privateKey: Uint8Array;
+  ephemeralPrivateKey?: string;
   serverPubkey: string;
   relayHandler: RelayHandler;
 }): Promise<cordnClient> {
   return new cordnClient({
     privateKey: bytesToHex(params.privateKey),
+    ephemeralPrivateKey: params.ephemeralPrivateKey,
+    encryptionMode: EncryptionMode.DISABLED,
     serverPubkey: params.serverPubkey,
     relayHandler: params.relayHandler,
   });
+}
+
+function getVerifiedClientPubkeys(
+  events: ReturnType<MockRelayHub["getEvents"]>,
+  serverPubkey: string,
+): string[] {
+  return [
+    ...new Set(
+      events
+        .filter((event) => verifyEvent(event) && event.pubkey !== serverPubkey)
+        .map((event) => event.pubkey),
+    ),
+  ];
 }
 
 describe("CvmMlsDeliveryServiceClient integration flow", () => {
@@ -169,6 +191,117 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         trackedGroups: 1,
         queuedMessages: 3,
       });
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("routes stable and ephemeral coordinator methods through the expected pubkeys", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const scenario = await createThreeActorGroupScenario();
+      const ephemeralPrivateKey =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+      const ephemeralPubkey = await new PrivateKeySigner(
+        ephemeralPrivateKey,
+      ).getPublicKey();
+      const stablePubkey = scenario.alice.actor.stablePubkey;
+      const stableKeyPackageRef = await createKeyPackageRef(
+        scenario.alice.keyPackage,
+      );
+
+      const aliceClient = await createClient({
+        privateKey: scenario.alice.actor.secretKey,
+        ephemeralPrivateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+
+      clients.push(aliceClient);
+
+      let start = relayHub.getEvents().length;
+      await aliceClient.PublishKeyPackage({
+        kp_ref: stableKeyPackageRef,
+        kp_64: encodeBase64(
+          encode(keyPackageEncoder, scenario.alice.keyPackage),
+        ),
+      });
+      expect(
+        getVerifiedClientPubkeys(
+          relayHub.getEvents().slice(start),
+          serverPubkey,
+        ),
+      ).toContain(stablePubkey);
+
+      start = relayHub.getEvents().length;
+      await aliceClient.FetchPendingWelcomes({});
+      expect(
+        getVerifiedClientPubkeys(
+          relayHub.getEvents().slice(start),
+          serverPubkey,
+        ),
+      ).toContain(stablePubkey);
+
+      start = relayHub.getEvents().length;
+      await aliceClient.RemoveKeyPackages({
+        kp_refs: [stableKeyPackageRef],
+      });
+      expect(
+        getVerifiedClientPubkeys(
+          relayHub.getEvents().slice(start),
+          serverPubkey,
+        ),
+      ).toContain(stablePubkey);
+
+      start = relayHub.getEvents().length;
+      await aliceClient.PostGroupMessage({
+        msg_64: encodeBase64(scenario.aliceApplicationBytes),
+      });
+      expect(
+        getVerifiedClientPubkeys(
+          relayHub.getEvents().slice(start),
+          serverPubkey,
+        ),
+      ).toContain(ephemeralPubkey);
+
+      const posted = await aliceClient.PostGroupMessage({
+        msg_64: encodeBase64(scenario.aliceApplicationBytes),
+      });
+
+      start = relayHub.getEvents().length;
+      await aliceClient.FetchGroupMessages({ gid: posted.gid });
+      expect(
+        getVerifiedClientPubkeys(
+          relayHub.getEvents().slice(start),
+          serverPubkey,
+        ),
+      ).toContain(ephemeralPubkey);
+
+      start = relayHub.getEvents().length;
+      await aliceClient.StoreWelcome({
+        target_pk: stablePubkey,
+        kp_ref: stableKeyPackageRef,
+        welcome_64: encodeBase64(
+          encode(mlsMessageEncoder, {
+            version: protocolVersions.mls10,
+            wireformat: wireformats.mls_welcome,
+            welcome: scenario.bobWelcome,
+          }),
+        ),
+      });
+      expect(
+        getVerifiedClientPubkeys(
+          relayHub.getEvents().slice(start),
+          serverPubkey,
+        ),
+      ).toContain(ephemeralPubkey);
     } finally {
       await server.transport.close();
     }

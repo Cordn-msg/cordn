@@ -29,6 +29,10 @@ export class MockRelayHub {
     this.subscriptions.clear();
   }
 
+  public getEvents(): NostrEvent[] {
+    return [...this.events];
+  }
+
   public publish(event: NostrEvent): void {
     this.events.push(event);
 
