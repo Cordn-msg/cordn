@@ -6,6 +6,7 @@ import {
   type NostrTransportOptions,
   PrivateKeySigner,
   ApplesauceRelayPool,
+  EncryptionMode,
 } from "@contextvm/sdk";
 import type { ZodType } from "zod";
 import {
@@ -72,8 +73,6 @@ export type coordinatorClient = {
 };
 
 export class cordnClient implements coordinatorClient {
-  static readonly SERVER_PUBKEY =
-    "24f092697f908abd8b950438ea01055b43d2cb84757474dca395c4be20329257";
   static readonly DEFAULT_RELAYS = ["ws://localhost:10547"];
   // static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
   private readonly stableClient: Client;
@@ -108,12 +107,18 @@ export class cordnClient implements coordinatorClient {
     // Use options.relayHandler if provided, otherwise create from relays
     const relayHandler =
       options.relayHandler || new ApplesauceRelayPool(relays);
-    const serverPubkey = options.serverPubkey ?? cordnClient.SERVER_PUBKEY;
+    const serverPubkey = options.serverPubkey;
+    if (!serverPubkey) {
+      throw new Error(
+        "Missing coordinator server pubkey. Pass serverPubkey explicitly or configure the CLI entrypoint to provide one.",
+      );
+    }
     const {
       privateKey: _,
       ephemeralPrivateKey: ____,
       serverPubkey: __,
       relays: ___,
+      relayHandler: _____,
       signer: providedSigner,
       ...rest
     } = options;
@@ -124,7 +129,7 @@ export class cordnClient implements coordinatorClient {
       relayHandler,
       isStateless: true,
       logLevel: "silent",
-      // encryptionMode: EncryptionMode.DISABLED,
+      encryptionMode: EncryptionMode.DISABLED,
       openStream: {
         enabled: true,
       },
@@ -142,7 +147,7 @@ export class cordnClient implements coordinatorClient {
       relayHandler,
       isStateless: true,
       logLevel: "silent",
-      // encryptionMode: EncryptionMode.DISABLED,
+      encryptionMode: EncryptionMode.DISABLED,
       openStream: {
         enabled: true,
       },

@@ -18,7 +18,7 @@ import {
   type FetchGroupMessagesOutput,
   type ListAvailableKeyPackagesOutput,
 } from "../contracts/index.ts";
-import { cordnClient } from "./coordinatorClient.ts";
+import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";
 import { runGroupWatch } from "./groupWatch.ts";
 import { acceptStoredWelcome, prepareAddMember } from "./membershipFlow.ts";
@@ -98,11 +98,11 @@ interface GroupWatchHandle {
 }
 
 export class CliSession {
-  readonly client: cordnClient;
   readonly privateKey: string;
   readonly stablePubkey: string;
 
   private readonly store = new CliSessionStore();
+  private readonly coordinatorRegistry: CoordinatorClientRegistry;
   private readonly groupIdDecoder = new TextDecoder();
   private readonly watchHandles = new Map<string, GroupWatchHandle>();
   private readonly groupEventListeners = new Set<(event: GroupEvent) => void>();
@@ -110,7 +110,7 @@ export class CliSession {
 
   constructor(options: CliSessionOptions = {}) {
     this.privateKey = options.privateKey ?? createPrivateKeyHex();
-    this.client = new cordnClient({
+    this.coordinatorRegistry = new CoordinatorClientRegistry({
       ...options,
       privateKey: this.privateKey,
     });
@@ -123,7 +123,7 @@ export class CliSession {
         this.unwatchGroup(groupAlias),
       ),
     );
-    await this.client.disconnect().catch(() => undefined);
+    await this.coordinatorRegistry.disconnect().catch(() => undefined);
   }
 
   listKeyPackages(): StoredKeyPackage[] {
@@ -218,7 +218,11 @@ export class CliSession {
 
   async generateKeyPackage(
     alias?: string,
-    options: { localOnly?: boolean; lastResort?: boolean } = {},
+    options: {
+      localOnly?: boolean;
+      lastResort?: boolean;
+      coordinatorKey?: string;
+    } = {},
   ): Promise<StoredKeyPackage> {
     const resolvedAlias = alias ?? `kp-${this.store.keyPackageCount + 1}`;
 
@@ -238,19 +242,26 @@ export class CliSession {
     this.store.addKeyPackage(stored);
 
     if (!options.localOnly) {
-      await this.publishKeyPackage(stored.alias);
+      await this.publishKeyPackage(stored.alias, {
+        coordinatorKey: options.coordinatorKey,
+      });
     }
 
     return stored;
   }
 
-  async publishKeyPackage(alias: string): Promise<StoredKeyPackage> {
+  async publishKeyPackage(
+    alias: string,
+    options: { coordinatorKey?: string } = {},
+  ): Promise<StoredKeyPackage> {
     const stored = this.requireKeyPackage(alias);
     if (stored.publishedAt !== undefined) {
       return stored;
     }
 
-    const result = await this.client.PublishKeyPackage({
+    const result = await this.getCoordinatorClient(
+      options.coordinatorKey,
+    ).PublishKeyPackage({
       kp_ref: stored.keyPackageRef,
       kp_64: stored.keyPackageBase64,
     });
@@ -261,7 +272,7 @@ export class CliSession {
 
   async deleteKeyPackage(
     aliasOrKeyPackageRef: string,
-    options: { localOnly?: boolean } = {},
+    options: { localOnly?: boolean; coordinatorKey?: string } = {},
   ): Promise<{ keyPackageRef: string; removedLocal: boolean }> {
     const byRef = this.store.findKeyPackageByRef(aliasOrKeyPackageRef);
     const byAlias = byRef
@@ -281,7 +292,9 @@ export class CliSession {
 
     if (!options.localOnly) {
       if (!byRef && !byAlias) {
-        const available = await this.listAvailableKeyPackages();
+        const available = await this.listAvailableKeyPackages(
+          options.coordinatorKey,
+        );
         const existsRemotely = available.some(
           (entry) => entry.kp_ref === keyPackageRef,
         );
@@ -291,7 +304,11 @@ export class CliSession {
         }
       }
 
-      await this.client.RemoveKeyPackages({ kp_refs: [keyPackageRef] });
+      await this.getCoordinatorClient(options.coordinatorKey).RemoveKeyPackages(
+        {
+          kp_refs: [keyPackageRef],
+        },
+      );
     }
 
     return { keyPackageRef, removedLocal };
@@ -313,7 +330,11 @@ export class CliSession {
       metadata: options.metadata,
     });
 
-    const group = this.createGroupSessionState(alias, state);
+    const group = this.createGroupSessionState(
+      alias,
+      state,
+      this.resolveCoordinatorKey(options.coordinatorKey),
+    );
 
     this.store.addGroup(group);
     return group;
@@ -324,12 +345,13 @@ export class CliSession {
     identifier: string,
   ): Promise<{ keyPackageReference: string }> {
     const group = this.getGroup(groupAlias);
+    const client = this.getGroupClient(group);
     const prepared = await prepareAddMember({
       groupAlias,
       group,
       identifier,
       consumeKeyPackage: async (params) => {
-        const result = await this.client.ConsumeKeyPackage({
+        const result = await client.ConsumeKeyPackage({
           id: params.identifier,
         });
 
@@ -351,31 +373,43 @@ export class CliSession {
       prepared.pendingOperation,
     );
 
-    await this.client.PostGroupMessage({
+    await client.PostGroupMessage({
       msg_64: prepared.commitMessageBase64,
     });
 
     return { keyPackageReference: prepared.keyPackageReference };
   }
 
-  async fetchWelcomes(): Promise<StoredWelcome[]> {
-    const result = await this.client.FetchPendingWelcomes({});
+  async fetchWelcomes(coordinatorKey?: string): Promise<StoredWelcome[]> {
+    const resolvedCoordinatorKey = this.resolveCoordinatorKey(coordinatorKey);
+    const result = await this.getCoordinatorClient(
+      resolvedCoordinatorKey,
+    ).FetchPendingWelcomes({});
 
     for (const welcome of result.welcomes) {
-      this.store.putWelcome(welcome);
+      this.store.putWelcome({
+        ...welcome,
+        coordinatorKey: resolvedCoordinatorKey,
+      });
     }
 
     return this.listWelcomes();
   }
 
-  async listAvailableKeyPackages(): Promise<ContractAvailableKeyPackage[]> {
+  async listAvailableKeyPackages(
+    coordinatorKey?: string,
+  ): Promise<ContractAvailableKeyPackage[]> {
     const result: ListAvailableKeyPackagesOutput =
-      await this.client.ListAvailableKeyPackages({});
+      await this.getCoordinatorClient(coordinatorKey).ListAvailableKeyPackages(
+        {},
+      );
     return result.keyPackages;
   }
 
-  async listAvailableKeyPackageSummaries(): Promise<KeyPackageSummary[]> {
-    const keyPackages = await this.listAvailableKeyPackages();
+  async listAvailableKeyPackageSummaries(
+    coordinatorKey?: string,
+  ): Promise<KeyPackageSummary[]> {
+    const keyPackages = await this.listAvailableKeyPackages(coordinatorKey);
     return keyPackages.map((entry) => ({
       stablePubkey: entry.pk,
       keyPackageRef: entry.kp_ref,
@@ -388,6 +422,7 @@ export class CliSession {
   async acceptWelcome(
     keyPackageReference: string,
     groupAlias?: string,
+    coordinatorKey?: string,
   ): Promise<GroupSessionState> {
     const welcome = this.store.getWelcome(keyPackageReference);
     const keyPackage = this.store.findKeyPackageByRef(welcome.kp_ref);
@@ -404,7 +439,11 @@ export class CliSession {
       welcome,
       keyPackage,
       createGroupSessionState: (resolvedAlias, state) =>
-        this.createGroupSessionState(resolvedAlias, state),
+        this.createGroupSessionState(
+          resolvedAlias,
+          state,
+          this.resolveCoordinatorKey(coordinatorKey ?? welcome.coordinatorKey),
+        ),
     });
 
     this.store.addGroup(group);
@@ -430,7 +469,7 @@ export class CliSession {
       });
 
       group.state = outbound.newState;
-      const posted = await this.client.PostGroupMessage({
+      const posted = await this.getGroupClient(group).PostGroupMessage({
         msg_64: outbound.opaqueMessageBase64,
       });
 
@@ -485,7 +524,7 @@ export class CliSession {
     });
 
     const watch = runGroupWatch({
-      client: this.client,
+      client: this.getGroupClient(group),
       groupId,
       getAfterCursor: () => group.fetchCursor,
       fetchMessages: async (afterCursor) => {
@@ -574,7 +613,8 @@ export class CliSession {
     groupId: string,
     afterCursor: number,
   ): Promise<FetchGroupMessagesOutput> {
-    return this.client.FetchGroupMessages({
+    const group = this.findGroupById(groupId);
+    return this.getGroupClient(group).FetchGroupMessages({
       gid: groupId,
       after: this.toOptionalCursor(afterCursor),
     });
@@ -583,9 +623,11 @@ export class CliSession {
   private createGroupSessionState(
     alias: string,
     state: ClientState,
+    coordinatorKey: string,
   ): GroupSessionState {
     return {
       alias,
+      coordinatorKey,
       state,
       metadata: getCordnGroupMetadataExtension(state),
       lastCursor: 0,
@@ -637,6 +679,32 @@ export class CliSession {
     return this.groupIdDecoder.decode(state.groupContext.groupId);
   }
 
+  private findGroupById(groupId: string): GroupSessionState {
+    const group = this.listGroups().find(
+      (candidate) => this.deriveGroupId(candidate.state) === groupId,
+    );
+
+    if (!group) {
+      throw new Error(`Unknown group for coordinator routing: ${groupId}`);
+    }
+
+    return group;
+  }
+
+  private resolveCoordinatorKey(coordinatorKey?: string): string {
+    return coordinatorKey ?? this.coordinatorRegistry.defaultCoordinatorKey;
+  }
+
+  private getCoordinatorClient(coordinatorKey?: string) {
+    return this.coordinatorRegistry.getClient(
+      this.resolveCoordinatorKey(coordinatorKey),
+    );
+  }
+
+  private getGroupClient(group: GroupSessionState) {
+    return this.getCoordinatorClient(group.coordinatorKey);
+  }
+
   private toOptionalCursor(cursor: number): number | undefined {
     return cursor > 0 ? cursor : undefined;
   }
@@ -668,7 +736,7 @@ export class CliSession {
 
     await confirmPendingEpochOperations(
       this.store.pendingOperations,
-      this.client,
+      this.getGroupClient(group),
       {
         groupAlias: group.alias,
         opaqueMessageBase64s: [...sync.appliedPendingCommitMessages],

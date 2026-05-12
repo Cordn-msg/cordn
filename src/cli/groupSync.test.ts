@@ -21,6 +21,7 @@ import type { GroupSessionState } from "./sessionState.ts";
 function createGroupState(): GroupSessionState {
   return {
     alias: "demo",
+    coordinatorKey: "demo-coordinator",
     state: {} as GroupSessionState["state"],
     metadata: undefined,
     lastCursor: 0,

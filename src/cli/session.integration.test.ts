@@ -77,6 +77,160 @@ describe("CliSession", () => {
     }
   });
 
+  test("routes group operations through the bound coordinator while key package listing stays selectable", async () => {
+    const relayHub = new MockRelayHub();
+    const coordinatorASigner = new PrivateKeySigner();
+    const coordinatorBSigner = new PrivateKeySigner();
+    const coordinatorAPubkey = await coordinatorASigner.getPublicKey();
+    const coordinatorBPubkey = await coordinatorBSigner.getPublicKey();
+    const coordinatorA = await connectServer({
+      signer: coordinatorASigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+    const coordinatorB = await connectServer({
+      signer: coordinatorBSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey: coordinatorAPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        coordinators: {
+          [coordinatorBPubkey]: {
+            serverPubkey: coordinatorBPubkey,
+            relayHandler: relayHub.createRelayHandler(),
+          },
+        },
+      });
+      const bob = new CliSession({
+        serverPubkey: coordinatorBPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        coordinators: {
+          [coordinatorAPubkey]: {
+            serverPubkey: coordinatorAPubkey,
+            relayHandler: relayHub.createRelayHandler(),
+          },
+        },
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main", { localOnly: true });
+      await bob.generateKeyPackage("bob-main", { localOnly: true });
+      await bob.publishKeyPackage("bob-main", {
+        coordinatorKey: coordinatorBPubkey,
+      });
+
+      expect(await alice.listAvailableKeyPackageSummaries()).toEqual([]);
+      expect(
+        await alice.listAvailableKeyPackageSummaries(coordinatorBPubkey),
+      ).toHaveLength(1);
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        coordinatorKey: coordinatorBPubkey,
+      });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      const welcomes = await bob.fetchWelcomes(coordinatorBPubkey);
+      expect(
+        welcomes.some(
+          (welcome) => welcome.kp_ref === invitation.keyPackageReference,
+        ),
+      ).toBe(true);
+      await bob.acceptWelcome(
+        invitation.keyPackageReference,
+        "demo",
+        coordinatorBPubkey,
+      );
+
+      await alice.sendMessage("demo", "hello from coordinator b");
+      const synced = await bob.syncGroup("demo");
+
+      expect(alice.getGroup("demo").coordinatorKey).toBe(coordinatorBPubkey);
+      expect(bob.getGroup("demo").coordinatorKey).toBe(coordinatorBPubkey);
+      expect(synced).toHaveLength(1);
+      expect(synced[0]?.content).toBe("hello from coordinator b");
+    } finally {
+      await coordinatorA.transport.close();
+      await coordinatorB.transport.close();
+    }
+  });
+
+  test("accept-welcome keeps the fetched coordinator binding when no coordinator override is provided", async () => {
+    const relayHub = new MockRelayHub();
+    const coordinatorASigner = new PrivateKeySigner();
+    const coordinatorBSigner = new PrivateKeySigner();
+    const coordinatorAPubkey = await coordinatorASigner.getPublicKey();
+    const coordinatorBPubkey = await coordinatorBSigner.getPublicKey();
+    const coordinatorA = await connectServer({
+      signer: coordinatorASigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+    const coordinatorB = await connectServer({
+      signer: coordinatorBSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey: coordinatorAPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        coordinators: {
+          [coordinatorBPubkey]: {
+            serverPubkey: coordinatorBPubkey,
+            relayHandler: relayHub.createRelayHandler(),
+          },
+        },
+      });
+      const bob = new CliSession({
+        serverPubkey: coordinatorAPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        coordinators: {
+          [coordinatorBPubkey]: {
+            serverPubkey: coordinatorBPubkey,
+            relayHandler: relayHub.createRelayHandler(),
+          },
+        },
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main", { localOnly: true });
+      await bob.generateKeyPackage("bob-main", { localOnly: true });
+      await bob.publishKeyPackage("bob-main", {
+        coordinatorKey: coordinatorBPubkey,
+      });
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        coordinatorKey: coordinatorBPubkey,
+      });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      const welcomes = await bob.fetchWelcomes(coordinatorBPubkey);
+      const storedWelcome = welcomes.find(
+        (welcome) => welcome.kp_ref === invitation.keyPackageReference,
+      );
+
+      expect(storedWelcome?.coordinatorKey).toBe(coordinatorBPubkey);
+
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      expect(bob.getGroup("demo").coordinatorKey).toBe(coordinatorBPubkey);
+
+      await alice.sendMessage("demo", "hello after implicit welcome binding");
+      const synced = await bob.syncGroup("demo");
+
+      expect(synced).toHaveLength(1);
+      expect(synced[0]?.content).toBe("hello after implicit welcome binding");
+    } finally {
+      await coordinatorA.transport.close();
+      await coordinatorB.transport.close();
+    }
+  });
+
   test("does not skip unseen coordinator messages after multiple local sends without intermediate sync", async () => {
     const relayHub = new MockRelayHub();
     const serverSigner = new PrivateKeySigner();

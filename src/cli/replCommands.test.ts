@@ -26,6 +26,19 @@ describe("parseCreateGroupArgs", () => {
         description: "hello",
         adminPubkeys: ["a".repeat(64)],
       },
+      coordinatorKey: undefined,
+      watch: false,
+    });
+  });
+
+  test("parses the coordinator option", () => {
+    expect(
+      parseCreateGroupArgs(["demo", "--coordinator", "b".repeat(64)]),
+    ).toEqual({
+      alias: "demo",
+      keyPackageAlias: undefined,
+      metadata: undefined,
+      coordinatorKey: "b".repeat(64),
       watch: false,
     });
   });
@@ -35,6 +48,7 @@ describe("parseCreateGroupArgs", () => {
       alias: "demo",
       keyPackageAlias: undefined,
       metadata: undefined,
+      coordinatorKey: undefined,
       watch: true,
     });
   });
@@ -77,6 +91,7 @@ describe("executeReplCommand", () => {
     expect(generateKeyPackage).toHaveBeenCalledWith("alice-main", {
       localOnly: true,
       lastResort: true,
+      coordinatorKey: undefined,
     });
   });
 
@@ -98,6 +113,57 @@ describe("executeReplCommand", () => {
     expect(generateKeyPackage).toHaveBeenCalledWith(undefined, {
       localOnly: false,
       lastResort: true,
+      coordinatorKey: undefined,
+    });
+  });
+
+  test("passes coordinator to gen-kp publishing", async () => {
+    const output = new PassThrough();
+    const generateKeyPackage = vi.fn().mockResolvedValue({
+      alias: "alice-main",
+      keyPackageRef: "alice-ref",
+      publishedAt: 123,
+    });
+    const session = {
+      generateKeyPackage,
+    } as never;
+
+    await executeReplCommand(
+      "gen-kp",
+      ["alice-main", "--coordinator", "coordinator-a"],
+      {
+        session,
+        output,
+      },
+    );
+
+    expect(generateKeyPackage).toHaveBeenCalledWith("alice-main", {
+      localOnly: false,
+      lastResort: false,
+      coordinatorKey: "coordinator-a",
+    });
+  });
+
+  test("does not treat the --coordinator value as the alias for gen-kp", async () => {
+    const output = new PassThrough();
+    const generateKeyPackage = vi.fn().mockResolvedValue({
+      alias: "kp-1",
+      keyPackageRef: "alice-ref",
+      publishedAt: 123,
+    });
+    const session = {
+      generateKeyPackage,
+    } as never;
+
+    await executeReplCommand("gen-kp", ["--coordinator", "coordinator-a"], {
+      session,
+      output,
+    });
+
+    expect(generateKeyPackage).toHaveBeenCalledWith(undefined, {
+      localOnly: false,
+      lastResort: false,
+      coordinatorKey: "coordinator-a",
     });
   });
 
@@ -137,7 +203,55 @@ describe("executeReplCommand", () => {
 
     expect(deleteKeyPackage).toHaveBeenCalledWith("alice-main", {
       localOnly: false,
+      coordinatorKey: undefined,
     });
+  });
+
+  test("passes coordinator to available-kps", async () => {
+    const output = new PassThrough();
+    const listAvailableKeyPackageSummaries = vi.fn().mockResolvedValue([]);
+    const session = {
+      listAvailableKeyPackageSummaries,
+    } as never;
+
+    await executeReplCommand(
+      "available-kps",
+      ["--coordinator", "a".repeat(64)],
+      {
+        session,
+        output,
+      },
+    );
+
+    expect(listAvailableKeyPackageSummaries).toHaveBeenCalledWith(
+      "a".repeat(64),
+    );
+  });
+
+  test("passes coordinator to accept-welcome", async () => {
+    const output = new PassThrough();
+    const acceptWelcome = vi.fn().mockResolvedValue({
+      alias: "demo",
+      metadata: undefined,
+    });
+    const session = {
+      acceptWelcome,
+    } as never;
+
+    await executeReplCommand(
+      "accept-welcome",
+      ["kp-ref", "demo", "--coordinator", "c".repeat(64)],
+      {
+        session,
+        output,
+      },
+    );
+
+    expect(acceptWelcome).toHaveBeenCalledWith(
+      "kp-ref",
+      "demo",
+      "c".repeat(64),
+    );
   });
 
   test("starts watching after create-group --watch", async () => {
@@ -207,7 +321,7 @@ describe("executeReplCommand", () => {
       output,
     });
 
-    expect(acceptWelcome).toHaveBeenCalledWith("kp-ref", undefined);
+    expect(acceptWelcome).toHaveBeenCalledWith("kp-ref", undefined, undefined);
     expect(watchGroup).toHaveBeenCalledWith("demo");
   });
 });

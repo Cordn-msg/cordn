@@ -2,6 +2,7 @@ import type { ClientState, KeyPackage, PrivateKeyPackage } from "ts-mls";
 import type { UnsignedEvent } from "nostr-tools";
 
 import type { PendingWelcome } from "../contracts/index.ts";
+import type { CoordinatorTarget } from "./coordinatorRegistry.ts";
 import type { CordnGroupMetadata } from "./groupMetadata.ts";
 
 export interface CliSessionOptions {
@@ -9,6 +10,8 @@ export interface CliSessionOptions {
   serverPubkey?: string;
   relays?: string[];
   relayHandler?: import("@contextvm/sdk").RelayHandler;
+  defaultCoordinator?: CoordinatorTarget;
+  coordinators?: Record<string, CoordinatorTarget>;
 }
 
 export interface SessionStatus {
@@ -58,6 +61,7 @@ export interface SyncIssue {
 
 export interface GroupSessionState {
   alias: string;
+  coordinatorKey: string;
   state: ClientState;
   metadata?: CordnGroupMetadata;
   lastCursor: number;
@@ -70,6 +74,7 @@ export interface CreateGroupOptions {
   groupId?: string;
   keyPackageAlias?: string;
   metadata?: CordnGroupMetadata;
+  coordinatorKey?: string;
 }
 
 export interface ConversationView {
@@ -77,4 +82,6 @@ export interface ConversationView {
   messages: StoredMessage[];
 }
 
-export type StoredWelcome = PendingWelcome;
+export interface StoredWelcome extends PendingWelcome {
+  coordinatorKey?: string;
+}

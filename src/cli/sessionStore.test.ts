@@ -28,6 +28,7 @@ function createKeyPackage(alias: string): StoredKeyPackage {
 function createGroup(alias: string): GroupSessionState {
   return {
     alias,
+    coordinatorKey: `${alias}-coordinator`,
     state: {} as GroupSessionState["state"],
     lastCursor: 0,
     fetchCursor: 0,
@@ -41,6 +42,7 @@ function createWelcome(keyPackageReference: string): StoredWelcome {
     kp_ref: keyPackageReference,
     welcome_64: "welcome-base64",
     at: 1,
+    coordinatorKey: "welcome-coordinator",
   };
 }
 

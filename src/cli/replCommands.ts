@@ -62,6 +62,22 @@ export interface ReplCommandResult {
   shouldExit?: boolean;
 }
 
+function formatGeneratedKeyPackageMessage(params: {
+  alias: string;
+  keyPackageRef: string;
+  coordinatorKey?: string;
+  publishedAt?: number;
+}): string {
+  const publishState =
+    params.publishedAt === undefined
+      ? " localOnly=yes"
+      : params.coordinatorKey
+        ? ` publishedTo=${formatFullCredentialLabel(params.coordinatorKey)}`
+        : " publishedTo=default-coordinator";
+
+  return `${colorize("generated", ansi.green)} alias=${params.alias} ref=${colorize(params.keyPackageRef, ansi.dim)}${publishState}`;
+}
+
 export function tokenizeInput(line: string): string[] {
   const tokens = line.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+/g) ?? [];
 
@@ -81,18 +97,20 @@ export function parseCreateGroupArgs(args: string[]): {
   alias: string;
   keyPackageAlias?: string;
   metadata?: CordnGroupMetadata;
+  coordinatorKey?: string;
   watch: boolean;
 } {
   const alias = args[0];
 
   if (!alias) {
     throw new CliUsageError(
-      "Usage: create-group <alias> [keyPackageAlias] [--name <value>] [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
+      "Usage: create-group <alias> [keyPackageAlias] [--coordinator <pubkey>] [--name <value>] [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
     );
   }
 
   let index = 1;
   let keyPackageAlias: string | undefined;
+  let coordinatorKey: string | undefined;
   let watch = false;
 
   if (args[index] && !args[index]!.startsWith("--")) {
@@ -115,6 +133,11 @@ export function parseCreateGroupArgs(args: string[]): {
       case "--watch":
         watch = true;
         index += 1;
+        break;
+      case "--coordinator":
+        if (!value) throw new CliUsageError("Missing value for --coordinator");
+        coordinatorKey = value;
+        index += 2;
         break;
       case "--name":
         if (!value) throw new CliUsageError("Missing value for --name");
@@ -159,8 +182,55 @@ export function parseCreateGroupArgs(args: string[]): {
     alias,
     keyPackageAlias,
     metadata: metadataProvided ? metadata : undefined,
+    coordinatorKey,
     watch,
   };
+}
+
+function parseCoordinatorOption(args: string[]): string | undefined {
+  const index = args.indexOf("--coordinator");
+  if (index === -1) {
+    return undefined;
+  }
+
+  const value = args[index + 1];
+  if (!value) {
+    throw new CliUsageError("Missing value for --coordinator");
+  }
+
+  return value;
+}
+
+function getPositionalArgs(args: string[]): string[] {
+  const positionalArgs: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    switch (arg) {
+      case "--coordinator":
+      case "--name":
+      case "--description":
+      case "--icon":
+      case "--image-url":
+      case "--admin":
+        index += 1;
+        continue;
+      case "--watch":
+      case "--last-resort":
+      case "--local-only":
+        continue;
+      default:
+        if (!arg.startsWith("--")) {
+          positionalArgs.push(arg);
+        }
+    }
+  }
+
+  return positionalArgs;
 }
 
 export async function executeReplCommand(
@@ -170,7 +240,7 @@ export async function executeReplCommand(
 ): Promise<ReplCommandResult> {
   const { session, output } = context;
   let { selectedGroupAlias } = context;
-  const positionalArgs = args.filter((arg) => !arg.startsWith("--"));
+  const positionalArgs = getPositionalArgs(args);
 
   switch (command) {
     case "help": {
@@ -196,12 +266,19 @@ export async function executeReplCommand(
       break;
     }
     case "gen-kp": {
+      const coordinatorKey = parseCoordinatorOption(args);
       const result = await session.generateKeyPackage(positionalArgs[0], {
         localOnly: args.includes("--local-only"),
         lastResort: args.includes("--last-resort"),
+        coordinatorKey,
       });
       output.write(
-        `${colorize("generated", ansi.green)} ${result.alias} (${colorize(result.keyPackageRef, ansi.dim)})\n`,
+        `${formatGeneratedKeyPackageMessage({
+          alias: result.alias,
+          keyPackageRef: result.keyPackageRef,
+          coordinatorKey,
+          publishedAt: result.publishedAt,
+        })}\n`,
       );
       break;
     }
@@ -215,11 +292,12 @@ export async function executeReplCommand(
     case "delete-kp": {
       if (!args[0]) {
         throw new CliUsageError(
-          "Usage: delete-kp <aliasOrKeyPackageRef> [--local-only]",
+          "Usage: delete-kp <aliasOrKeyPackageRef> [--local-only] [--coordinator <pubkey>]",
         );
       }
       const result = await session.deleteKeyPackage(args[0], {
         localOnly: args.includes("--local-only"),
+        coordinatorKey: parseCoordinatorOption(args),
       });
       output.write(
         `${colorize("deleted", ansi.green)} ${colorize(result.keyPackageRef, ansi.dim)}${result.removedLocal ? "" : " (remote only)"}\n`,
@@ -227,7 +305,9 @@ export async function executeReplCommand(
       break;
     }
     case "available-kps": {
-      const keyPackages = await session.listAvailableKeyPackageSummaries();
+      const keyPackages = await session.listAvailableKeyPackageSummaries(
+        parseCoordinatorOption(args),
+      );
       output.write(
         `${formatList(keyPackages.map((entry) => formatKeyPackageSummary(entry)))}\n`,
       );
@@ -238,6 +318,7 @@ export async function executeReplCommand(
       const group = await session.createGroup(parsed.alias, {
         keyPackageAlias: parsed.keyPackageAlias,
         metadata: parsed.metadata,
+        coordinatorKey: parsed.coordinatorKey,
       });
       if (parsed.watch) {
         await session.watchGroup(group.alias);
@@ -300,7 +381,9 @@ export async function executeReplCommand(
       break;
     }
     case "fetch-welcomes": {
-      const welcomes = await session.fetchWelcomes();
+      const welcomes = await session.fetchWelcomes(
+        parseCoordinatorOption(args),
+      );
       output.write(
         `${formatList(welcomes.map((welcome) => `${formatWelcomeKeyPackageReference(welcome.kp_ref)} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)}`))}\n`,
       );
@@ -315,12 +398,13 @@ export async function executeReplCommand(
     case "accept-welcome": {
       if (!positionalArgs[0]) {
         throw new CliUsageError(
-          "Usage: accept-welcome <keyPackageReference> [groupAlias] [--watch]",
+          "Usage: accept-welcome <keyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
         );
       }
       const group = await session.acceptWelcome(
         positionalArgs[0],
         positionalArgs[1],
+        parseCoordinatorOption(args),
       );
       if (args.includes("--watch")) {
         await session.watchGroup(group.alias);

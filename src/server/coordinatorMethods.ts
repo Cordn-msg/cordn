@@ -368,6 +368,12 @@ export class CoordinatorAdapter {
       afterCursor: input.after,
     });
     let lastEmittedCursor = input.after ?? 0;
+    const originalAbort = stream.abort.bind(stream);
+
+    stream.abort = async (reason?: string): Promise<void> => {
+      subscription.unsubscribe();
+      await originalAbort(reason);
+    };
 
     try {
       await stream.start();
@@ -388,7 +394,9 @@ export class CoordinatorAdapter {
         lastEmittedCursor = record.cursor;
       }
 
-      await stream.close();
+      if (stream.isActive) {
+        await stream.close();
+      }
     } catch (error) {
       try {
         await stream.abort(
@@ -399,6 +407,7 @@ export class CoordinatorAdapter {
       }
       throw error;
     } finally {
+      stream.abort = originalAbort;
       subscription.unsubscribe();
     }
 

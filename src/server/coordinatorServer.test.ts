@@ -456,4 +456,65 @@ describe("CoordinatorAdapter", () => {
     await expect(subscribePromise).rejects.toBe(stopError);
     expect(abortedReason).toBe("stop after two chunks");
   });
+
+  test("completes the subscription handler after stream abort", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-abort"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-stream-abort"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+
+    const messageBytes = await createApplicationMessageBytes({
+      state: aliceState,
+      plaintext: "seed",
+    });
+
+    const posted = adapter.postGroupMessage(
+      {
+        msg_64: encodeBase64(messageBytes.encodedMessage),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    let abortedReason: string | undefined;
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write() {},
+      async close() {
+        this.isActive = false;
+      },
+      async abort(reason?: string) {
+        abortedReason = reason;
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeGroupMessages(
+      {
+        gid: posted.structuredContent.gid,
+        after: posted.structuredContent.cursor,
+      },
+      {
+        _meta: {
+          stream,
+        },
+      } as never,
+    );
+
+    await Promise.resolve();
+    await stream.abort("user requested stop");
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: {
+        subscribed: true,
+      },
+    });
+    expect(abortedReason).toBe("user requested stop");
+  });
 });
