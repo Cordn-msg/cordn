@@ -1,6 +1,7 @@
 import {
   createCommit,
   createGroup,
+  defaultProposalTypes,
   encode,
   joinGroup,
   mlsMessageEncoder,
@@ -71,6 +72,80 @@ export async function addMemberToGroup(params: {
   return {
     newState: result.newState,
     welcome: result.welcome.welcome,
+    commitMessageBase64: encodeBase64(encode(mlsMessageEncoder, result.commit)),
+  };
+}
+
+function decodeCredentialIdentity(identity: Uint8Array): string {
+  return new TextDecoder().decode(identity);
+}
+
+export function findMemberLeafIndexByStablePubkey(
+  state: ClientState,
+  stablePubkey: string,
+): number {
+  const leaves = state.ratchetTree as
+    | Array<
+        | {
+            leaf?: {
+              credential?: {
+                identity?: Uint8Array;
+              };
+            };
+          }
+        | undefined
+      >
+    | undefined;
+
+  if (!leaves) {
+    return -1;
+  }
+
+  for (let index = 0; index < leaves.length; index += 1) {
+    const node = leaves[index];
+    const leaf = node?.leaf;
+    if (!leaf) {
+      continue;
+    }
+
+    const credential = leaf.credential;
+    if (
+      credential &&
+      "identity" in credential &&
+      credential.identity &&
+      decodeCredentialIdentity(credential.identity) === stablePubkey
+    ) {
+      return Math.floor(index / 2);
+    }
+  }
+
+  return -1;
+}
+
+export async function removeMemberFromGroup(params: {
+  state: ClientState;
+  removedLeafIndex: number;
+}): Promise<{
+  newState: ClientState;
+  commitMessageBase64: string;
+}> {
+  const cipherSuite = await getCliCiphersuite();
+  const result = await createCommit({
+    context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+    state: params.state,
+    ratchetTreeExtension: true,
+    extraProposals: [
+      {
+        proposalType: defaultProposalTypes.remove,
+        remove: {
+          removed: params.removedLeafIndex,
+        },
+      },
+    ],
+  });
+
+  return {
+    newState: result.newState,
     commitMessageBase64: encodeBase64(encode(mlsMessageEncoder, result.commit)),
   };
 }

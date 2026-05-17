@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "vitest";
 
 import { CliSession } from "./session.ts";
-import { NoPublishedKeyPackageError } from "./sessionErrors.ts";
+import {
+  NoPublishedKeyPackageError,
+  RemovedFromGroupError,
+} from "./sessionErrors.ts";
 import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
 import { PrivateKeySigner } from "@contextvm/sdk";
@@ -73,6 +76,114 @@ describe("CliSession", () => {
       expect(aliceSynced[0]?.content).toBe("hello alice");
       expect(aliceSynced[0]?.sender).toBe(bob.stablePubkey);
     } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("removes a member and prevents further sends from the removed session", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await alice.sendMessage("demo", "before-remove");
+      expect(
+        (await bob.syncGroup("demo")).map((message) => message.content),
+      ).toEqual(["before-remove"]);
+
+      await alice.removeMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.syncGroup("demo");
+
+      expect(bob.getGroup("demo").status).toBe("removed");
+      await expect(
+        bob.sendMessage("demo", "after-remove"),
+      ).rejects.toBeInstanceOf(RemovedFromGroupError);
+
+      await alice.sendMessage("demo", "after-remove-from-alice");
+      expect(
+        (await alice.syncGroup("demo")).map((message) => message.content),
+      ).toEqual([]);
+      await expect(bob.syncGroup("demo")).rejects.toBeInstanceOf(
+        RemovedFromGroupError,
+      );
+    } finally {
+      await Promise.allSettled(
+        sessions.splice(0).map((session) => session.disconnect()),
+      );
+      await server.transport.close();
+    }
+  });
+
+  test("blocks send after a remote removal even before explicit sync", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await alice.sendMessage("demo", "before-remove");
+      await bob.syncGroup("demo");
+
+      await alice.removeMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await expect(
+        bob.sendMessage("demo", "after-remove-without-manual-sync"),
+      ).rejects.toBeInstanceOf(RemovedFromGroupError);
+      expect(bob.getGroup("demo").status).toBe("removed");
+    } finally {
+      await Promise.allSettled(
+        sessions.splice(0).map((session) => session.disconnect()),
+      );
       await server.transport.close();
     }
   });
@@ -999,6 +1110,62 @@ describe("CliSession", () => {
         unsubscribe();
       }
     } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("watch mode processes remote removal without hanging and stops further sends", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+      await bob.watchGroup("demo");
+      await waitForCondition(() => bob.getWatchStatus("demo") === "watching");
+
+      await alice.sendMessage("demo", "before-remove");
+      await waitForCondition(() =>
+        bob
+          .listMessages("demo")
+          .some((message) => message.content === "before-remove"),
+      );
+
+      await alice.removeMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await waitForCondition(() => bob.getGroup("demo").status === "removed");
+      await waitForCondition(() => bob.getWatchStatus("demo") === "idle");
+
+      await expect(
+        bob.sendMessage("demo", "after-remove-watch"),
+      ).rejects.toBeInstanceOf(RemovedFromGroupError);
+    } finally {
+      await Promise.allSettled(
+        sessions.splice(0).map((session) => session.disconnect()),
+      );
       await server.transport.close();
     }
   });

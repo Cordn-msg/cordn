@@ -304,6 +304,48 @@ describe("executeReplCommand", () => {
     expect(unwatchGroup).toHaveBeenCalledWith("demo");
   });
 
+  test("syncs before and after add-member", async () => {
+    const output = new PassThrough();
+    const syncGroup = vi.fn().mockResolvedValue([]);
+    const addMember = vi.fn().mockResolvedValue({
+      keyPackageReference: "a".repeat(64),
+    });
+    const session = {
+      syncGroup,
+      addMember,
+    } as never;
+
+    await executeReplCommand("add-member", ["demo", "b".repeat(64)], {
+      session,
+      output,
+    });
+
+    expect(syncGroup).toHaveBeenNthCalledWith(1, "demo");
+    expect(addMember).toHaveBeenCalledWith("demo", "b".repeat(64));
+    expect(syncGroup).toHaveBeenNthCalledWith(2, "demo");
+  });
+
+  test("syncs before and after remove-member", async () => {
+    const output = new PassThrough();
+    const syncGroup = vi.fn().mockResolvedValue([]);
+    const removeMember = vi.fn().mockResolvedValue({
+      targetStablePubkey: "b".repeat(64),
+    });
+    const session = {
+      syncGroup,
+      removeMember,
+    } as never;
+
+    await executeReplCommand("remove-member", ["demo", "b".repeat(64)], {
+      session,
+      output,
+    });
+
+    expect(syncGroup).toHaveBeenNthCalledWith(1, "demo");
+    expect(removeMember).toHaveBeenCalledWith("demo", "b".repeat(64));
+    expect(syncGroup).toHaveBeenNthCalledWith(2, "demo");
+  });
+
   test("accept-welcome --watch does not treat the flag as the alias", async () => {
     const output = new PassThrough();
     const acceptWelcome = vi.fn().mockResolvedValue({

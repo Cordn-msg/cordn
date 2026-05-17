@@ -73,6 +73,20 @@ export class MissingCommitWelcomeError extends CliSessionError {
   }
 }
 
+export class UnknownGroupMemberError extends CliSessionError {
+  constructor(identifier: string) {
+    super(`Unknown group member: ${identifier}`);
+  }
+}
+
+export class RemovedFromGroupError extends CliSessionError {
+  constructor(alias: string) {
+    super(
+      `Group is no longer active because this session was removed: ${alias}`,
+    );
+  }
+}
+
 export class CliUsageError extends CliSessionError {
   constructor(message: string) {
     super(message);

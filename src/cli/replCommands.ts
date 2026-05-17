@@ -37,6 +37,7 @@ export const knownCommands = new Set([
   "leave",
   "unwatch",
   "add-member",
+  "remove-member",
   "fetch-welcomes",
   "welcomes",
   "accept-welcome",
@@ -373,10 +374,25 @@ export async function executeReplCommand(
           "Usage: add-member <groupAlias> <stablePubkeyOrKeyPackageRef>",
         );
       }
+      await session.syncGroup(args[0]);
       const result = await session.addMember(args[0], args[1]);
       await session.syncGroup(args[0]);
       output.write(
         `${colorize("stored welcome", ansi.green)} ${colorize(result.keyPackageReference, ansi.dim)}\n`,
+      );
+      break;
+    }
+    case "remove-member": {
+      if (!args[0] || !args[1]) {
+        throw new CliUsageError(
+          "Usage: remove-member <groupAlias> <stablePubkey>",
+        );
+      }
+      await session.syncGroup(args[0]);
+      const result = await session.removeMember(args[0], args[1]);
+      await session.syncGroup(args[0]);
+      output.write(
+        `${colorize("removed member", ansi.yellow)} ${colorize(result.targetStablePubkey, ansi.dim)}\n`,
       );
       break;
     }

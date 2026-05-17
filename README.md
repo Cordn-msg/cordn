@@ -6,6 +6,7 @@ Minimal MLS delivery service coordinator and ContextVM server adapter implemente
 
 - [`spec/00.md`](spec/00.md) defines the baseline coordinator and identity model.
 - [`spec/01.md`](spec/01.md) defines the initial group metadata extension.
+- [`spec/02.md`](spec/02.md) defines the Nostr-shaped application-message envelope model.
 - [`src/coordinator/`](src/coordinator/) contains the reference coordinator implementation.
 - [`src/server/`](src/server/) exposes that coordinator as a runnable ContextVM server.
 - [`src/cli/`](src/cli/) contains a demo CLI used to demonstrate end-to-end usage and interaction patterns.

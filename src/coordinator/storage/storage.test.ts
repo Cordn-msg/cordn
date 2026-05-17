@@ -211,6 +211,7 @@ describe.each<StorageFixture>([
         bytes: Array.from(createBytes([1, 2, 3])),
       }),
     });
+
     const secondMessage = coordinator.postGroupMessage({
       ephemeralSenderPubkey: "bob-ephemeral-1",
       opaqueMessage: createPrivateMessage({

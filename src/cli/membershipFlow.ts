@@ -1,6 +1,9 @@
 import { type ClientState } from "ts-mls";
 
-import type { PendingAddMemberOperation } from "./pendingEpochOperations.ts";
+import type {
+  PendingAddMemberOperation,
+  PendingRemoveMemberOperation,
+} from "./pendingEpochOperations.ts";
 import type {
   GroupSessionState,
   StoredKeyPackage,
@@ -13,10 +16,13 @@ import {
 import {
   joinGroupFromWelcome,
   addMemberToGroup,
+  findMemberLeafIndexByStablePubkey,
+  removeMemberFromGroup,
 } from "./utils/mlsGroupLifecycle.ts";
 import {
   InvalidConsumedKeyPackageError,
   NoPublishedKeyPackageError,
+  UnknownGroupMemberError,
 } from "./sessionErrors.ts";
 import { parseConsumedKeyPackage } from "./utils/publishedKeyPackage.ts";
 import type { NostrEvent } from "nostr-tools";
@@ -25,6 +31,12 @@ export interface PreparedAddMemberResult {
   keyPackageReference: string;
   pendingOperation: PendingAddMemberOperation;
   commitMessageBase64: string;
+}
+
+export interface PreparedRemoveMemberResult {
+  pendingOperation: PendingRemoveMemberOperation;
+  commitMessageBase64: string;
+  newState: ClientState;
 }
 
 export async function prepareAddMember(params: {
@@ -99,4 +111,38 @@ export async function acceptStoredWelcome(params: {
 
   params.keyPackage.consumed = true;
   return group;
+}
+
+export async function prepareRemoveMember(params: {
+  groupAlias: string;
+  group: GroupSessionState;
+  targetStablePubkey: string;
+  deriveGroupId: (state: ClientState) => string;
+}): Promise<PreparedRemoveMemberResult> {
+  const removedLeafIndex = findMemberLeafIndexByStablePubkey(
+    params.group.state,
+    params.targetStablePubkey,
+  );
+
+  if (removedLeafIndex < 0) {
+    throw new UnknownGroupMemberError(params.targetStablePubkey);
+  }
+
+  const commitResult = await removeMemberFromGroup({
+    state: params.group.state,
+    removedLeafIndex,
+  });
+
+  return {
+    commitMessageBase64: commitResult.commitMessageBase64,
+    newState: commitResult.newState,
+    pendingOperation: {
+      kind: "remove-member",
+      groupAlias: params.groupAlias,
+      groupId: params.deriveGroupId(params.group.state),
+      commitMessageBase64: commitResult.commitMessageBase64,
+      targetStablePubkey: params.targetStablePubkey,
+      status: "pending",
+    },
+  };
 }

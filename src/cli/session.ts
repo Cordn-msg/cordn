@@ -21,7 +21,11 @@ import {
 import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";
 import { runGroupWatch } from "./groupWatch.ts";
-import { acceptStoredWelcome, prepareAddMember } from "./membershipFlow.ts";
+import {
+  acceptStoredWelcome,
+  prepareAddMember,
+  prepareRemoveMember,
+} from "./membershipFlow.ts";
 import type {
   CliSessionOptions,
   ConversationView,
@@ -38,10 +42,14 @@ import type {
 import {
   confirmPendingEpochOperations,
   enqueuePendingEpochOperation,
-  hasPendingEpochOperation,
+  getPendingEpochOperation,
+  markPendingEpochOperationsConfirmed,
   rejectPendingEpochOperations,
 } from "./pendingEpochOperations.ts";
-import { MissingLocalKeyPackageForWelcomeError } from "./sessionErrors.ts";
+import {
+  MissingLocalKeyPackageForWelcomeError,
+  RemovedFromGroupError,
+} from "./sessionErrors.ts";
 import { CliSessionStore } from "./sessionStore.ts";
 export type {
   CliSessionOptions,
@@ -344,40 +352,73 @@ export class CliSession {
     groupAlias: string,
     identifier: string,
   ): Promise<{ keyPackageReference: string }> {
-    const group = this.getGroup(groupAlias);
-    const client = this.getGroupClient(group);
-    const prepared = await prepareAddMember({
-      groupAlias,
-      group,
-      identifier,
-      consumeKeyPackage: async (params) => {
-        const result = await client.ConsumeKeyPackage({
-          id: params.identifier,
-        });
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      const client = this.getGroupClient(group);
+      const prepared = await prepareAddMember({
+        groupAlias,
+        group,
+        identifier,
+        consumeKeyPackage: async (params) => {
+          const result = await client.ConsumeKeyPackage({
+            id: params.identifier,
+          });
 
-        return {
-          keyPackage: result.keyPackage
-            ? {
-                keyPackageRef: result.keyPackage.kp_ref,
-                stablePubkey: result.keyPackage.pk,
-                publicationEvent: result.keyPackage.event,
-              }
-            : null,
-        };
-      },
-      deriveGroupId: (state) => this.deriveGroupId(state),
+          return {
+            keyPackage: result.keyPackage
+              ? {
+                  keyPackageRef: result.keyPackage.kp_ref,
+                  stablePubkey: result.keyPackage.pk,
+                  publicationEvent: result.keyPackage.event,
+                }
+              : null,
+          };
+        },
+        deriveGroupId: (state) => this.deriveGroupId(state),
+      });
+
+      enqueuePendingEpochOperation(
+        this.store.pendingOperations,
+        prepared.pendingOperation,
+      );
+
+      await client.PostGroupMessage({
+        msg_64: prepared.commitMessageBase64,
+      });
+
+      return { keyPackageReference: prepared.keyPackageReference };
     });
+  }
 
-    enqueuePendingEpochOperation(
-      this.store.pendingOperations,
-      prepared.pendingOperation,
-    );
+  async removeMember(
+    groupAlias: string,
+    targetStablePubkey: string,
+  ): Promise<{ targetStablePubkey: string }> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      await this.catchUpGroupIfNeeded(group);
 
-    await client.PostGroupMessage({
-      msg_64: prepared.commitMessageBase64,
+      const client = this.getGroupClient(group);
+      const prepared = await prepareRemoveMember({
+        groupAlias,
+        group,
+        targetStablePubkey,
+        deriveGroupId: (state) => this.deriveGroupId(state),
+      });
+
+      enqueuePendingEpochOperation(
+        this.store.pendingOperations,
+        prepared.pendingOperation,
+      );
+
+      await client.PostGroupMessage({
+        msg_64: prepared.commitMessageBase64,
+      });
+
+      this.adoptGroupState(group, prepared.newState);
+
+      return { targetStablePubkey };
     });
-
-    return { keyPackageReference: prepared.keyPackageReference };
   }
 
   async fetchWelcomes(coordinatorKey?: string): Promise<StoredWelcome[]> {
@@ -459,6 +500,9 @@ export class CliSession {
   ): Promise<StoredMessage> {
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
+      await this.catchUpGroupIfNeeded(group);
+      this.assertGroupIsActive(group);
+
       const outbound = await createApplicationMessageBase64({
         state: group.state,
         event: createUnsignedCordnMessageEvent({
@@ -630,6 +674,7 @@ export class CliSession {
       coordinatorKey,
       state,
       metadata: getCordnGroupMetadataExtension(state),
+      status: "active",
       lastCursor: 0,
       fetchCursor: 0,
       messages: [],
@@ -653,6 +698,8 @@ export class CliSession {
     await previous.catch(() => undefined);
 
     try {
+      this.assertGroupIsActive(this.getGroup(groupAlias));
+
       return await operation();
     } finally {
       release();
@@ -709,16 +756,48 @@ export class CliSession {
     return cursor > 0 ? cursor : undefined;
   }
 
+  private assertGroupIsActive(group: GroupSessionState): void {
+    if (
+      group.status === "removed" ||
+      group.state.groupActiveState.kind === "removedFromGroup"
+    ) {
+      group.status = "removed";
+      throw new RemovedFromGroupError(group.alias);
+    }
+  }
+
+  private adoptGroupState(group: GroupSessionState, state: ClientState): void {
+    group.state = state;
+    group.metadata = getCordnGroupMetadataExtension(state);
+  }
+
+  private async catchUpGroupIfNeeded(group: GroupSessionState): Promise<void> {
+    if (this.isWatching(group.alias)) {
+      return;
+    }
+
+    const result = await this.fetchRawGroupMessages(
+      this.deriveGroupId(group.state),
+      group.fetchCursor,
+    );
+    await this.applyIncomingMessages(group, result.messages, {
+      finalizePendingOperations: false,
+    });
+  }
+
   private async applyIncomingMessages(
     group: GroupSessionState,
     messages: FetchGroupMessagesOutput["messages"],
     options: {
       suppressIssue?: (issue: SyncIssue) => boolean;
+      finalizePendingOperations?: boolean;
+      recordReceivedMessages?: boolean;
     } = {},
   ): Promise<{
     received: StoredMessage[];
     issues: SyncIssue[];
   }> {
+    const previousMessageCount = group.messages.length;
     const sync = await ingestGroupMessages({
       group,
       messages: messages.map((message) => ({
@@ -726,32 +805,53 @@ export class CliSession {
         createdAt: message.at,
         opaqueMessageBase64: message.msg_64,
       })),
-      hasPendingEpochOperation: (opaqueMessageBase64: string) =>
-        hasPendingEpochOperation(
+      getPendingEpochOperation: (opaqueMessageBase64: string) =>
+        getPendingEpochOperation(
           this.store.pendingOperations,
           group.alias,
           opaqueMessageBase64,
         ),
+      localStablePubkey: this.stablePubkey,
     });
 
-    await confirmPendingEpochOperations(
-      this.store.pendingOperations,
-      this.getGroupClient(group),
-      {
+    const received =
+      options.recordReceivedMessages === false ? [] : sync.received;
+
+    if (options.recordReceivedMessages === false) {
+      group.messages.splice(previousMessageCount);
+    }
+
+    if (options.finalizePendingOperations === false) {
+      markPendingEpochOperationsConfirmed(this.store.pendingOperations, {
         groupAlias: group.alias,
         opaqueMessageBase64s: [...sync.appliedPendingCommitMessages],
-      },
-    );
+      });
+    } else {
+      await confirmPendingEpochOperations(
+        this.store.pendingOperations,
+        this.getGroupClient(group),
+        {
+          groupAlias: group.alias,
+          opaqueMessageBase64s: [...sync.appliedPendingCommitMessages],
+        },
+      );
 
-    if (sync.rejectedPendingCommitMessages.size > 0) {
-      await rejectPendingEpochOperations(this.store.pendingOperations, {
-        groupAlias: group.alias,
-        opaqueMessageBase64s: [...sync.rejectedPendingCommitMessages],
+      if (sync.rejectedPendingCommitMessages.size > 0) {
+        await rejectPendingEpochOperations(this.store.pendingOperations, {
+          groupAlias: group.alias,
+          opaqueMessageBase64s: [...sync.rejectedPendingCommitMessages],
+        });
+      }
+    }
+
+    if (sync.removedLocalMember && this.isWatching(group.alias)) {
+      queueMicrotask(() => {
+        void this.unwatchGroup(group.alias).catch(() => undefined);
       });
     }
 
     return {
-      received: sync.received,
+      received,
       issues: options.suppressIssue
         ? this.removeSuppressedIssues(
             group,
@@ -772,6 +872,7 @@ export class CliSession {
     );
 
     await this.applyIncomingMessages(group, result.messages, {
+      recordReceivedMessages: false,
       suppressIssue: (issue) =>
         issue.createdAt <= welcomeCreatedAt &&
         (issue.detail ===

@@ -64,6 +64,8 @@ export interface GroupSessionState {
   coordinatorKey: string;
   state: ClientState;
   metadata?: CordnGroupMetadata;
+  status: "active" | "removed";
+  removedAtCursor?: number;
   lastCursor: number;
   fetchCursor: number;
   messages: StoredMessage[];

@@ -30,6 +30,7 @@ function createGroup(alias: string): GroupSessionState {
     alias,
     coordinatorKey: `${alias}-coordinator`,
     state: {} as GroupSessionState["state"],
+    status: "active",
     lastCursor: 0,
     fetchCursor: 0,
     messages: [],

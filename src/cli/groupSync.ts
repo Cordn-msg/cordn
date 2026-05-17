@@ -1,3 +1,4 @@
+import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
 import { decodeCordnMessageEvent } from "./messageEnvelope.ts";
 import type { GroupSessionState, StoredMessage } from "./sessionState.ts";
@@ -5,6 +6,7 @@ import {
   decodeAuthenticatedSender,
   processMessageBase64,
 } from "./utils/mlsMessages.ts";
+import { findMemberLeafIndexByStablePubkey } from "./utils/mlsGroupLifecycle.ts";
 
 export interface RawGroupMessage {
   cursor: number;
@@ -18,6 +20,7 @@ export interface GroupIngestionResult {
   cursorAdvancedTo: number;
   appliedPendingCommitMessages: Set<string>;
   rejectedPendingCommitMessages: Set<string>;
+  removedLocalMember: boolean;
 }
 
 function isFormerEpochIssue(detail: string): boolean {
@@ -31,23 +34,38 @@ function isStaleGenerationIssue(detail: string): boolean {
   return detail === "Desired gen in the past";
 }
 
+function isRemovedMemberCommitIssue(detail: string): boolean {
+  return detail === "Could not find common ancestor";
+}
+
+function isRemovedFromGroupState(state: GroupSessionState["state"]): boolean {
+  return state.groupActiveState?.kind === "removedFromGroup";
+}
+
 export async function ingestGroupMessages(params: {
   group: GroupSessionState;
   messages: RawGroupMessage[];
-  hasPendingEpochOperation: (opaqueMessageBase64: string) => boolean;
+  getPendingEpochOperation: (
+    opaqueMessageBase64: string,
+  ) => PendingEpochOperation | undefined;
+  localStablePubkey: string;
 }): Promise<GroupIngestionResult> {
-  const { group, messages, hasPendingEpochOperation } = params;
+  const { group, messages, getPendingEpochOperation, localStablePubkey } =
+    params;
   const received: StoredMessage[] = [];
   const issues: GroupSessionState["syncIssues"] = [];
   const appliedPendingCommitMessages = new Set<string>();
   const rejectedPendingCommitMessages = new Set<string>();
+  let removedLocalMember = false;
 
   for (const message of messages) {
-    const isPendingOperationMessage = hasPendingEpochOperation(
+    const pendingOperation = getPendingEpochOperation(
       message.opaqueMessageBase64,
     );
+    const isPendingOperationMessage = pendingOperation !== undefined;
 
     if (
+      !isPendingOperationMessage &&
       group.messages.some(
         (stored) =>
           stored.direction === "outbound" && stored.cursor === message.cursor,
@@ -68,19 +86,38 @@ export async function ingestGroupMessages(params: {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
 
-      if (isFormerEpochIssue(detail) || isStaleGenerationIssue(detail)) {
+      if (
+        isFormerEpochIssue(detail) ||
+        isStaleGenerationIssue(detail) ||
+        isRemovedMemberCommitIssue(detail)
+      ) {
         group.fetchCursor = message.cursor;
         group.lastCursor = Math.max(group.lastCursor, message.cursor);
-        const issue = {
-          cursor: message.cursor,
-          createdAt: message.createdAt,
-          detail,
-        };
-        group.syncIssues.push(issue);
-        issues.push(issue);
 
-        if (isPendingOperationMessage) {
-          rejectedPendingCommitMessages.add(message.opaqueMessageBase64);
+        if (
+          pendingOperation?.kind === "remove-member" &&
+          (isRemovedMemberCommitIssue(detail) || isFormerEpochIssue(detail))
+        ) {
+          appliedPendingCommitMessages.add(message.opaqueMessageBase64);
+        } else if (
+          isRemovedMemberCommitIssue(detail) &&
+          !isPendingOperationMessage
+        ) {
+          group.status = "removed";
+          group.removedAtCursor = message.cursor;
+          removedLocalMember = true;
+        } else {
+          if (isPendingOperationMessage) {
+            rejectedPendingCommitMessages.add(message.opaqueMessageBase64);
+          }
+
+          const issue = {
+            cursor: message.cursor,
+            createdAt: message.createdAt,
+            detail,
+          };
+          group.syncIssues.push(issue);
+          issues.push(issue);
         }
 
         continue;
@@ -92,6 +129,14 @@ export async function ingestGroupMessages(params: {
     if (processed.kind === "applicationMessage") {
       group.state = processed.newState;
       group.metadata = getCordnGroupMetadataExtension(processed.newState);
+      if (isRemovedFromGroupState(processed.newState)) {
+        group.status = "removed";
+        group.removedAtCursor = message.cursor;
+        removedLocalMember = true;
+        group.fetchCursor = message.cursor;
+        group.lastCursor = Math.max(group.lastCursor, message.cursor);
+        continue;
+      }
       if (processed.aad.length === 0) {
         throw new Error(
           "Cordn application message missing authenticated sender",
@@ -125,6 +170,10 @@ export async function ingestGroupMessages(params: {
     group.fetchCursor = message.cursor;
     group.lastCursor = Math.max(group.lastCursor, message.cursor);
 
+    if (isPendingOperationMessage) {
+      appliedPendingCommitMessages.add(message.opaqueMessageBase64);
+    }
+
     if (processed.kind !== "newState") {
       continue;
     }
@@ -132,8 +181,14 @@ export async function ingestGroupMessages(params: {
     group.state = processed.newState;
     group.metadata = getCordnGroupMetadataExtension(processed.newState);
 
-    if (isPendingOperationMessage) {
-      appliedPendingCommitMessages.add(message.opaqueMessageBase64);
+    if (
+      isRemovedFromGroupState(processed.newState) ||
+      findMemberLeafIndexByStablePubkey(processed.newState, localStablePubkey) <
+        0
+    ) {
+      group.status = "removed";
+      group.removedAtCursor = message.cursor;
+      removedLocalMember = true;
     }
   }
 
@@ -143,5 +198,6 @@ export async function ingestGroupMessages(params: {
     cursorAdvancedTo: group.fetchCursor,
     appliedPendingCommitMessages,
     rejectedPendingCommitMessages,
+    removedLocalMember,
   };
 }
