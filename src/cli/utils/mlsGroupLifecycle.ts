@@ -80,10 +80,16 @@ function decodeCredentialIdentity(identity: Uint8Array): string {
   return new TextDecoder().decode(identity);
 }
 
-export function findMemberLeafIndexByStablePubkey(
+/**
+ * List all non-blank members of the current ratchet tree.
+ *
+ * Note: this directly inspects ts-mls ratchet-tree internals and
+ * assumes Cordn's credential identity equals the stable pubkey.
+ * Keep this as the single source of truth for member lookup.
+ */
+export function listGroupMembers(
   state: ClientState,
-  stablePubkey: string,
-): number {
+): Array<{ leafIndex: number; stablePubkey: string }> {
   const leaves = state.ratchetTree as
     | Array<
         | {
@@ -98,9 +104,10 @@ export function findMemberLeafIndexByStablePubkey(
     | undefined;
 
   if (!leaves) {
-    return -1;
+    return [];
   }
 
+  const members: Array<{ leafIndex: number; stablePubkey: string }> = [];
   for (let index = 0; index < leaves.length; index += 1) {
     const node = leaves[index];
     const leaf = node?.leaf;
@@ -109,17 +116,25 @@ export function findMemberLeafIndexByStablePubkey(
     }
 
     const credential = leaf.credential;
-    if (
-      credential &&
-      "identity" in credential &&
-      credential.identity &&
-      decodeCredentialIdentity(credential.identity) === stablePubkey
-    ) {
-      return Math.floor(index / 2);
+    if (credential && "identity" in credential && credential.identity) {
+      members.push({
+        leafIndex: Math.floor(index / 2),
+        stablePubkey: decodeCredentialIdentity(credential.identity),
+      });
     }
   }
 
-  return -1;
+  return members;
+}
+
+export function findMemberLeafIndexByStablePubkey(
+  state: ClientState,
+  stablePubkey: string,
+): number {
+  const member = listGroupMembers(state).find(
+    (m) => m.stablePubkey === stablePubkey,
+  );
+  return member?.leafIndex ?? -1;
 }
 
 export async function removeMemberFromGroup(params: {

@@ -52,6 +52,8 @@ const pendingEpochOperationFinalizers: Record<
       welcome_64: operation.welcomeBase64,
     });
   },
+  // Remove commits require no coordinator-side finalization
+  // because there is no welcome to store.
   "remove-member": async () => undefined,
 };
 

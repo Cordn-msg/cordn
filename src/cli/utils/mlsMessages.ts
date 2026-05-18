@@ -5,6 +5,7 @@ import {
   mlsMessageEncoder,
   processMessage,
   unsafeTestingAuthenticationService,
+  type IncomingMessageCallback,
   type ClientState,
 } from "ts-mls";
 
@@ -49,6 +50,7 @@ export async function createApplicationMessageBase64(params: {
 export async function processMessageBase64(params: {
   state: ClientState;
   opaqueMessageBase64: string;
+  callback?: IncomingMessageCallback;
 }): Promise<Awaited<ReturnType<typeof processMessage>>> {
   const cipherSuite = await getCliCiphersuite();
   const decoded = mlsMessageDecoder(
@@ -68,6 +70,7 @@ export async function processMessageBase64(params: {
     context: { cipherSuite, authService: unsafeTestingAuthenticationService },
     state: params.state,
     message: decoded[0],
+    callback: params.callback,
   });
 }
 

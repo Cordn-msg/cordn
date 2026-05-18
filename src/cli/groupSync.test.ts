@@ -445,4 +445,40 @@ describe("ingestGroupMessages", () => {
     expect(group.status).toBe("removed");
     expect(group.removedAtCursor).toBe(12);
   });
+
+  test("records admin-policy rejections as sync issues", async () => {
+    const group = createGroupState();
+
+    processMessageBase64.mockResolvedValueOnce({
+      kind: "newState",
+      newState: group.state,
+      actionTaken: "reject",
+      consumed: [],
+      aad: new Uint8Array(),
+    });
+
+    const result = await ingestGroupMessages({
+      group,
+      messages: [
+        {
+          cursor: 13,
+          createdAt: 130,
+          opaqueMessageBase64: "unauthorized-admin-commit",
+        },
+      ],
+      getPendingEpochOperation: () => undefined,
+      localStablePubkey: "alice",
+    });
+
+    expect(result.received).toEqual([]);
+    expect(result.issues).toEqual([
+      {
+        cursor: 13,
+        createdAt: 130,
+        detail: "Rejected unauthorized admin action in group demo",
+      },
+    ]);
+    expect(group.fetchCursor).toBe(13);
+    expect(group.lastCursor).toBe(13);
+  });
 });

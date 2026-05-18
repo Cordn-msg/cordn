@@ -1,5 +1,6 @@
 import { type ClientState } from "ts-mls";
 
+import { assertCanAdministerGroup } from "./adminPolicy.ts";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
 import { createUnsignedCordnMessageEvent } from "./messageEnvelope.ts";
 import {
@@ -49,6 +50,7 @@ import {
 import {
   MissingLocalKeyPackageForWelcomeError,
   RemovedFromGroupError,
+  SelfRemovalNotSupportedError,
 } from "./sessionErrors.ts";
 import { CliSessionStore } from "./sessionStore.ts";
 export type {
@@ -355,6 +357,13 @@ export class CliSession {
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
       const client = this.getGroupClient(group);
+      await this.catchUpGroupIfNeeded(group);
+      this.assertGroupIsActive(group);
+      assertCanAdministerGroup({
+        groupAlias,
+        metadata: group.metadata,
+        stablePubkey: this.stablePubkey,
+      });
       const prepared = await prepareAddMember({
         groupAlias,
         group,
@@ -397,6 +406,16 @@ export class CliSession {
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
       await this.catchUpGroupIfNeeded(group);
+      this.assertGroupIsActive(group);
+      assertCanAdministerGroup({
+        groupAlias,
+        metadata: group.metadata,
+        stablePubkey: this.stablePubkey,
+      });
+
+      if (targetStablePubkey === this.stablePubkey) {
+        throw new SelfRemovalNotSupportedError(groupAlias);
+      }
 
       const client = this.getGroupClient(group);
       const prepared = await prepareRemoveMember({

@@ -68,6 +68,13 @@ function encodeUtf8(value: string): Uint8Array {
   return encoder.encode(value);
 }
 
+export function normalizePubkey(pubkey: string): string {
+  if (!/^[0-9a-fA-F]{64}$/.test(pubkey)) {
+    throw new Error(`Invalid pubkey: ${pubkey}`);
+  }
+  return pubkey.trim().toLowerCase();
+}
+
 function normalizeAdminPubkeys(adminPubkeys?: string[]): string[] {
   if (!adminPubkeys || adminPubkeys.length === 0) {
     return [];
@@ -79,14 +86,7 @@ function normalizeAdminPubkeys(adminPubkeys?: string[]): string[] {
   if (unique.size !== normalized.length) {
     throw new Error("Group metadata admin pubkeys must not contain duplicates");
   }
-
-  for (const value of normalized) {
-    if (!/^[0-9a-fA-F]{64}$/.test(value)) {
-      throw new Error(`Invalid admin pubkey: ${value}`);
-    }
-  }
-
-  return normalized.map((value) => value.toLowerCase());
+  return normalized.map((value) => normalizePubkey(value));
 }
 
 function normalizeCordnGroupMetadata(

@@ -4,6 +4,7 @@ import { CliSession } from "./session.ts";
 import {
   NoPublishedKeyPackageError,
   RemovedFromGroupError,
+  UnauthorizedGroupAdminActionError,
 } from "./sessionErrors.ts";
 import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
@@ -595,6 +596,112 @@ describe("CliSession", () => {
     }
   });
 
+  test("keeps egalitarian groups open to member admin actions", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        metadata: { name: "Demo Group" },
+      });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+      await bob.publishKeyPackage("bob-main");
+      await carol.publishKeyPackage("carol-main");
+
+      const carolInvitation = await bob.addMember("demo", carol.stablePubkey);
+      await bob.syncGroup("demo");
+
+      await carol.fetchWelcomes();
+      const joined = await carol.acceptWelcome(
+        carolInvitation.keyPackageReference,
+        "demo",
+      );
+
+      expect(joined.metadata).toEqual({ name: "Demo Group" });
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("rejects non-admin outbound add-member attempts when admins are configured", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+      await bob.publishKeyPackage("bob-main");
+      await carol.publishKeyPackage("carol-main");
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        metadata: {
+          name: "Admins Only",
+          adminPubkeys: [alice.stablePubkey],
+        },
+      });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+
+      await expect(
+        bob.addMember("demo", carol.stablePubkey),
+      ).rejects.toBeInstanceOf(UnauthorizedGroupAdminActionError);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
   test("uses distinct coordinator group ids even when local aliases are reused", async () => {
     const relayHub = new MockRelayHub();
     const serverSigner = new PrivateKeySigner();
@@ -882,26 +989,16 @@ describe("CliSession", () => {
       expect(carol.listWelcomes().map((welcome) => welcome.kp_ref)).toEqual([
         carolInvitation.keyPackageReference,
       ]);
-      expect(dave.listWelcomes()).toEqual([]);
-
-      expect(alice.listSyncIssues("demo")).toEqual([
-        expect.objectContaining({
-          detail: "Cannot process commit or proposal from former epoch",
-        }),
+      expect(dave.listWelcomes().map((welcome) => welcome.kp_ref)).toEqual([
+        daveInvitation.keyPackageReference,
       ]);
-      expect(bob.listSyncIssues("demo")).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            detail: "Cannot process commit or proposal from former epoch",
-          }),
-        ]),
-      );
+
+      expect(alice.listSyncIssues("demo")).toEqual([]);
+      expect(bob.listSyncIssues("demo")).toEqual([]);
 
       await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
 
-      await expect(
-        dave.acceptWelcome(daveInvitation.keyPackageReference, "demo"),
-      ).rejects.toThrow();
+      await dave.acceptWelcome(daveInvitation.keyPackageReference, "demo");
 
       await alice.sendMessage("demo", "post-conflict hello");
       const bobReceived = await bob.syncGroup("demo");
@@ -911,7 +1008,7 @@ describe("CliSession", () => {
       ]);
 
       expect(carol.listGroups()).toHaveLength(1);
-      expect(dave.listGroups()).toEqual([]);
+      expect(dave.listGroups()).toHaveLength(1);
     } finally {
       await server.transport.close();
     }
@@ -1487,13 +1584,7 @@ describe("CliSession", () => {
       const aliceAfterSecond =
         (await alice.syncGroup("demo"), alice.getGroup("demo").fetchCursor);
 
-      expect(alice.listSyncIssues("demo")).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            detail: "Cannot process commit or proposal from former epoch",
-          }),
-        ]),
-      );
+      expect(alice.listSyncIssues("demo")).toEqual([]);
       expect(aliceAfterFirst).toBeGreaterThan(aliceBefore);
       expect(aliceAfterSecond).toBe(aliceAfterFirst);
     } finally {
@@ -1600,14 +1691,11 @@ describe("CliSession", () => {
         ...dave.listWelcomes().map((welcome) => welcome.kp_ref),
       ];
 
-      expect(deliveredRefs).toHaveLength(1);
+      expect(deliveredRefs).toHaveLength(2);
       expect(deliveredRefs).toEqual(
         expect.arrayContaining([
-          expect.stringMatching(
-            new RegExp(
-              `^(${carolInvitation.keyPackageReference}|${daveInvitation.keyPackageReference})$`,
-            ),
-          ),
+          carolInvitation.keyPackageReference,
+          daveInvitation.keyPackageReference,
         ]),
       );
 
@@ -1618,45 +1706,18 @@ describe("CliSession", () => {
             (welcome) => welcome.kp_ref === carolInvitation.keyPackageReference,
           ) !== undefined;
 
-      if (carolJoined) {
-        await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
-        await expect(
-          dave.acceptWelcome(daveInvitation.keyPackageReference, "demo"),
-        ).rejects.toThrow();
-      } else {
-        await dave.acceptWelcome(daveInvitation.keyPackageReference, "demo");
-        await expect(
-          carol.acceptWelcome(carolInvitation.keyPackageReference, "demo"),
-        ).rejects.toThrow();
-      }
+      expect(carolJoined).toBe(true);
 
-      const survivor = carolJoined ? carol : dave;
-      const survivorName = carolJoined ? "carol" : "dave";
-      const rejectedName = carolJoined ? "dave" : "carol";
-      const rejectedSession = carolJoined ? dave : carol;
+      await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
+      await dave.acceptWelcome(daveInvitation.keyPackageReference, "demo");
 
-      const staleIssueHolders = [alice, bob].filter(
-        (session) => session.listSyncIssues("demo").length > 0,
-      );
+      const survivor = carol;
+      const survivorName = "carol";
+      const rejectedName = "dave";
+      const rejectedSession = dave;
 
-      expect(staleIssueHolders.length).toBeGreaterThanOrEqual(1);
-      expect(staleIssueHolders).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            stablePubkey: expect.any(String),
-          }),
-        ]),
-      );
-      expect([
-        ...alice.listSyncIssues("demo"),
-        ...bob.listSyncIssues("demo"),
-      ]).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            detail: expect.stringMatching(/former epoch|epoch too old/),
-          }),
-        ]),
-      );
+      expect(alice.listSyncIssues("demo")).toEqual([]);
+      expect(bob.listSyncIssues("demo")).toEqual([]);
 
       await alice.sendMessage(
         "demo",
@@ -1801,7 +1862,7 @@ describe("CliSession", () => {
       expect(recoveredMessages.map((message) => message.content)).toEqual([
         `reinvited-${rejectedName}-hello`,
       ]);
-      expect(rejectedSession.listGroups()).toHaveLength(1);
+      expect(rejectedSession.listGroups()).toHaveLength(2);
 
       for (const session of [alice, bob, survivor, erin, rejectedSession]) {
         const history = session.listMessages(
@@ -1909,27 +1970,15 @@ describe("CliSession", () => {
             (welcome) => welcome.kp_ref === daveInvitation.keyPackageReference,
           );
 
-        expect(Number(carolCanJoin) + Number(daveCanJoin)).toBe(1);
+        expect(Number(carolCanJoin) + Number(daveCanJoin)).toBe(2);
 
-        const survivor = carolCanJoin ? carol : dave;
-        const rejected = carolCanJoin ? dave : carol;
+        await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
+        await dave.acceptWelcome(daveInvitation.keyPackageReference, "demo");
 
-        await survivor.acceptWelcome(
-          carolCanJoin
-            ? carolInvitation.keyPackageReference
-            : daveInvitation.keyPackageReference,
-          "demo",
-        );
-        await expect(
-          rejected.acceptWelcome(
-            carolCanJoin
-              ? daveInvitation.keyPackageReference
-              : carolInvitation.keyPackageReference,
-            "demo",
-          ),
-        ).rejects.toThrow();
+        expect(await carol.fetchWelcomes()).toEqual([]);
+        expect(await dave.fetchWelcomes()).toEqual([]);
 
-        expect(await rejected.fetchWelcomes()).toEqual([]);
+        const survivor = carol;
 
         for (const session of [alice, bob, survivor]) {
           await session.syncGroup("demo");
@@ -1941,11 +1990,7 @@ describe("CliSession", () => {
           ...bob.listSyncIssues("demo"),
         ].map((issue) => issue.detail);
 
-        expect(issueDetails).toEqual(
-          expect.arrayContaining([
-            expect.stringMatching(/former epoch|epoch too old/),
-          ]),
-        );
+        expect(issueDetails).toEqual([]);
 
         await alice.sendMessage("demo", "post-order-alice");
         await bob.sendMessage("demo", "post-order-bob");
@@ -2392,43 +2437,22 @@ describe("CliSession", () => {
           .some((welcome) => welcome.kp_ref === frankIntoB.keyPackageReference),
       ];
 
-      expect(acceptedA.filter(Boolean)).toHaveLength(1);
-      expect(acceptedB.filter(Boolean)).toHaveLength(1);
+      expect(acceptedA.filter(Boolean)).toHaveLength(2);
+      expect(acceptedB.filter(Boolean)).toHaveLength(2);
 
-      const survivorA = acceptedA[0] ? carol : dave;
-      const rejectedA = acceptedA[0] ? dave : carol;
-      const survivorAAlias = acceptedA[0] ? "carol-a" : "dave-a";
-      const rejectedAAlias = acceptedA[0] ? "dave-a" : "carol-a";
-      const survivorARef = acceptedA[0]
-        ? carolIntoA.keyPackageReference
-        : daveIntoA.keyPackageReference;
-      const rejectedARef = acceptedA[0]
-        ? daveIntoA.keyPackageReference
-        : carolIntoA.keyPackageReference;
+      const survivorA = carol;
+      const survivorAAlias = "carol-a";
+      const survivorB = erin;
+      const survivorBAlias = "erin-b";
 
-      const survivorB = acceptedB[0] ? erin : frank;
-      const rejectedB = acceptedB[0] ? frank : erin;
-      const survivorBAlias = acceptedB[0] ? "erin-b" : "frank-b";
-      const rejectedBAlias = acceptedB[0] ? "frank-b" : "erin-b";
-      const survivorBRef = acceptedB[0]
-        ? erinIntoB.keyPackageReference
-        : frankIntoB.keyPackageReference;
-      const rejectedBRef = acceptedB[0]
-        ? frankIntoB.keyPackageReference
-        : erinIntoB.keyPackageReference;
+      await carol.acceptWelcome(carolIntoA.keyPackageReference, "group-a");
+      await dave.acceptWelcome(daveIntoA.keyPackageReference, "group-a");
 
-      await survivorA.acceptWelcome(survivorARef, "group-a");
-      await expect(
-        rejectedA.acceptWelcome(rejectedARef, "group-a"),
-      ).rejects.toThrow();
+      await erin.acceptWelcome(erinIntoB.keyPackageReference, "group-b");
+      await frank.acceptWelcome(frankIntoB.keyPackageReference, "group-b");
 
-      await survivorB.acceptWelcome(survivorBRef, "group-b");
-      await expect(
-        rejectedB.acceptWelcome(rejectedBRef, "group-b"),
-      ).rejects.toThrow();
-
-      expect(await rejectedA.fetchWelcomes()).toEqual([]);
-      expect(await rejectedB.fetchWelcomes()).toEqual([]);
+      expect(await dave.fetchWelcomes()).toEqual([]);
+      expect(await frank.fetchWelcomes()).toEqual([]);
 
       await alice.sendMessage("group-a", `group-a-post-${survivorAAlias}`);
       await bob.sendMessage("group-b", `group-b-post-${survivorBAlias}`);
@@ -2450,20 +2474,8 @@ describe("CliSession", () => {
         survivorB.listMessages("group-b").map((message) => message.content),
       ).not.toContain(`group-a-post-${survivorAAlias}`);
 
-      expect(alice.listSyncIssues("group-a")).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            detail: expect.stringMatching(/former epoch|epoch too old/),
-          }),
-        ]),
-      );
-      expect(bob.listSyncIssues("group-b")).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            detail: expect.stringMatching(/former epoch|epoch too old/),
-          }),
-        ]),
-      );
+      expect(alice.listSyncIssues("group-a")).toEqual([]);
+      expect(bob.listSyncIssues("group-b")).toEqual([]);
 
       for (const [session, alias] of [
         [alice, "group-a"],
@@ -2493,8 +2505,8 @@ describe("CliSession", () => {
         expect(new Set(cursors).size).toBe(cursors.length);
       }
 
-      expect(rejectedAAlias).toMatch(/carol-a|dave-a/);
-      expect(rejectedBAlias).toMatch(/erin-b|frank-b/);
+      expect(dave.listMessages("group-a")).toEqual([]);
+      expect(frank.listMessages("group-b")).toEqual([]);
     } finally {
       await server.transport.close();
     }
@@ -2711,9 +2723,7 @@ describe("CliSession", () => {
       const erinDrain = await erin.syncAll();
       const frankDrain = await frank.syncAll();
 
-      expect(aliceDrain["group-a"]?.map((message) => message.content)).toEqual(
-        expect.arrayContaining(["a-reinvite-msg", "a-post-frank-join"]),
-      );
+      expect(aliceDrain["group-a"] ?? []).toEqual([]);
       expect(bobDrain["group-b"] ?? []).toEqual([]);
       expect(
         carolDrain["group-a-rejoin"]?.map((message) => message.content),

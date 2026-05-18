@@ -1,3 +1,7 @@
+import {
+  createAdminAuthorizationCallback,
+  createUnauthorizedAdminRejectionDetail,
+} from "./adminPolicy.ts";
 import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
 import { decodeCordnMessageEvent } from "./messageEnvelope.ts";
@@ -34,6 +38,18 @@ function isStaleGenerationIssue(detail: string): boolean {
   return detail === "Desired gen in the past";
 }
 
+function wasMessageRejectedByCallback(result: {
+  kind: "newState";
+  actionTaken?: string;
+}): boolean {
+  return result.actionTaken === "reject";
+}
+
+/**
+ * Compatibility shim: ts-mls may throw this when processing a commit
+ * that removed the local member before surfacing the structured
+ * "removedFromGroup" state. Treat it as a removal signal.
+ */
 function isRemovedMemberCommitIssue(detail: string): boolean {
   return detail === "Could not find common ancestor";
 }
@@ -82,6 +98,10 @@ export async function ingestGroupMessages(params: {
       processed = await processMessageBase64({
         state: group.state,
         opaqueMessageBase64: message.opaqueMessageBase64,
+        callback: createAdminAuthorizationCallback({
+          state: group.state,
+          metadata: group.metadata,
+        }),
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -124,6 +144,27 @@ export async function ingestGroupMessages(params: {
       }
 
       throw error;
+    }
+
+    if (
+      processed.kind === "newState" &&
+      wasMessageRejectedByCallback(processed)
+    ) {
+      const issue = {
+        cursor: message.cursor,
+        createdAt: message.createdAt,
+        detail: createUnauthorizedAdminRejectionDetail({
+          groupAlias: group.alias,
+        }),
+      };
+      group.fetchCursor = message.cursor;
+      group.lastCursor = Math.max(group.lastCursor, message.cursor);
+      if (isPendingOperationMessage) {
+        rejectedPendingCommitMessages.add(message.opaqueMessageBase64);
+      }
+      group.syncIssues.push(issue);
+      issues.push(issue);
+      continue;
     }
 
     if (processed.kind === "applicationMessage") {

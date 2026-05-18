@@ -87,6 +87,26 @@ export class RemovedFromGroupError extends CliSessionError {
   }
 }
 
+export class SelfRemovalNotSupportedError extends CliSessionError {
+  constructor(alias: string) {
+    super(`Cannot remove yourself from a group: ${alias}`);
+  }
+}
+
+export class UnauthorizedGroupAdminActionError extends CliSessionError {
+  constructor(alias: string) {
+    super(
+      `Current session is not authorized to perform admin actions in group: ${alias}`,
+    );
+  }
+}
+
+export class AdminPolicyViolationError extends CliSessionError {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
 export class CliUsageError extends CliSessionError {
   constructor(message: string) {
     super(message);
