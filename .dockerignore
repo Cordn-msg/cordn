@@ -1,0 +1,15 @@
+.git
+.github
+.vscode
+.idea
+.env
+.env.local
+node_modules
+dist
+coverage
+analysis
+design
+docs
+*.log
+*.sqlite
+cordn.sqlite*
