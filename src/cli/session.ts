@@ -395,6 +395,8 @@ export class CliSession {
         msg_64: prepared.commitMessageBase64,
       });
 
+      this.adoptGroupState(group, prepared.newState);
+
       return { keyPackageReference: prepared.keyPackageReference };
     });
   }
@@ -484,6 +486,7 @@ export class CliSession {
     groupAlias?: string,
     coordinatorKey?: string,
   ): Promise<GroupSessionState> {
+    await this.fetchWelcomes(coordinatorKey);
     const welcome = this.store.getWelcome(keyPackageReference);
     const keyPackage = this.store.findKeyPackageByRef(welcome.kp_ref);
 
@@ -643,10 +646,12 @@ export class CliSession {
 
   async syncAll(): Promise<Record<string, StoredMessage[]>> {
     const entries = await Promise.all(
-      this.listGroups().map(
-        async (group) =>
-          [group.alias, await this.syncGroup(group.alias)] as const,
-      ),
+      this.listGroups()
+        .filter((group) => group.status !== "removed")
+        .map(
+          async (group) =>
+            [group.alias, await this.syncGroup(group.alias)] as const,
+        ),
     );
     return Object.fromEntries(entries);
   }
@@ -846,14 +851,19 @@ export class CliSession {
         opaqueMessageBase64s: [...sync.appliedPendingCommitMessages],
       });
     } else {
+      const confirmedBeforeFinalize = [...sync.appliedPendingCommitMessages];
       await confirmPendingEpochOperations(
         this.store.pendingOperations,
         this.getGroupClient(group),
         {
           groupAlias: group.alias,
-          opaqueMessageBase64s: [...sync.appliedPendingCommitMessages],
+          opaqueMessageBase64s: confirmedBeforeFinalize,
         },
       );
+
+      if (confirmedBeforeFinalize.length > 0) {
+        await this.fetchWelcomes();
+      }
 
       if (sync.rejectedPendingCommitMessages.size > 0) {
         await rejectPendingEpochOperations(this.store.pendingOperations, {

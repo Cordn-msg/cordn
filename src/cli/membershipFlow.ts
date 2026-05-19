@@ -17,6 +17,7 @@ import {
   joinGroupFromWelcome,
   addMemberToGroup,
   findMemberLeafIndexByStablePubkey,
+  replaceMemberInGroup,
   removeMemberFromGroup,
 } from "./utils/mlsGroupLifecycle.ts";
 import {
@@ -31,6 +32,7 @@ export interface PreparedAddMemberResult {
   keyPackageReference: string;
   pendingOperation: PendingAddMemberOperation;
   commitMessageBase64: string;
+  newState: ClientState;
 }
 
 export interface PreparedRemoveMemberResult {
@@ -68,14 +70,26 @@ export async function prepareAddMember(params: {
     throw new InvalidConsumedKeyPackageError();
   }
 
-  const commitResult = await addMemberToGroup({
-    state: params.group.state,
-    memberKeyPackage,
-  });
+  const replacedLeafIndex = findMemberLeafIndexByStablePubkey(
+    params.group.state,
+    consumeResult.keyPackage.stablePubkey,
+  );
+  const commitResult =
+    replacedLeafIndex < 0
+      ? await addMemberToGroup({
+          state: params.group.state,
+          memberKeyPackage,
+        })
+      : await replaceMemberInGroup({
+          state: params.group.state,
+          memberKeyPackage,
+          removedLeafIndex: replacedLeafIndex,
+        });
 
   return {
     keyPackageReference: consumeResult.keyPackage.keyPackageRef,
     commitMessageBase64: commitResult.commitMessageBase64,
+    newState: commitResult.newState,
     pendingOperation: {
       kind: "add-member",
       groupAlias: params.groupAlias,

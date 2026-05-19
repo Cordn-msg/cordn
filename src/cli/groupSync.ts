@@ -38,6 +38,10 @@ function isStaleGenerationIssue(detail: string): boolean {
   return detail === "Desired gen in the past";
 }
 
+function isUndecryptableStaleMessageIssue(detail: string): boolean {
+  return detail.startsWith("OperationError: The operation failed");
+}
+
 function wasMessageRejectedByCallback(result: {
   kind: "newState";
   actionTaken?: string;
@@ -51,7 +55,11 @@ function wasMessageRejectedByCallback(result: {
  * "removedFromGroup" state. Treat it as a removal signal.
  */
 function isRemovedMemberCommitIssue(detail: string): boolean {
-  return detail === "Could not find common ancestor";
+  return (
+    detail === "Could not find common ancestor" ||
+    detail ===
+      "This error should never occur, if you see this please submit a bug report. Message: No overlap between provided private keys and update path"
+  );
 }
 
 function isRemovedFromGroupState(state: GroupSessionState["state"]): boolean {
@@ -80,8 +88,14 @@ export async function ingestGroupMessages(params: {
     );
     const isPendingOperationMessage = pendingOperation !== undefined;
 
+    if (isPendingOperationMessage) {
+      group.fetchCursor = message.cursor;
+      group.lastCursor = Math.max(group.lastCursor, message.cursor);
+      appliedPendingCommitMessages.add(message.opaqueMessageBase64);
+      continue;
+    }
+
     if (
-      !isPendingOperationMessage &&
       group.messages.some(
         (stored) =>
           stored.direction === "outbound" && stored.cursor === message.cursor,
@@ -109,13 +123,14 @@ export async function ingestGroupMessages(params: {
       if (
         isFormerEpochIssue(detail) ||
         isStaleGenerationIssue(detail) ||
+        isUndecryptableStaleMessageIssue(detail) ||
         isRemovedMemberCommitIssue(detail)
       ) {
         group.fetchCursor = message.cursor;
         group.lastCursor = Math.max(group.lastCursor, message.cursor);
 
         if (
-          pendingOperation?.kind === "remove-member" &&
+          pendingOperation !== undefined &&
           (isRemovedMemberCommitIssue(detail) || isFormerEpochIssue(detail))
         ) {
           appliedPendingCommitMessages.add(message.opaqueMessageBase64);

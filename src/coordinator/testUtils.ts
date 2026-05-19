@@ -11,6 +11,7 @@ import {
   createProposal,
   createGroup,
   defaultCredentialTypes,
+  defaultCapabilities,
   generateKeyPackage,
   getCiphersuiteImpl,
   makeKeyPackageRef,
@@ -25,6 +26,7 @@ import {
   mlsMessageDecoder,
   mlsMessageEncoder,
   wireformats,
+  type Capabilities,
   type Credential,
   type CiphersuiteImpl,
   type ClientState,
@@ -35,7 +37,10 @@ import {
   type Proposal,
   type Welcome,
 } from "ts-mls";
-import { ensureLastResortKeyPackageExtension } from "../lastResortKeyPackage.ts";
+import {
+  APP_DATA_DICTIONARY_EXTENSION_TYPE,
+  ensureLastResortKeyPackageExtension,
+} from "../lastResortKeyPackage.ts";
 import { encodeBase64 } from "../server/base64.ts";
 
 export interface TestActor {
@@ -117,9 +122,19 @@ export async function createMemberArtifacts(
   options: { lastResort?: boolean } = {},
 ): Promise<TestMemberArtifacts> {
   const cipherSuite = await getTestCiphersuite();
+  const capabilities: Capabilities = defaultCapabilities();
+  if (options.lastResort) {
+    capabilities.extensions = [
+      ...new Set([
+        ...capabilities.extensions,
+        APP_DATA_DICTIONARY_EXTENSION_TYPE,
+      ]),
+    ];
+  }
   const generated = await generateKeyPackage({
     credential: createCredential(actor.stablePubkey),
     cipherSuite,
+    capabilities,
     extensions: options.lastResort
       ? ensureLastResortKeyPackageExtension([])
       : undefined,

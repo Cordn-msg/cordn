@@ -22,6 +22,7 @@ import {
   getCliCiphersuite,
 } from "./mlsBase.ts";
 import {
+  APP_DATA_DICTIONARY_EXTENSION_TYPE,
   ensureLastResortKeyPackageExtension,
   isLastResortKeyPackage,
 } from "../../lastResortKeyPackage.ts";
@@ -37,6 +38,23 @@ export function createCredential(stablePubkey: string): Credential {
   };
 }
 
+function createKeyPackageCapabilities(options: {
+  lastResort?: boolean;
+}): Capabilities {
+  const capabilities: Capabilities = createCordnMetadataCapabilities();
+
+  if (options.lastResort) {
+    capabilities.extensions = [
+      ...new Set([
+        ...capabilities.extensions,
+        APP_DATA_DICTIONARY_EXTENSION_TYPE,
+      ]),
+    ];
+  }
+
+  return capabilities;
+}
+
 export async function createMemberArtifacts(
   stablePubkey: string,
   options: { lastResort?: boolean } = {},
@@ -48,7 +66,7 @@ export async function createMemberArtifacts(
   isLastResort: boolean;
 }> {
   const cipherSuite = await getCliCiphersuite();
-  const capabilities: Capabilities = createCordnMetadataCapabilities();
+  const capabilities = createKeyPackageCapabilities(options);
   const generated = await generateKeyPackage({
     credential: createCredential(stablePubkey),
     cipherSuite,

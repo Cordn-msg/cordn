@@ -79,7 +79,7 @@ describe("ingestGroupMessages", () => {
     expect(group.lastCursor).toBe(7);
   });
 
-  test("does not skip self-echoed pending epoch operations by cursor", async () => {
+  test("confirms self-echoed pending epoch operations by cursor", async () => {
     const group = createGroupState();
     group.messages.push({
       cursor: 7,
@@ -90,15 +90,6 @@ describe("ingestGroupMessages", () => {
       kind: 9,
       tags: [],
       content: "hello",
-    });
-
-    processMessageBase64.mockResolvedValueOnce({
-      kind: "newState",
-      newState: {
-        ...group.state,
-        next: true,
-        groupActiveState: { kind: "active" },
-      } as unknown as GroupSessionState["state"],
     });
 
     const result = await ingestGroupMessages({
@@ -126,7 +117,7 @@ describe("ingestGroupMessages", () => {
       localStablePubkey: "alice",
     });
 
-    expect(processMessageBase64).toHaveBeenCalledTimes(1);
+    expect(processMessageBase64).not.toHaveBeenCalled();
     expect(result.appliedPendingCommitMessages).toEqual(
       new Set(["pending-commit"]),
     );
@@ -150,16 +141,7 @@ describe("ingestGroupMessages", () => {
           opaqueMessageBase64: "stale-commit",
         },
       ],
-      getPendingEpochOperation: () => ({
-        kind: "add-member",
-        groupAlias: "demo",
-        groupId: "gid",
-        commitMessageBase64: "stale-commit",
-        keyPackageReference: "kp-ref",
-        targetStablePubkey: "bob",
-        welcomeBase64: "welcome",
-        status: "pending",
-      }),
+      getPendingEpochOperation: () => undefined,
       localStablePubkey: "alice",
     });
 
@@ -170,9 +152,7 @@ describe("ingestGroupMessages", () => {
         detail: "Cannot process commit or proposal from former epoch",
       },
     ]);
-    expect(result.rejectedPendingCommitMessages).toEqual(
-      new Set(["stale-commit"]),
-    );
+    expect(result.rejectedPendingCommitMessages).toEqual(new Set());
     expect(group.fetchCursor).toBe(4);
     expect(group.lastCursor).toBe(4);
   });
@@ -246,17 +226,8 @@ describe("ingestGroupMessages", () => {
     expect(group.status).toBe("active");
   });
 
-  test("confirms echoed pending epoch operations after successful processing", async () => {
+  test("confirms echoed pending epoch operations without reprocessing", async () => {
     const group = createGroupState();
-
-    processMessageBase64.mockResolvedValueOnce({
-      kind: "newState",
-      newState: {
-        ...group.state,
-        next: true,
-        groupActiveState: { kind: "active" },
-      } as unknown as GroupSessionState["state"],
-    });
 
     const result = await ingestGroupMessages({
       group,
@@ -283,7 +254,7 @@ describe("ingestGroupMessages", () => {
       localStablePubkey: "alice",
     });
 
-    expect(processMessageBase64).toHaveBeenCalledTimes(1);
+    expect(processMessageBase64).not.toHaveBeenCalled();
     expect(result.appliedPendingCommitMessages).toEqual(
       new Set(["pending-commit"]),
     );
