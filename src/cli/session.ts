@@ -1,7 +1,10 @@
 import { type ClientState } from "ts-mls";
 
 import { assertCanAdministerGroup } from "./adminPolicy.ts";
-import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
+import {
+  getCordnGroupMetadataExtension,
+  type CordnGroupMetadata,
+} from "./groupMetadata.ts";
 import { createUnsignedCordnMessageEvent } from "./messageEnvelope.ts";
 import {
   createApplicationMessageBase64,
@@ -13,7 +16,10 @@ import {
   createMemberArtifacts,
   keyPackageSupportsCordnMetadata,
 } from "./utils/mlsIdentity.ts";
-import { createGroupState } from "./utils/mlsGroupLifecycle.ts";
+import {
+  createGroupState,
+  updateGroupMetadataExtension,
+} from "./utils/mlsGroupLifecycle.ts";
 import {
   type AvailableKeyPackage as ContractAvailableKeyPackage,
   type FetchGroupMessagesOutput,
@@ -439,6 +445,43 @@ export class CliSession {
       this.adoptGroupState(group, prepared.newState);
 
       return { targetStablePubkey };
+    });
+  }
+
+  async updateGroupMetadata(
+    groupAlias: string,
+    metadata: CordnGroupMetadata,
+  ): Promise<{ metadata: CordnGroupMetadata }> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      await this.catchUpGroupIfNeeded(group);
+      this.assertGroupIsActive(group);
+      assertCanAdministerGroup({
+        groupAlias,
+        metadata: group.metadata,
+        stablePubkey: this.stablePubkey,
+      });
+
+      const prepared = await updateGroupMetadataExtension({
+        state: group.state,
+        metadata,
+      });
+
+      enqueuePendingEpochOperation(this.store.pendingOperations, {
+        kind: "update-group-metadata",
+        groupAlias,
+        groupId: this.deriveGroupId(group.state),
+        commitMessageBase64: prepared.commitMessageBase64,
+        status: "pending",
+      });
+
+      await this.getGroupClient(group).PostGroupMessage({
+        msg_64: prepared.commitMessageBase64,
+      });
+
+      this.adoptGroupState(group, prepared.newState);
+
+      return { metadata: group.metadata ?? metadata };
     });
   }
 

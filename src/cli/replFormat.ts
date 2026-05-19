@@ -196,6 +196,8 @@ export function printHelp(): void {
       "  delete-kp <aliasOrKeyPackageRef> [--local-only] [--coordinator <pubkey>]",
       "  available-kps [--coordinator <pubkey>]",
       "  create-group <alias> [keyPackageAlias] [--coordinator <pubkey>] [--name <value>] [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]... [--watch]",
+      "  update-group-metadata <groupAlias> --name <value> [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
+      "  set-metadata <groupAlias> --name <value> [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
       "  groups",
       "  group-info [groupAlias]",
       "  group <groupAlias> [--watch]",

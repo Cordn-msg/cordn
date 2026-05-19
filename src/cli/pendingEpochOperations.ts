@@ -2,7 +2,8 @@ import type { cordnClient } from "./coordinatorClient.ts";
 
 export type PendingEpochOperation =
   | PendingAddMemberOperation
-  | PendingRemoveMemberOperation;
+  | PendingRemoveMemberOperation
+  | PendingUpdateGroupMetadataOperation;
 
 export interface PendingEpochOperationBase {
   kind: PendingEpochOperationKind;
@@ -12,7 +13,10 @@ export interface PendingEpochOperationBase {
   status: PendingEpochOperationStatus;
 }
 
-export type PendingEpochOperationKind = "add-member" | "remove-member";
+export type PendingEpochOperationKind =
+  | "add-member"
+  | "remove-member"
+  | "update-group-metadata";
 
 export type PendingEpochOperationStatus = "pending" | "confirmed" | "rejected";
 
@@ -26,6 +30,10 @@ export interface PendingAddMemberOperation extends PendingEpochOperationBase {
 export interface PendingRemoveMemberOperation extends PendingEpochOperationBase {
   kind: "remove-member";
   targetStablePubkey: string;
+}
+
+export interface PendingUpdateGroupMetadataOperation extends PendingEpochOperationBase {
+  kind: "update-group-metadata";
 }
 
 export interface PendingEpochOperationFinalizerContext {
@@ -55,6 +63,8 @@ const pendingEpochOperationFinalizers: Record<
   // Remove commits require no coordinator-side finalization
   // because there is no welcome to store.
   "remove-member": async () => undefined,
+  // Metadata updates require no coordinator-side finalization.
+  "update-group-metadata": async () => undefined,
 };
 
 async function finalizePendingEpochOperation(

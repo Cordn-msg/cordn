@@ -31,6 +31,7 @@ Useful commands:
 - `available-kps` — inspect coordinator-published key packages
 - `create-group <alias> [keyPackageAlias] [--watch]`
 - `create-group <alias> [keyPackageAlias] --name "Demo" --description "Shared group" --icon "🧵" --image-url "https://example.com/group.png"`
+- `update-group-metadata <groupAlias> --name "Demo" [--description "Shared group"] [--icon "🧵"] [--image-url "https://example.com/group.png"] [--admin <hex>]...`
 - `group <groupAlias> [--watch]`
 - `accept-welcome <keyPackageReference> [groupAlias] [--watch]`
 - `groups` — compact list of joined groups, shared metadata, and watch status

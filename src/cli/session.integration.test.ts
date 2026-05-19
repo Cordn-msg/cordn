@@ -702,6 +702,321 @@ describe("CliSession", () => {
     }
   });
 
+  test("rejects non-admin outbound metadata updates when admins are configured", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        metadata: {
+          name: "Admins Only",
+          description: "locked",
+          adminPubkeys: [alice.stablePubkey],
+        },
+      });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      const joined = await bob.acceptWelcome(
+        bobInvitation.keyPackageReference,
+        "demo",
+      );
+
+      expect(joined.metadata).toEqual({
+        name: "Admins Only",
+        description: "locked",
+        adminPubkeys: [alice.stablePubkey],
+      });
+
+      await expect(
+        bob.updateGroupMetadata("demo", {
+          name: "Bob takeover",
+          description: "should not apply",
+          adminPubkeys: [bob.stablePubkey],
+        }),
+      ).rejects.toBeInstanceOf(UnauthorizedGroupAdminActionError);
+
+      expect(bob.listSyncIssues("demo")).toEqual([]);
+      expect(bob.getGroup("demo").metadata).toEqual({
+        name: "Admins Only",
+        description: "locked",
+        adminPubkeys: [alice.stablePubkey],
+      });
+
+      await alice.syncGroup("demo");
+      await bob.syncGroup("demo");
+
+      expect(alice.getGroup("demo").metadata).toEqual({
+        name: "Admins Only",
+        description: "locked",
+        adminPubkeys: [alice.stablePubkey],
+      });
+      expect(bob.getGroup("demo").metadata).toEqual({
+        name: "Admins Only",
+        description: "locked",
+        adminPubkeys: [alice.stablePubkey],
+      });
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("rejects non-admin outbound remove-member attempts when admins are configured", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+      await bob.publishKeyPackage("bob-main");
+      await carol.publishKeyPackage("carol-main");
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        metadata: {
+          name: "Admins Only",
+          adminPubkeys: [alice.stablePubkey],
+        },
+      });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+
+      const carolInvitation = await alice.addMember("demo", carol.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await carol.fetchWelcomes();
+      await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
+
+      await expect(
+        bob.removeMember("demo", carol.stablePubkey),
+      ).rejects.toBeInstanceOf(UnauthorizedGroupAdminActionError);
+
+      await alice.syncGroup("demo");
+      await bob.syncGroup("demo");
+      await carol.syncGroup("demo");
+
+      expect(
+        alice.listGroups().find((group) => group.alias === "demo")?.metadata,
+      ).toEqual({
+        name: "Admins Only",
+        adminPubkeys: [alice.stablePubkey],
+      });
+      expect(
+        bob.listGroups().find((group) => group.alias === "demo")?.metadata,
+      ).toEqual({
+        name: "Admins Only",
+        adminPubkeys: [alice.stablePubkey],
+      });
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("keeps repeated unauthorized admin attempts harmless until a valid admin acts", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const dave = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol, dave);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+      await dave.generateKeyPackage("dave-main");
+      await carol.publishKeyPackage("carol-main");
+      await dave.publishKeyPackage("dave-main");
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        metadata: {
+          name: "Admins Only",
+          adminPubkeys: [alice.stablePubkey],
+        },
+      });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+
+      for (const attempt of [
+        () => bob.addMember("demo", carol.stablePubkey),
+        () =>
+          bob.updateGroupMetadata("demo", {
+            name: "Bob takeover",
+            adminPubkeys: [bob.stablePubkey],
+          }),
+        () => bob.removeMember("demo", alice.stablePubkey),
+        () => bob.addMember("demo", dave.stablePubkey),
+      ]) {
+        await expect(attempt()).rejects.toBeInstanceOf(
+          UnauthorizedGroupAdminActionError,
+        );
+      }
+
+      expect(bob.listSyncIssues("demo")).toEqual([]);
+
+      const carolInvitation = await alice.addMember("demo", carol.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await carol.fetchWelcomes();
+      const joined = await carol.acceptWelcome(
+        carolInvitation.keyPackageReference,
+        "demo",
+      );
+
+      expect(joined.metadata).toEqual({
+        name: "Admins Only",
+        adminPubkeys: [alice.stablePubkey],
+      });
+
+      await bob.syncGroup("demo");
+      expect(
+        bob.listGroups().find((group) => group.alias === "demo")?.metadata,
+      ).toEqual({
+        name: "Admins Only",
+        adminPubkeys: [alice.stablePubkey],
+      });
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("starts rejecting non-admin actions immediately after admin metadata becomes restrictive", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+      await bob.publishKeyPackage("bob-main");
+      await carol.publishKeyPackage("carol-main");
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        metadata: { name: "Initially Open" },
+      });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+
+      const renamed = await alice.updateGroupMetadata("demo", {
+        name: "Admins Only",
+        adminPubkeys: [alice.stablePubkey],
+      });
+      expect(renamed.metadata).toEqual({
+        name: "Admins Only",
+        adminPubkeys: [alice.stablePubkey],
+      });
+
+      await alice.syncGroup("demo");
+      await bob.syncGroup("demo");
+
+      expect(bob.getGroup("demo").metadata).toEqual({
+        name: "Admins Only",
+        adminPubkeys: [alice.stablePubkey],
+      });
+
+      await expect(
+        bob.addMember("demo", carol.stablePubkey),
+      ).rejects.toBeInstanceOf(UnauthorizedGroupAdminActionError);
+      await expect(
+        bob.updateGroupMetadata("demo", {
+          name: "Bob relock",
+          adminPubkeys: [bob.stablePubkey],
+        }),
+      ).rejects.toBeInstanceOf(UnauthorizedGroupAdminActionError);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
   test("uses distinct coordinator group ids even when local aliases are reused", async () => {
     const relayHub = new MockRelayHub();
     const serverSigner = new PrivateKeySigner();

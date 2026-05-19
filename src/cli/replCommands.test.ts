@@ -2,7 +2,11 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, test, vi } from "vitest";
 
-import { executeReplCommand, parseCreateGroupArgs } from "./replCommands.ts";
+import {
+  executeReplCommand,
+  parseCreateGroupArgs,
+  parseUpdateGroupMetadataArgs,
+} from "./replCommands.ts";
 import { CliUsageError } from "./sessionErrors.ts";
 
 describe("parseCreateGroupArgs", () => {
@@ -61,6 +65,36 @@ describe("parseCreateGroupArgs", () => {
     expect(() => parseCreateGroupArgs(["demo", "--unknown", "value"])).toThrow(
       CliUsageError,
     );
+  });
+});
+
+describe("parseUpdateGroupMetadataArgs", () => {
+  test("parses group alias and replacement metadata", () => {
+    expect(
+      parseUpdateGroupMetadataArgs([
+        "demo",
+        "--name",
+        "Renamed",
+        "--description",
+        "new description",
+        "--icon",
+        "🧵",
+      ]),
+    ).toEqual({
+      alias: "demo",
+      metadata: {
+        name: "Renamed",
+        description: "new description",
+        icon: "🧵",
+      },
+    });
+  });
+
+  test("requires a name for v1 metadata", () => {
+    expect(() => parseUpdateGroupMetadataArgs(["demo"])).toThrow(CliUsageError);
+    expect(() =>
+      parseUpdateGroupMetadataArgs(["demo", "--description", "hello"]),
+    ).toThrow(CliUsageError);
   });
 });
 
@@ -343,6 +377,33 @@ describe("executeReplCommand", () => {
 
     expect(syncGroup).toHaveBeenNthCalledWith(1, "demo");
     expect(removeMember).toHaveBeenCalledWith("demo", "b".repeat(64));
+    expect(syncGroup).toHaveBeenNthCalledWith(2, "demo");
+  });
+
+  test("syncs before and after update-group-metadata", async () => {
+    const output = new PassThrough();
+    const syncGroup = vi.fn().mockResolvedValue([]);
+    const updateGroupMetadata = vi.fn().mockResolvedValue({
+      metadata: { name: "Renamed" },
+    });
+    const session = {
+      syncGroup,
+      updateGroupMetadata,
+    } as never;
+
+    await executeReplCommand(
+      "update-group-metadata",
+      ["demo", "--name", "Renamed"],
+      {
+        session,
+        output,
+      },
+    );
+
+    expect(syncGroup).toHaveBeenNthCalledWith(1, "demo");
+    expect(updateGroupMetadata).toHaveBeenCalledWith("demo", {
+      name: "Renamed",
+    });
     expect(syncGroup).toHaveBeenNthCalledWith(2, "demo");
   });
 

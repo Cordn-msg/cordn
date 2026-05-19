@@ -211,6 +211,40 @@ export async function removeMemberFromGroup(params: {
   };
 }
 
+export async function updateGroupMetadataExtension(params: {
+  state: ClientState;
+  metadata: CordnGroupMetadata;
+}): Promise<{
+  newState: ClientState;
+  commitMessageBase64: string;
+}> {
+  const cipherSuite = await getCliCiphersuite();
+  const extensions = [
+    ...params.state.groupContext.extensions.filter(
+      (extension) => extension.extensionType !== 0xc04d,
+    ),
+    makeCordnGroupMetadataExtension(params.metadata),
+  ];
+  const result = await createCommit({
+    context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+    state: params.state,
+    ratchetTreeExtension: true,
+    extraProposals: [
+      {
+        proposalType: defaultProposalTypes.group_context_extensions,
+        groupContextExtensions: {
+          extensions,
+        },
+      },
+    ],
+  });
+
+  return {
+    newState: result.newState,
+    commitMessageBase64: encodeBase64(encode(mlsMessageEncoder, result.commit)),
+  };
+}
+
 export async function joinGroupFromWelcome(params: {
   welcome: Welcome;
   keyPackage: KeyPackage;

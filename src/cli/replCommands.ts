@@ -30,6 +30,8 @@ export const knownCommands = new Set([
   "delete-kp",
   "available-kps",
   "create-group",
+  "update-group-metadata",
+  "set-metadata",
   "groups",
   "group-info",
   "group",
@@ -188,6 +190,77 @@ export function parseCreateGroupArgs(args: string[]): {
   };
 }
 
+export function parseUpdateGroupMetadataArgs(args: string[]): {
+  alias: string;
+  metadata: CordnGroupMetadata;
+} {
+  const alias = args[0];
+
+  if (!alias) {
+    throw new CliUsageError(
+      "Usage: update-group-metadata <groupAlias> --name <value> [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
+    );
+  }
+
+  const metadata: CordnGroupMetadata = { name: "" };
+  let metadataProvided = false;
+  let index = 1;
+
+  while (index < args.length) {
+    const flag = args[index];
+    const value = args[index + 1];
+
+    if (!flag?.startsWith("--")) {
+      throw new CliUsageError(
+        `Unexpected update-group-metadata argument: ${flag}`,
+      );
+    }
+
+    switch (flag) {
+      case "--name":
+        if (!value) throw new CliUsageError("Missing value for --name");
+        metadata.name = value;
+        metadataProvided = true;
+        index += 2;
+        break;
+      case "--description":
+        if (!value) throw new CliUsageError("Missing value for --description");
+        metadata.description = value;
+        metadataProvided = true;
+        index += 2;
+        break;
+      case "--icon":
+        if (!value) throw new CliUsageError("Missing value for --icon");
+        metadata.icon = value;
+        metadataProvided = true;
+        index += 2;
+        break;
+      case "--image-url":
+        if (!value) throw new CliUsageError("Missing value for --image-url");
+        metadata.imageUrl = value;
+        metadataProvided = true;
+        index += 2;
+        break;
+      case "--admin":
+        if (!value) throw new CliUsageError("Missing value for --admin");
+        metadata.adminPubkeys = [...(metadata.adminPubkeys ?? []), value];
+        metadataProvided = true;
+        index += 2;
+        break;
+      default:
+        throw new CliUsageError(
+          `Unknown update-group-metadata option: ${flag}`,
+        );
+    }
+  }
+
+  if (!metadataProvided || metadata.name === "") {
+    throw new CliUsageError("update-group-metadata requires --name for v1");
+  }
+
+  return { alias, metadata };
+}
+
 function parseCoordinatorOption(args: string[]): string | undefined {
   const index = args.indexOf("--coordinator");
   if (index === -1) {
@@ -327,6 +400,20 @@ export async function executeReplCommand(
       selectedGroupAlias = group.alias;
       output.write(
         `${colorize("created group", ansi.green)} ${colorize(group.alias, ansi.cyan)} ${formatGroupMetadata(group.metadata)}\n`,
+      );
+      break;
+    }
+    case "update-group-metadata":
+    case "set-metadata": {
+      const parsed = parseUpdateGroupMetadataArgs(args);
+      await session.syncGroup(parsed.alias);
+      const result = await session.updateGroupMetadata(
+        parsed.alias,
+        parsed.metadata,
+      );
+      await session.syncGroup(parsed.alias);
+      output.write(
+        `${colorize("updated metadata", ansi.green)} ${colorize(parsed.alias, ansi.cyan)} ${formatGroupMetadata(result.metadata)}\n`,
       );
       break;
     }
