@@ -2,8 +2,8 @@ name: Docker Publish
 
 on:
   push:
-    branches:
-      - master
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
@@ -11,6 +11,7 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   docker:
@@ -36,9 +37,8 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=master
+            type=ref,event=tag
             type=raw,value=latest
-            type=sha
 
       - name: Build and publish Docker image
         uses: docker/build-push-action@v6

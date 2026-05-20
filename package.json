@@ -1,12 +1,14 @@
 {
   "name": "cordn",
+  "version": "0.1.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "packageManager": "pnpm@10.17.1",
   "pnpm": {
     "onlyBuiltDependencies": [
-      "better-sqlite3"
+      "better-sqlite3",
+      "esbuild"
     ]
   },
   "engines": {
@@ -14,7 +16,7 @@
   },
   "scripts": {
     "dev": "pnpm run server:start",
-    "build": "npx esbuild ./src/server/main.ts --bundle --outdir=./dist --target=node22 --format=esm --packages=external",
+    "build": "esbuild ./src/server/main.ts --bundle --outdir=./dist --target=node22 --format=esm --packages=external",
     "typecheck": "tsc --noEmit",
     "client:cli": "node ./src/cli/main.ts",
     "server:start": "node ./src/server/main.ts",
@@ -24,6 +26,8 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.6.2",
+    "@changesets/cli": "^2.31.0",
+    "esbuild": "^0.27.7",
     "prettier": "^3.8.3",
     "typescript": "^5.9.3",
     "vitest": "^4.1.5"

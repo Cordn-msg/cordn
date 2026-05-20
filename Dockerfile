@@ -16,6 +16,11 @@ COPY . .
 
 RUN pnpm run build
 
+FROM deps AS prod-deps
+WORKDIR /app
+
+RUN pnpm prune --prod
+
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
@@ -29,10 +34,8 @@ RUN corepack enable \
   && mkdir -p /data \
   && chown -R cordn:cordn /data /app
 
+COPY --from=prod-deps /app/node_modules ./node_modules
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-
-RUN pnpm install --frozen-lockfile --prod
-
 COPY --from=build /app/dist ./dist
 
 USER cordn
