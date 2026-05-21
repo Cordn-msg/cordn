@@ -18,6 +18,19 @@ describe("readServerRuntimeConfig", () => {
     expect(config.storage).toEqual({ backend: "memory" });
     expect(config.serverInfo.name).toBe("cordn-server");
     expect(config.isAnnouncedServer).toBe(false);
+    expect(config.abuseProtection).toEqual({
+      rateLimit: {
+        enabled: true,
+        refillPerMinute: 250,
+        burst: 80,
+        idleTtlMs: 3_600_000,
+      },
+      keyPackageQuota: {
+        maxPerIdentity: 50,
+        maxLastResortPerIdentity: 1,
+      },
+      logRejections: true,
+    });
   });
 
   test("reads sqlite storage configuration and comma-separated relays", () => {
@@ -40,6 +53,33 @@ describe("readServerRuntimeConfig", () => {
     ]);
     expect(config.serverInfo.name).toBe("custom-cordn");
     expect(config.isAnnouncedServer).toBe(true);
+  });
+
+  test("reads abuse protection configuration", () => {
+    const config = readServerRuntimeConfig({
+      CORDN_SERVER_PRIVATE_KEY: "4".repeat(64),
+      CORDN_RATE_LIMIT_ENABLED: "false",
+      CORDN_RATE_LIMIT_REFILL_PER_MINUTE: "400",
+      CORDN_RATE_LIMIT_BURST: "120",
+      CORDN_RATE_LIMIT_IDLE_TTL_SECONDS: "10",
+      CORDN_MAX_KEY_PACKAGES_PER_IDENTITY: "75",
+      CORDN_MAX_LAST_RESORT_KEY_PACKAGES_PER_IDENTITY: "2",
+      CORDN_LOG_ABUSE_REJECTIONS: "0",
+    });
+
+    expect(config.abuseProtection).toEqual({
+      rateLimit: {
+        enabled: false,
+        refillPerMinute: 400,
+        burst: 120,
+        idleTtlMs: 10_000,
+      },
+      keyPackageQuota: {
+        maxPerIdentity: 75,
+        maxLastResortPerIdentity: 2,
+      },
+      logRejections: false,
+    });
   });
 
   test("rejects invalid storage backend values", () => {

@@ -22,6 +22,20 @@ import { CoordinatorAdapter } from "./coordinatorMethods.ts";
 import { decodeBase64 } from "./base64.ts";
 import { encodeBase64 } from "./base64.ts";
 
+const TEST_ABUSE_PROTECTION = {
+  rateLimit: {
+    enabled: true,
+    refillPerMinute: 250,
+    burst: 80,
+    idleTtlMs: 3_600_000,
+  },
+  keyPackageQuota: {
+    maxPerIdentity: 50,
+    maxLastResortPerIdentity: 1,
+  },
+  logRejections: false,
+} as const;
+
 function createPublicationEvent(params: {
   pubkey: string;
   secretKey: Uint8Array;
@@ -516,5 +530,156 @@ describe("CoordinatorAdapter", () => {
       },
     });
     expect(abortedReason).toBe("user requested stop");
+  });
+
+  test("rejects requests once the token bucket burst is exhausted", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator, undefined, {
+      ...TEST_ABUSE_PROTECTION,
+      rateLimit: {
+        enabled: true,
+        refillPerMinute: 0,
+        burst: 2,
+        idleTtlMs: 3_600_000,
+      },
+    });
+    const alice = await createMemberArtifacts(createActor("alice-rate-limit"));
+
+    expect(() =>
+      adapter.assertWithinRateLimit(
+        createExtra(alice.actor.stablePubkey),
+        "kp_list",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      adapter.assertWithinRateLimit(
+        createExtra(alice.actor.stablePubkey),
+        "kp_list",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      adapter.assertWithinRateLimit(
+        createExtra(alice.actor.stablePubkey),
+        "kp_list",
+      ),
+    ).toThrow("Rate limit exceeded");
+  });
+
+  test("replaces the previous last-resort key package for the same identity", async () => {
+    const coordinator = new Coordinator();
+    const actor = createActor("alice-last-resort");
+    const alice = await createMemberArtifacts(actor, { lastResort: true });
+    const firstEvent = createPublicationEvent({
+      pubkey: alice.actor.stablePubkey,
+      secretKey: alice.actor.secretKey,
+      keyPackageBase64: encodeBase64(
+        encode(keyPackageEncoder, alice.keyPackage),
+      ),
+    });
+    const replacement = await createMemberArtifacts(actor, {
+      lastResort: true,
+    });
+    const replacementEvent = createPublicationEvent({
+      pubkey: replacement.actor.stablePubkey,
+      secretKey: replacement.actor.secretKey,
+      keyPackageBase64: encodeBase64(
+        encode(keyPackageEncoder, replacement.keyPackage),
+      ),
+    });
+    const adapter = new CoordinatorAdapter(
+      coordinator,
+      (requestEventId) => {
+        if (requestEventId === firstEvent.id) {
+          return firstEvent;
+        }
+
+        if (requestEventId === replacementEvent.id) {
+          return replacementEvent;
+        }
+
+        return null;
+      },
+      TEST_ABUSE_PROTECTION,
+    );
+
+    await adapter.publishKeyPackage(
+      {
+        kp_ref: "kp-ref-first-last-resort",
+        kp_64: encodeBase64(encode(keyPackageEncoder, alice.keyPackage)),
+      },
+      createExtra(alice.actor.stablePubkey, firstEvent.id),
+    );
+    await adapter.publishKeyPackage(
+      {
+        kp_ref: "kp-ref-second-last-resort",
+        kp_64: encodeBase64(encode(keyPackageEncoder, replacement.keyPackage)),
+      },
+      createExtra(replacement.actor.stablePubkey, replacementEvent.id),
+    );
+
+    const records = coordinator.listKeyPackagesForIdentity(
+      alice.actor.stablePubkey,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0]?.keyPackageRef).toBe("kp-ref-second-last-resort");
+    expect(records[0]?.isLastResort).toBe(true);
+  });
+
+  test("rejects publishing regular key packages beyond the configured identity quota", async () => {
+    const coordinator = new Coordinator();
+    const actor = createActor("alice-quota");
+    const alice = await createMemberArtifacts(actor);
+    const bob = await createMemberArtifacts(actor);
+    const firstEvent = createPublicationEvent({
+      pubkey: alice.actor.stablePubkey,
+      secretKey: alice.actor.secretKey,
+      keyPackageBase64: encodeBase64(
+        encode(keyPackageEncoder, alice.keyPackage),
+      ),
+    });
+    const secondEvent = createPublicationEvent({
+      pubkey: bob.actor.stablePubkey,
+      secretKey: bob.actor.secretKey,
+      keyPackageBase64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
+    });
+    const adapter = new CoordinatorAdapter(
+      coordinator,
+      (requestEventId) => {
+        if (requestEventId === firstEvent.id) {
+          return firstEvent;
+        }
+
+        if (requestEventId === secondEvent.id) {
+          return secondEvent;
+        }
+
+        return null;
+      },
+      {
+        ...TEST_ABUSE_PROTECTION,
+        keyPackageQuota: {
+          maxPerIdentity: 1,
+          maxLastResortPerIdentity: 1,
+        },
+      },
+    );
+
+    await adapter.publishKeyPackage(
+      {
+        kp_ref: "kp-ref-first-regular",
+        kp_64: encodeBase64(encode(keyPackageEncoder, alice.keyPackage)),
+      },
+      createExtra(alice.actor.stablePubkey, firstEvent.id),
+    );
+
+    await expect(
+      adapter.publishKeyPackage(
+        {
+          kp_ref: "kp-ref-second-regular",
+          kp_64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
+        },
+        createExtra(bob.actor.stablePubkey, secondEvent.id),
+      ),
+    ).rejects.toThrowError("Key package quota exceeded");
   });
 });

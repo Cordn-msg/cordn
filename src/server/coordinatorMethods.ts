@@ -15,6 +15,7 @@ import {
   type Welcome,
 } from "ts-mls";
 
+import { isLastResortKeyPackage } from "../lastResortKeyPackage.ts";
 import { Coordinator } from "../coordinator/coordinator.ts";
 import {
   consumeKeyPackageInputSchema,
@@ -40,9 +41,22 @@ import {
 } from "../contracts/index.ts";
 import { decodeExact, decodeWelcome, encodeWelcome } from "../mlsCodec.ts";
 import { assertNonEmptyBase64, encodeBase64 } from "./base64.ts";
+import {
+  TokenBucketRateLimiter,
+  type TokenBucketRateLimitConfig,
+} from "./rateLimit.ts";
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 export type ResolveRequestEvent = (requestEventId: string) => NostrEvent | null;
+
+export interface AbuseProtectionOptions {
+  rateLimit: TokenBucketRateLimitConfig;
+  keyPackageQuota: {
+    maxPerIdentity: number;
+    maxLastResortPerIdentity: number;
+  };
+  logRejections: boolean;
+}
 
 function decodeKeyPackageBase64(kp_64: string): KeyPackage {
   try {
@@ -177,13 +191,120 @@ function mapGroupMessage(record: {
 export class CoordinatorAdapter {
   private readonly coordinator: Coordinator;
   private readonly resolveRequestEvent?: ResolveRequestEvent;
+  private readonly rateLimiter: TokenBucketRateLimiter;
+  private readonly abuseProtection: AbuseProtectionOptions;
 
   constructor(
     coordinator: Coordinator,
     resolveRequestEvent?: ResolveRequestEvent,
+    abuseProtection?: AbuseProtectionOptions,
   ) {
     this.coordinator = coordinator;
     this.resolveRequestEvent = resolveRequestEvent;
+    this.abuseProtection = abuseProtection ?? {
+      rateLimit: {
+        enabled: true,
+        refillPerMinute: 250,
+        burst: 80,
+        idleTtlMs: 3_600_000,
+      },
+      keyPackageQuota: {
+        maxPerIdentity: 50,
+        maxLastResortPerIdentity: 1,
+      },
+      logRejections: true,
+    };
+    this.rateLimiter = new TokenBucketRateLimiter(
+      this.abuseProtection.rateLimit,
+    );
+  }
+
+  assertWithinRateLimit(extra: ToolExtra, methodName: string): void {
+    const clientPubkey = requireClientPubkey(extra);
+    if (this.rateLimiter.check(clientPubkey)) {
+      return;
+    }
+
+    if (this.abuseProtection.logRejections) {
+      console.warn("cordn abuse protection rejection", {
+        type: "rate_limit",
+        method: methodName,
+        clientPubkey: `${clientPubkey.slice(0, 12)}…`,
+      });
+    }
+
+    throw new Error("Rate limit exceeded");
+  }
+
+  private enforceKeyPackageQuota(
+    stablePubkey: string,
+    incomingKeyPackage: KeyPackage,
+  ): void {
+    const records = this.coordinator.listKeyPackagesForIdentity(stablePubkey);
+    const incomingIsLastResort = isLastResortKeyPackage(incomingKeyPackage);
+    const maxPerIdentity = this.abuseProtection.keyPackageQuota.maxPerIdentity;
+    const maxLastResortPerIdentity =
+      this.abuseProtection.keyPackageQuota.maxLastResortPerIdentity;
+
+    if (incomingIsLastResort) {
+      const existingLastResortRecords = records.filter(
+        (record) => record.isLastResort,
+      );
+
+      if (
+        maxLastResortPerIdentity > 0 &&
+        existingLastResortRecords.length >= maxLastResortPerIdentity
+      ) {
+        const recordsToRemove = existingLastResortRecords.slice(
+          0,
+          existingLastResortRecords.length - maxLastResortPerIdentity + 1,
+        );
+        for (const record of recordsToRemove) {
+          this.coordinator.removeKeyPackage(record.keyPackageRef);
+        }
+      }
+
+      const nonLastResortCount =
+        records.length - existingLastResortRecords.length;
+      if (
+        maxPerIdentity > 0 &&
+        nonLastResortCount +
+          Math.min(
+            existingLastResortRecords.length,
+            maxLastResortPerIdentity - 1,
+          ) +
+          1 >
+          maxPerIdentity
+      ) {
+        this.logQuotaRejection(
+          stablePubkey,
+          "max key packages per identity exceeded",
+        );
+        throw new Error("Key package quota exceeded");
+      }
+
+      return;
+    }
+
+    if (maxPerIdentity > 0 && records.length >= maxPerIdentity) {
+      this.logQuotaRejection(
+        stablePubkey,
+        "max key packages per identity exceeded",
+      );
+      throw new Error("Key package quota exceeded");
+    }
+  }
+
+  private logQuotaRejection(clientPubkey: string, reason: string): void {
+    if (!this.abuseProtection.logRejections) {
+      return;
+    }
+
+    console.warn("cordn abuse protection rejection", {
+      type: "key_package_quota",
+      reason,
+      clientPubkey: `${clientPubkey.slice(0, 12)}…`,
+    });
   }
 
   async publishKeyPackage(
@@ -206,6 +327,8 @@ export class CoordinatorAdapter {
       keyPackage,
     });
 
+    this.enforceKeyPackageQuota(stablePubkey, keyPackage);
+
     const record = this.coordinator.publishKeyPackage({
       stablePubkey,
       keyPackageRef: input.kp_ref,
@@ -224,6 +347,7 @@ export class CoordinatorAdapter {
   }
 
   consumeKeyPackage(input: z.infer<typeof consumeKeyPackageInputSchema>) {
+    // no extra available here; enforced in registration wrapper
     const record = this.coordinator.consumeKeyPackage(input.id);
 
     return {
@@ -245,6 +369,7 @@ export class CoordinatorAdapter {
   listAvailableKeyPackages(
     _input: z.infer<typeof listAvailableKeyPackagesInputSchema>,
   ) {
+    // no extra available here; enforced in registration wrapper
     const records = this.coordinator.listAllKeyPackages();
 
     return {
@@ -307,6 +432,7 @@ export class CoordinatorAdapter {
   }
 
   storeWelcome(input: z.infer<typeof storeWelcomeInputSchema>) {
+    // no extra available here; enforced in registration wrapper
     const record = this.coordinator.storeWelcome({
       targetStablePubkey: input.target_pk,
       keyPackageReference: input.kp_ref,
@@ -341,6 +467,7 @@ export class CoordinatorAdapter {
   }
 
   fetchGroupMessages(input: z.infer<typeof fetchGroupMessagesInputSchema>) {
+    // no extra available here; enforced in registration wrapper
     const records = this.coordinator.fetchGroupMessages({
       groupId: input.gid,
       afterCursor: input.after,
@@ -424,6 +551,20 @@ export function registerCoordinatorMethods(
   server: McpServer,
   adapter: CoordinatorAdapter,
 ): void {
+  const withRateLimit = <TInput, TOutput>(
+    methodName: string,
+    handler: (input: TInput, extra: ToolExtra) => TOutput | Promise<TOutput>,
+  ) => {
+    return (input: TInput, extra: ToolExtra) => {
+      (
+        adapter as CoordinatorAdapter & {
+          assertWithinRateLimit(extra: ToolExtra, methodName: string): void;
+        }
+      ).assertWithinRateLimit(extra, methodName);
+      return handler(input, extra);
+    };
+  };
+
   // TODO: Store the entire key package publish event
   server.registerTool(
     COORDINATOR_METHODS.publishKeyPackage,
@@ -433,7 +574,9 @@ export function registerCoordinatorMethods(
       inputSchema: publishKeyPackageInputSchema,
       outputSchema: publishKeyPackageOutputSchema,
     },
-    async (input, extra) => adapter.publishKeyPackage(input, extra),
+    withRateLimit(COORDINATOR_METHODS.publishKeyPackage, (input, extra) =>
+      adapter.publishKeyPackage(input, extra),
+    ),
   );
 
   server.registerTool(
@@ -444,7 +587,13 @@ export function registerCoordinatorMethods(
       inputSchema: listAvailableKeyPackagesInputSchema,
       outputSchema: listAvailableKeyPackagesOutputSchema,
     },
-    (input) => adapter.listAvailableKeyPackages(input),
+    withRateLimit(
+      COORDINATOR_METHODS.listAvailableKeyPackages,
+      (input, extra) => {
+        void extra;
+        return adapter.listAvailableKeyPackages(input);
+      },
+    ),
   );
 
   server.registerTool(
@@ -455,7 +604,9 @@ export function registerCoordinatorMethods(
       inputSchema: removeKeyPackagesInputSchema,
       outputSchema: removeKeyPackagesOutputSchema,
     },
-    (input, extra) => adapter.removeKeyPackages(input, extra),
+    withRateLimit(COORDINATOR_METHODS.removeKeyPackages, (input, extra) =>
+      adapter.removeKeyPackages(input, extra),
+    ),
   );
   // TODO: Return the entire key package publish event
   server.registerTool(
@@ -466,7 +617,10 @@ export function registerCoordinatorMethods(
       inputSchema: consumeKeyPackageInputSchema,
       outputSchema: consumeKeyPackageOutputSchema,
     },
-    (input) => adapter.consumeKeyPackage(input),
+    withRateLimit(COORDINATOR_METHODS.consumeKeyPackage, (input, extra) => {
+      void extra;
+      return adapter.consumeKeyPackage(input);
+    }),
   );
 
   server.registerTool(
@@ -477,7 +631,9 @@ export function registerCoordinatorMethods(
       inputSchema: fetchPendingWelcomesInputSchema,
       outputSchema: fetchPendingWelcomesOutputSchema,
     },
-    (input, extra) => adapter.fetchPendingWelcomes(input, extra),
+    withRateLimit(COORDINATOR_METHODS.fetchPendingWelcomes, (input, extra) =>
+      adapter.fetchPendingWelcomes(input, extra),
+    ),
   );
 
   server.registerTool(
@@ -487,7 +643,10 @@ export function registerCoordinatorMethods(
       inputSchema: storeWelcomeInputSchema,
       outputSchema: storeWelcomeOutputSchema,
     },
-    (input) => adapter.storeWelcome(input),
+    withRateLimit(COORDINATOR_METHODS.storeWelcome, (input, extra) => {
+      void extra;
+      return adapter.storeWelcome(input);
+    }),
   );
 
   server.registerTool(
@@ -498,7 +657,9 @@ export function registerCoordinatorMethods(
       inputSchema: postGroupMessageInputSchema,
       outputSchema: postGroupMessageOutputSchema,
     },
-    (input, extra) => adapter.postGroupMessage(input, extra),
+    withRateLimit(COORDINATOR_METHODS.postGroupMessage, (input, extra) =>
+      adapter.postGroupMessage(input, extra),
+    ),
   );
 
   server.registerTool(
@@ -509,7 +670,10 @@ export function registerCoordinatorMethods(
       inputSchema: fetchGroupMessagesInputSchema,
       outputSchema: fetchGroupMessagesOutputSchema,
     },
-    (input) => adapter.fetchGroupMessages(input),
+    withRateLimit(COORDINATOR_METHODS.fetchGroupMessages, (input, extra) => {
+      void extra;
+      return adapter.fetchGroupMessages(input);
+    }),
   );
 
   server.registerTool(
@@ -520,6 +684,8 @@ export function registerCoordinatorMethods(
       inputSchema: subscribeGroupMessagesInputSchema,
       outputSchema: subscribeGroupMessagesOutputSchema,
     },
-    (input, extra) => adapter.subscribeGroupMessages(input, extra),
+    withRateLimit(COORDINATOR_METHODS.subscribeGroupMessages, (input, extra) =>
+      adapter.subscribeGroupMessages(input, extra),
+    ),
   );
 }

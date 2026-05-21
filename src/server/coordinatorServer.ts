@@ -6,6 +6,7 @@ import {
 import { createCoordinator, Coordinator } from "../coordinator/coordinator.ts";
 import {
   CoordinatorAdapter,
+  type AbuseProtectionOptions,
   type ResolveRequestEvent,
   registerCoordinatorMethods,
 } from "./coordinatorMethods.ts";
@@ -19,13 +20,18 @@ export function getDefaultRelayUrls(): string[] {
 export function createServer(
   coordinator?: Coordinator,
   resolveRequestEvent?: ResolveRequestEvent,
+  abuseProtection?: AbuseProtectionOptions,
 ): {
   coordinator: Coordinator;
   adapter: CoordinatorAdapter;
   server: McpServer;
 } {
   const _coordinator = coordinator ?? createCoordinator();
-  const adapter = new CoordinatorAdapter(_coordinator, resolveRequestEvent);
+  const adapter = new CoordinatorAdapter(
+    _coordinator,
+    resolveRequestEvent,
+    abuseProtection,
+  );
   const server = new McpServer({
     name: "cordn-server",
     version: "0.1.0",
@@ -37,7 +43,10 @@ export function createServer(
 }
 
 export async function connectServer(
-  params: NostrServerTransportOptions & { coordinator?: Coordinator },
+  params: NostrServerTransportOptions & {
+    coordinator?: Coordinator;
+    abuseProtection?: AbuseProtectionOptions;
+  },
 ): Promise<
   ReturnType<typeof createServer> & {
     transport: NostrServerTransport;
@@ -64,6 +73,7 @@ export async function connectServer(
   const instanceWithResolver = createServer(
     params.coordinator,
     resolveRequestEvent,
+    params.abuseProtection,
   );
 
   await instanceWithResolver.server.connect(transport);

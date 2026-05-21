@@ -27,6 +27,19 @@ export interface ServerRuntimeConfig {
   };
   isAnnouncedServer: boolean;
   storage: StorageConfig;
+  abuseProtection: {
+    rateLimit: {
+      enabled: boolean;
+      refillPerMinute: number;
+      burst: number;
+      idleTtlMs: number;
+    };
+    keyPackageQuota: {
+      maxPerIdentity: number;
+      maxLastResortPerIdentity: number;
+    };
+    logRejections: boolean;
+  };
 }
 
 function parseEnvAssignment(line: string): [string, string] | null {
@@ -111,13 +124,26 @@ function readOptionalBooleanEnv(
   throw new Error(`Invalid boolean environment variable: ${name}`);
 }
 
+function readPositiveIntegerEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  defaultValue: number,
+): number {
+  const value = readOptionalStringEnv(env, name);
+  if (!value) {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`Invalid integer environment variable: ${name}`);
+  }
+
+  return parsed;
+}
+
 function readRequiredSigner(env: NodeJS.ProcessEnv): PrivateKeySigner {
   const privateKey = readOptionalStringEnv(env, "CORDN_SERVER_PRIVATE_KEY");
-  if (!privateKey) {
-    throw new Error(
-      "Missing required environment variable: CORDN_SERVER_PRIVATE_KEY",
-    );
-  }
 
   return new PrivateKeySigner(privateKey);
 }
@@ -170,6 +196,38 @@ export function readServerRuntimeConfig(
     },
     isAnnouncedServer: readOptionalBooleanEnv(env, "CORDN_ANNOUNCED") ?? false,
     storage: readStorageConfig(env),
+    abuseProtection: {
+      rateLimit: {
+        enabled:
+          readOptionalBooleanEnv(env, "CORDN_RATE_LIMIT_ENABLED") ?? true,
+        refillPerMinute: readPositiveIntegerEnv(
+          env,
+          "CORDN_RATE_LIMIT_REFILL_PER_MINUTE",
+          250,
+        ),
+        burst: readPositiveIntegerEnv(env, "CORDN_RATE_LIMIT_BURST", 80),
+        idleTtlMs:
+          readPositiveIntegerEnv(
+            env,
+            "CORDN_RATE_LIMIT_IDLE_TTL_SECONDS",
+            3600,
+          ) * 1000,
+      },
+      keyPackageQuota: {
+        maxPerIdentity: readPositiveIntegerEnv(
+          env,
+          "CORDN_MAX_KEY_PACKAGES_PER_IDENTITY",
+          50,
+        ),
+        maxLastResortPerIdentity: readPositiveIntegerEnv(
+          env,
+          "CORDN_MAX_LAST_RESORT_KEY_PACKAGES_PER_IDENTITY",
+          1,
+        ),
+      },
+      logRejections:
+        readOptionalBooleanEnv(env, "CORDN_LOG_ABUSE_REJECTIONS") ?? true,
+    },
   };
 }
 

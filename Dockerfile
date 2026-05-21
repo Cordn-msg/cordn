@@ -25,8 +25,7 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV CORDN_STORAGE_BACKEND=sqlite
-ENV CORDN_SQLITE_PATH=/data/cordn.sqlite
+ENV CORDN_STORAGE_BACKEND=memory
 
 RUN corepack enable \
   && groupadd --system cordn \

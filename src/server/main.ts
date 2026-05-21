@@ -12,6 +12,7 @@ async function main(): Promise<void> {
 
   await connectServer({
     coordinator: createConfiguredCoordinator(runtime.storage),
+    abuseProtection: runtime.abuseProtection,
     signer: runtime.signer,
     relayHandler: new ApplesauceRelayPool(runtime.relayUrls),
     serverInfo: runtime.serverInfo,

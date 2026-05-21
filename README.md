@@ -36,7 +36,7 @@ The reference client logic in [`src/cli/`](src/cli/) is intentionally opinionate
 
 These rules are documented in more detail in [`src/cli/README.md`](src/cli/README.md:54).
 
-## Run the server
+## Run the server locally
 
 Start the runnable entrypoint:
 
@@ -46,4 +46,108 @@ pnpm run dev
 
 Runtime configuration is loaded from [`.env.example`](.env.example) keys using the `CORDN_` prefix, including `CORDN_SERVER_PRIVATE_KEY`, `CORDN_RELAY_URLS`, `CORDN_STORAGE_BACKEND`, and `CORDN_SQLITE_PATH`.
 
+Basic anti-abuse protection is enabled by default in [`src/server/`](src/server/) with a homogeneous token bucket keyed by injected client pubkey. Operators can tune it with `CORDN_RATE_LIMIT_ENABLED`, `CORDN_RATE_LIMIT_REFILL_PER_MINUTE`, `CORDN_RATE_LIMIT_BURST`, and `CORDN_RATE_LIMIT_IDLE_TTL_SECONDS`.
+
+Key package storage quotas are also configurable per stable identity. `CORDN_MAX_KEY_PACKAGES_PER_IDENTITY` limits the total number of published key packages per identity, and `CORDN_MAX_LAST_RESORT_KEY_PACKAGES_PER_IDENTITY` limits retained last-resort key packages. When the last-resort quota is reached, publishing a new last-resort key package replaces the oldest retained one instead of failing.
+
 The runnable server enables both CEP-22 oversized transfer and CEP-41 open streams in [`connectServer()`](src/server/coordinatorServer.ts:40).
+
+## Deploy with Docker
+
+The recommended deployment story is Docker, using the published container image from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/cordn-msg/cordn:latest
+docker run --rm \
+  -e CORDN_SERVER_PRIVATE_KEY=<your-64-hex-private-key> \
+  ghcr.io/cordn-msg/cordn:latest
+```
+
+### Quick local test
+
+The most minimal run is:
+
+```bash
+docker run --rm ghcr.io/cordn-msg/cordn:latest
+```
+
+That starts the bundled server entrypoint from [`dist/main.js`](dist/). If no `CORDN_SERVER_PRIVATE_KEY` is provided, the server generates a fresh key for that process only. Because this command is ephemeral and does not provide persistent key material, the generated key is not preserved across restarts.
+
+For a repeatable local test, provide your own key explicitly:
+
+```bash
+docker run --rm \
+  -e CORDN_SERVER_PRIVATE_KEY=<your-64-hex-private-key> \
+  -e CORDN_ANNOUNCED=false \
+  ghcr.io/cordn-msg/cordn:latest
+```
+
+By default, the container now uses in-memory storage through [`CORDN_STORAGE_BACKEND=memory`](Dockerfile:28). That keeps quick local runs simple and avoids creating SQLite state unless you opt into it.
+
+### Persistent deployment
+
+For a persistent deployment, switch the container to SQLite storage and mount `/data`:
+
+```bash
+docker run -d \
+  --name cordn \
+  --restart unless-stopped \
+  -v cordn-data:/data \
+  -e CORDN_SERVER_PRIVATE_KEY=<your-64-hex-private-key> \
+  -e CORDN_STORAGE_BACKEND=sqlite \
+  -e CORDN_SQLITE_PATH=/data/cordn.sqlite \
+  -e CORDN_RELAY_URLS=wss://relay.contextvm.org \
+  -e CORDN_ANNOUNCED=true \
+  -e CORDN_SERVER_NAME=cordn-server \
+  ghcr.io/cordn-msg/cordn:latest
+```
+
+Recommended minimum environment variables:
+
+- `CORDN_SERVER_PRIVATE_KEY`: required server signing key
+- `CORDN_RELAY_URLS`: comma-separated relay list
+- `CORDN_ANNOUNCED`: set to `true` for a publicly announced server
+- `CORDN_SERVER_NAME`: optional human-readable name
+
+Useful persistence and runtime defaults from [`Dockerfile`](Dockerfile):
+
+- [`CORDN_STORAGE_BACKEND=memory`](Dockerfile:28)
+- [`VOLUME ["/data"]`](Dockerfile:43)
+
+For persistent deployments, override storage with `CORDN_STORAGE_BACKEND=sqlite` and set `CORDN_SQLITE_PATH=/data/cordn.sqlite`.
+
+### Example with additional abuse-protection tuning
+
+```bash
+docker run -d \
+  --name cordn \
+  --restart unless-stopped \
+  -v cordn-data:/data \
+  -e CORDN_SERVER_PRIVATE_KEY=<your-64-hex-private-key> \
+  -e CORDN_STORAGE_BACKEND=sqlite \
+  -e CORDN_SQLITE_PATH=/data/cordn.sqlite \
+  -e CORDN_ANNOUNCED=true \
+  -e CORDN_RATE_LIMIT_REFILL_PER_MINUTE=250 \
+  -e CORDN_RATE_LIMIT_BURST=80 \
+  -e CORDN_MAX_KEY_PACKAGES_PER_IDENTITY=50 \
+  -e CORDN_MAX_LAST_RESORT_KEY_PACKAGES_PER_IDENTITY=1 \
+  ghcr.io/cordn-msg/cordn:latest
+```
+
+### Updating the deployment
+
+To update to the newest published image:
+
+```bash
+docker pull ghcr.io/cordn-msg/cordn:latest
+docker stop cordn && docker rm cordn
+docker run -d \
+  --name cordn \
+  --restart unless-stopped \
+  -v cordn-data:/data \
+  -e CORDN_SERVER_PRIVATE_KEY=<your-64-hex-private-key> \
+  -e CORDN_STORAGE_BACKEND=sqlite \
+  -e CORDN_SQLITE_PATH=/data/cordn.sqlite \
+  -e CORDN_ANNOUNCED=true \
+  ghcr.io/cordn-msg/cordn:latest
+```
