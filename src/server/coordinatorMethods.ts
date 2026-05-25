@@ -205,8 +205,8 @@ export class CoordinatorAdapter {
     this.abuseProtection = abuseProtection ?? {
       rateLimit: {
         enabled: true,
-        refillPerMinute: 250,
-        burst: 80,
+        refillPerMinute: 500,
+        burst: 160,
         idleTtlMs: 3_600_000,
       },
       keyPackageQuota: {

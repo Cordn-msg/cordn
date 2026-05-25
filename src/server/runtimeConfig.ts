@@ -203,9 +203,9 @@ export function readServerRuntimeConfig(
         refillPerMinute: readPositiveIntegerEnv(
           env,
           "CORDN_RATE_LIMIT_REFILL_PER_MINUTE",
-          250,
+          500,
         ),
-        burst: readPositiveIntegerEnv(env, "CORDN_RATE_LIMIT_BURST", 80),
+        burst: readPositiveIntegerEnv(env, "CORDN_RATE_LIMIT_BURST", 160),
         idleTtlMs:
           readPositiveIntegerEnv(
             env,
