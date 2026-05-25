@@ -21,6 +21,7 @@ import {
 import { CoordinatorAdapter } from "./coordinatorMethods.ts";
 import { decodeBase64 } from "./base64.ts";
 import { encodeBase64 } from "./base64.ts";
+import type { ServerLogger } from "./logger.ts";
 
 const TEST_ABUSE_PROTECTION = {
   rateLimit: {
@@ -89,6 +90,36 @@ function createExtra(clientPubkey?: string, requestEventId?: string) {
         }
       : {},
   } as never;
+}
+
+function createTestLogger(): {
+  logger: ServerLogger;
+  entries: Array<{
+    level: "info" | "warn" | "error";
+    bindings: Record<string, unknown>;
+    message: string;
+  }>;
+} {
+  const entries: Array<{
+    level: "info" | "warn" | "error";
+    bindings: Record<string, unknown>;
+    message: string;
+  }> = [];
+
+  return {
+    entries,
+    logger: {
+      info(bindings, message) {
+        entries.push({ level: "info", bindings, message });
+      },
+      warn(bindings, message) {
+        entries.push({ level: "warn", bindings, message });
+      },
+      error(bindings, message) {
+        entries.push({ level: "error", bindings, message });
+      },
+    },
+  };
 }
 
 describe("CoordinatorAdapter", () => {
@@ -274,7 +305,7 @@ describe("CoordinatorAdapter", () => {
         },
         createExtra(),
       ),
-    ).rejects.toThrowError("Missing injected client pubkey");
+    ).rejects.toThrow("Missing injected client pubkey");
   });
 
   test("rejects invalid base64 and malformed payloads", async () => {
@@ -290,7 +321,7 @@ describe("CoordinatorAdapter", () => {
         },
         createExtra(alice.actor.stablePubkey),
       ),
-    ).rejects.toThrowError("Invalid kp_64");
+    ).rejects.toThrow("Invalid kp_64");
 
     expect(() =>
       adapter.postGroupMessage(
@@ -299,7 +330,7 @@ describe("CoordinatorAdapter", () => {
         },
         createExtra(alice.actor.stablePubkey),
       ),
-    ).toThrowError("Invalid msg_64");
+    ).toThrow("Unable to decode MLS message");
   });
 
   test("round-trips welcomes and queued group messages as base64 structured outputs", async () => {
@@ -532,6 +563,87 @@ describe("CoordinatorAdapter", () => {
     expect(abortedReason).toBe("user requested stop");
   });
 
+  test("subscribes before backlog fetch to preserve messages posted during setup", async () => {
+    const coordinator = new Coordinator();
+    const alice = await createMemberArtifacts(createActor("alice-race-free"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-race-free"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+
+    const firstMessage = await createApplicationMessageBytes({
+      state: aliceState,
+      plaintext: "seed",
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: firstMessage.encodedMessage,
+    });
+
+    let secondMessageBytes: Uint8Array | null = null;
+    const originalFetchGroupMessages =
+      coordinator.fetchGroupMessages.bind(coordinator);
+    coordinator.fetchGroupMessages = ((input) => {
+      if (input.groupId === "group-race-free" && secondMessageBytes) {
+        coordinator.postGroupMessage({
+          ephemeralSenderPubkey: alice.actor.stablePubkey,
+          opaqueMessage: secondMessageBytes,
+        });
+        secondMessageBytes = null;
+      }
+
+      return originalFetchGroupMessages(input);
+    }) as typeof coordinator.fetchGroupMessages;
+
+    const secondMessage = await createApplicationMessageBytes({
+      state: firstMessage.newState,
+      plaintext: "during setup",
+    });
+    secondMessageBytes = secondMessage.encodedMessage;
+
+    const adapter = new CoordinatorAdapter(coordinator);
+    const writtenChunks: string[] = [];
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(data: string) {
+        writtenChunks.push(data);
+        if (writtenChunks.length >= 2) {
+          this.isActive = false;
+        }
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort() {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeGroupMessages(
+      {
+        gid: "group-race-free",
+        after: 0,
+      },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await stream.abort();
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: { subscribed: true },
+    });
+    expect(writtenChunks).toHaveLength(2);
+    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({ cursor: 1 });
+    expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({ cursor: 2 });
+  });
+
   test("rejects requests once the token bucket burst is exhausted", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator, undefined, {
@@ -563,6 +675,51 @@ describe("CoordinatorAdapter", () => {
         "kp_list",
       ),
     ).toThrow("Rate limit exceeded");
+  });
+
+  test("logs rate limit rejections through the injected logger", async () => {
+    const coordinator = new Coordinator();
+    const { logger, entries } = createTestLogger();
+    const adapter = new CoordinatorAdapter(
+      coordinator,
+      undefined,
+      {
+        ...TEST_ABUSE_PROTECTION,
+        rateLimit: {
+          enabled: true,
+          refillPerMinute: 0,
+          burst: 1,
+          idleTtlMs: 3_600_000,
+        },
+        logRejections: true,
+      },
+      logger,
+    );
+    const alice = await createMemberArtifacts(
+      createActor("alice-rate-limit-log"),
+    );
+
+    adapter.assertWithinRateLimit(
+      createExtra(alice.actor.stablePubkey),
+      "kp_list",
+    );
+
+    expect(() =>
+      adapter.assertWithinRateLimit(
+        createExtra(alice.actor.stablePubkey),
+        "kp_list",
+      ),
+    ).toThrow("Rate limit exceeded");
+
+    expect(entries).toContainEqual({
+      level: "warn",
+      message: "cordn abuse protection rejection",
+      bindings: {
+        type: "rate_limit",
+        method: "kp_list",
+        clientPubkey: `${alice.actor.stablePubkey.slice(0, 12)}…`,
+      },
+    });
   });
 
   test("replaces the previous last-resort key package for the same identity", async () => {
@@ -680,6 +837,6 @@ describe("CoordinatorAdapter", () => {
         },
         createExtra(bob.actor.stablePubkey, secondEvent.id),
       ),
-    ).rejects.toThrowError("Key package quota exceeded");
+    ).rejects.toThrow("Key package quota exceeded");
   });
 });

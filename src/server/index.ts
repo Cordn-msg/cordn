@@ -21,4 +21,5 @@ export {
   createServer,
   getDefaultRelayUrls,
 } from "./coordinatorServer.ts";
+export { consoleServerLogger, type ServerLogger } from "./logger.ts";
 export { decodeBase64, encodeBase64 } from "./base64.ts";

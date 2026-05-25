@@ -10,6 +10,7 @@ import {
   type ResolveRequestEvent,
   registerCoordinatorMethods,
 } from "./coordinatorMethods.ts";
+import { consoleServerLogger, type ServerLogger } from "./logger.ts";
 
 const DEFAULT_RELAY_URLS = ["wss://relay.contextvm.org"];
 
@@ -21,6 +22,7 @@ export function createServer(
   coordinator?: Coordinator,
   resolveRequestEvent?: ResolveRequestEvent,
   abuseProtection?: AbuseProtectionOptions,
+  logger: ServerLogger = consoleServerLogger,
 ): {
   coordinator: Coordinator;
   adapter: CoordinatorAdapter;
@@ -31,6 +33,7 @@ export function createServer(
     _coordinator,
     resolveRequestEvent,
     abuseProtection,
+    logger,
   );
   const server = new McpServer({
     name: "cordn-server",
@@ -46,6 +49,7 @@ export async function connectServer(
   params: NostrServerTransportOptions & {
     coordinator?: Coordinator;
     abuseProtection?: AbuseProtectionOptions;
+    logger?: ServerLogger;
   },
 ): Promise<
   ReturnType<typeof createServer> & {
@@ -74,6 +78,7 @@ export async function connectServer(
     params.coordinator,
     resolveRequestEvent,
     params.abuseProtection,
+    params.logger ?? consoleServerLogger,
   );
 
   await instanceWithResolver.server.connect(transport);

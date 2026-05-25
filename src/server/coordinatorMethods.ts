@@ -10,7 +10,6 @@ import type { z } from "zod";
 import {
   isDefaultCredential,
   keyPackageDecoder,
-  mlsMessageDecoder,
   type KeyPackage,
   type Welcome,
 } from "ts-mls";
@@ -45,6 +44,7 @@ import {
   TokenBucketRateLimiter,
   type TokenBucketRateLimitConfig,
 } from "./rateLimit.ts";
+import { consoleServerLogger, type ServerLogger } from "./logger.ts";
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 export type ResolveRequestEvent = (requestEventId: string) => NostrEvent | null;
@@ -87,9 +87,7 @@ function encodeWelcomeBase64(welcome: Welcome): string {
 
 function decodeOpaqueMessageBase64(msg_64: string): Uint8Array {
   try {
-    const bytes = assertNonEmptyBase64(msg_64, "msg_64");
-    decodeExact(bytes, mlsMessageDecoder, "msg_64");
-    return bytes;
+    return assertNonEmptyBase64(msg_64, "msg_64");
   } catch {
     throw new Error("Invalid msg_64");
   }
@@ -193,11 +191,14 @@ export class CoordinatorAdapter {
   private readonly resolveRequestEvent?: ResolveRequestEvent;
   private readonly rateLimiter: TokenBucketRateLimiter;
   private readonly abuseProtection: AbuseProtectionOptions;
+  private readonly logger: ServerLogger;
+  private readonly metrics = new Map<string, number>();
 
   constructor(
     coordinator: Coordinator,
     resolveRequestEvent?: ResolveRequestEvent,
     abuseProtection?: AbuseProtectionOptions,
+    logger: ServerLogger = consoleServerLogger,
   ) {
     this.coordinator = coordinator;
     this.resolveRequestEvent = resolveRequestEvent;
@@ -217,6 +218,16 @@ export class CoordinatorAdapter {
     this.rateLimiter = new TokenBucketRateLimiter(
       this.abuseProtection.rateLimit,
     );
+    this.logger = logger;
+  }
+
+  private recordOperation(methodName: string): void {
+    const count = (this.metrics.get(methodName) ?? 0) + 1;
+    this.metrics.set(methodName, count);
+    this.logger.info(
+      { type: "operation", method: methodName, count },
+      "cordn operation",
+    );
   }
 
   assertWithinRateLimit(extra: ToolExtra, methodName: string): void {
@@ -226,11 +237,14 @@ export class CoordinatorAdapter {
     }
 
     if (this.abuseProtection.logRejections) {
-      console.warn("cordn abuse protection rejection", {
-        type: "rate_limit",
-        method: methodName,
-        clientPubkey: `${clientPubkey.slice(0, 12)}…`,
-      });
+      this.logger.warn(
+        {
+          type: "rate_limit",
+          method: methodName,
+          clientPubkey: `${clientPubkey.slice(0, 12)}…`,
+        },
+        "cordn abuse protection rejection",
+      );
     }
 
     throw new Error("Rate limit exceeded");
@@ -300,11 +314,14 @@ export class CoordinatorAdapter {
       return;
     }
 
-    console.warn("cordn abuse protection rejection", {
-      type: "key_package_quota",
-      reason,
-      clientPubkey: `${clientPubkey.slice(0, 12)}…`,
-    });
+    this.logger.warn(
+      {
+        type: "key_package_quota",
+        reason,
+        clientPubkey: `${clientPubkey.slice(0, 12)}…`,
+      },
+      "cordn abuse protection rejection",
+    );
   }
 
   async publishKeyPackage(
@@ -336,6 +353,8 @@ export class CoordinatorAdapter {
       publicationEvent,
     });
 
+    this.recordOperation("publishKeyPackage");
+
     return {
       content: [],
       structuredContent: {
@@ -349,6 +368,8 @@ export class CoordinatorAdapter {
   consumeKeyPackage(input: z.infer<typeof consumeKeyPackageInputSchema>) {
     // no extra available here; enforced in registration wrapper
     const record = this.coordinator.consumeKeyPackage(input.id);
+
+    this.recordOperation("consumeKeyPackage");
 
     return {
       content: [],
@@ -398,6 +419,8 @@ export class CoordinatorAdapter {
       return record;
     });
 
+    this.recordOperation("removeKeyPackages");
+
     return {
       content: [],
       structuredContent: {
@@ -439,6 +462,8 @@ export class CoordinatorAdapter {
       welcome: decodeWelcomeBase64(input.welcome_64),
     });
 
+    this.recordOperation("storeWelcome");
+
     return {
       content: [],
       structuredContent: {
@@ -451,19 +476,41 @@ export class CoordinatorAdapter {
     input: z.infer<typeof postGroupMessageInputSchema>,
     extra: ToolExtra,
   ) {
-    const record = this.coordinator.postGroupMessage({
-      ephemeralSenderPubkey: requireClientPubkey(extra),
-      opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
-    });
+    const clientPubkey = requireClientPubkey(extra);
 
-    return {
-      content: [],
-      structuredContent: {
-        cursor: record.cursor,
-        gid: record.groupId,
-        at: record.createdAt,
-      },
-    };
+    try {
+      const record = this.coordinator.postGroupMessage({
+        ephemeralSenderPubkey: clientPubkey,
+        opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
+      });
+
+      this.recordOperation("postGroupMessage");
+
+      return {
+        content: [],
+        structuredContent: {
+          cursor: record.cursor,
+          gid: record.groupId,
+          at: record.createdAt,
+        },
+      };
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith("Rejected stale handshake")
+      ) {
+        this.logger.warn(
+          {
+            type: "stale_handshake",
+            clientPubkey: `${clientPubkey.slice(0, 12)}…`,
+            error: error.message,
+          },
+          "stale handshake rejected",
+        );
+      }
+
+      throw error;
+    }
   }
 
   fetchGroupMessages(input: z.infer<typeof fetchGroupMessagesInputSchema>) {
@@ -472,6 +519,8 @@ export class CoordinatorAdapter {
       groupId: input.gid,
       afterCursor: input.after,
     });
+
+    this.recordOperation("fetchGroupMessages");
 
     return {
       content: [],
@@ -486,18 +535,45 @@ export class CoordinatorAdapter {
     extra: ToolExtra,
   ) {
     const stream = getOpenStreamWriter(extra);
-    const backlog = this.coordinator.fetchGroupMessages({
-      groupId: input.gid,
+    const clientPubkey = extra._meta?.clientPubkey;
+    const groupId = input.gid;
+
+    const activeSubscriptions = this.coordinator.getActiveSubscriptionCount();
+
+    this.logger.info(
+      {
+        type: "subscription_start",
+        groupId,
+        activeSubscriptions,
+        clientPubkey:
+          typeof clientPubkey === "string" && clientPubkey.length > 0
+            ? `${clientPubkey.slice(0, 12)}…`
+            : undefined,
+      },
+      "group message subscription started",
+    );
+
+    const subscription = this.coordinator.subscribeGroupMessages({
+      groupId,
       afterCursor: input.after,
     });
-    const subscription = this.coordinator.subscribeGroupMessages({
-      groupId: input.gid,
+    const backlog = this.coordinator.fetchGroupMessages({
+      groupId,
       afterCursor: input.after,
     });
     let lastEmittedCursor = input.after ?? 0;
     const originalAbort = stream.abort.bind(stream);
 
     stream.abort = async (reason?: string): Promise<void> => {
+      this.logger.info(
+        {
+          type: "subscription_end",
+          groupId,
+          reason,
+          activeSubscriptions: this.coordinator.getActiveSubscriptionCount(),
+        },
+        "group message subscription ended",
+      );
       subscription.unsubscribe();
       await originalAbort(reason);
     };
@@ -537,6 +613,8 @@ export class CoordinatorAdapter {
       stream.abort = originalAbort;
       subscription.unsubscribe();
     }
+
+    this.recordOperation("subscribeGroupMessages");
 
     return {
       content: [],

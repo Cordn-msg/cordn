@@ -43,6 +43,24 @@ afterEach(() => {
   closers.clear();
 });
 
+function asSqliteInternals(storage: SqliteCoordinatorStorage): {
+  database: {
+    pragma: (sql: string, options?: { simple: boolean }) => unknown;
+    prepare: (sql: string) => {
+      all: () => Array<{ name: string }>;
+    };
+  };
+} {
+  return storage as unknown as {
+    database: {
+      pragma: (sql: string, options?: { simple: boolean }) => unknown;
+      prepare: (sql: string) => {
+        all: () => Array<{ name: string }>;
+      };
+    };
+  };
+}
+
 describe.each<StorageFixture>([
   {
     name: "in-memory",
@@ -53,6 +71,27 @@ describe.each<StorageFixture>([
     createStorage: () => new SqliteCoordinatorStorage({ path: ":memory:" }),
   },
 ])("Coordinator storage parity: $name", ({ createStorage }) => {
+  test("sqlite applies production pragmas and key package consume index", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+
+    if (!(storage instanceof SqliteCoordinatorStorage)) {
+      return;
+    }
+
+    const internals = asSqliteInternals(storage);
+    const busyTimeout = internals.database.pragma("busy_timeout", {
+      simple: true,
+    });
+    const indexes = internals.database
+      .prepare("PRAGMA index_list('key_packages')")
+      .all();
+
+    expect(busyTimeout).toBe(5000);
+    expect(indexes.map((index) => index.name)).toContain(
+      "idx_key_packages_identity_last_resort_order",
+    );
+  });
   test("publishes, lists, consumes, and snapshots key packages in FIFO order", async () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());

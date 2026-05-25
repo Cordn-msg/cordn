@@ -301,6 +301,14 @@ export class Coordinator {
     return this.storage.getGroupRouting(groupId);
   }
 
+  getActiveSubscriptionCount(): number {
+    let count = 0;
+    for (const subscribers of this.groupSubscribers.values()) {
+      count += subscribers.size;
+    }
+    return count;
+  }
+
   snapshot(): DeliveryServiceSnapshot {
     return this.storage.snapshot();
   }

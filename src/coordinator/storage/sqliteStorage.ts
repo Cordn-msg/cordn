@@ -58,7 +58,7 @@ interface GroupRoutingRow {
 }
 
 function toUint8Array(buffer: Buffer): Uint8Array {
-  return Uint8Array.from(buffer);
+  return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 }
 
 export class SqliteCoordinatorStorage implements CoordinatorStorage {
@@ -142,6 +142,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
 
     this.database.pragma("journal_mode = WAL");
     this.database.pragma("foreign_keys = ON");
+    this.database.pragma("busy_timeout = 5000");
 
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS key_packages (
@@ -156,6 +157,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
 
       CREATE INDEX IF NOT EXISTS idx_key_packages_identity_order
       ON key_packages (stable_pubkey, id);
+
+      CREATE INDEX IF NOT EXISTS idx_key_packages_identity_last_resort_order
+      ON key_packages (stable_pubkey, is_last_resort, id);
 
       CREATE TABLE IF NOT EXISTS welcomes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
