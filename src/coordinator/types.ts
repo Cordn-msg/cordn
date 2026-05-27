@@ -55,3 +55,9 @@ export interface FetchGroupMessagesInput {
 }
 
 export type SubscribeGroupMessagesInput = FetchGroupMessagesInput;
+
+export interface FetchManyGroupMessagesInput {
+  groups: FetchGroupMessagesInput[];
+}
+
+export type SubscribeManyGroupMessagesInput = FetchManyGroupMessagesInput;

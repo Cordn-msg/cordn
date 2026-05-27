@@ -1,4 +1,5 @@
 import type {
+  FetchManyGroupMessagesInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -52,6 +53,14 @@ export interface CoordinatorStorage {
    * cursor previously returned for that same group.
    */
   fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[];
+  /**
+   * Fetch messages for multiple groups while preserving independent per-group
+   * cursor semantics. Results must be ordered by input group order, then cursor
+   * ascending within each group.
+   */
+  fetchManyGroupMessages(
+    input: FetchManyGroupMessagesInput,
+  ): GroupMessageRecord[];
   getGroupRouting(groupId: string): GroupRoutingRecord | null;
   close?(): void;
 }

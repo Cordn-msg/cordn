@@ -858,14 +858,12 @@ describe("CoordinatorAdapter", () => {
     });
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);
     expect(
-      entries.find((entry) => entry.bindings.type === "multi_subscription_end")
+      entries.find((entry) => entry.bindings.type === "subscription_end")
         ?.bindings,
     ).toMatchObject({
       groupIds: ["group-abort-a", "group-abort-b"],
       groupCount: 2,
       reason: "user stop many",
-      backlogMessagesEmitted: 0,
-      liveMessagesEmitted: 0,
     });
   });
 

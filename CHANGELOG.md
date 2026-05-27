@@ -1,5 +1,13 @@
 # cordn
 
+## 0.1.5
+
+### Patch Changes
+
+- feat(coordinator): add multi-group subscription API with optimized message queue
+
+  Add `subscribeManyGroupMessages` and `fetchManyGroupMessages` APIs for subscribing to multiple groups through a single stream. Refactor AsyncMessageQueue to use index-based iteration with periodic memory cleanup instead of shift(), improving performance for long-running subscriptions. Includes new benchmark tool for comparing single vs multi-group subscription patterns.
+
 ## 0.1.4
 
 ### Patch Changes

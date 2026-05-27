@@ -7,6 +7,7 @@ import {
 } from "../../mlsCodec.ts";
 
 import type {
+  FetchManyGroupMessagesInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -117,6 +118,10 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     [string, number],
     GroupMessageRow
   >;
+  private readonly fetchManyGroupMessagesStatements = new Map<
+    number,
+    Database.Statement<unknown[], GroupMessageRow>
+  >();
   private readonly consumeKeyPackageByReferenceTransaction: (
     identifier: string,
   ) => KeyPackageRow | null;
@@ -484,6 +489,53 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
           );
 
     return rows.map((row) => this.mapGroupMessageRow(row));
+  }
+
+  fetchManyGroupMessages(
+    input: FetchManyGroupMessagesInput,
+  ): GroupMessageRecord[] {
+    if (input.groups.length === 0) {
+      return [];
+    }
+
+    const statement = this.getFetchManyGroupMessagesStatement(
+      input.groups.length,
+    );
+    const params = input.groups.flatMap((group, index) => [
+      index,
+      group.groupId,
+      group.afterCursor ?? 0,
+    ]);
+    const rows = statement.all(...params);
+
+    return rows.map((row) => this.mapGroupMessageRow(row));
+  }
+
+  private getFetchManyGroupMessagesStatement(
+    groupCount: number,
+  ): Database.Statement<unknown[], GroupMessageRow> {
+    const cached = this.fetchManyGroupMessagesStatements.get(groupCount);
+    if (cached) {
+      return cached;
+    }
+
+    const values = Array.from({ length: groupCount }, () => "(?, ?, ?)").join(
+      ", ",
+    );
+    const statement = this.database.prepare<unknown[], GroupMessageRow>(`
+        WITH requested(group_order, group_id, after_cursor) AS (
+          VALUES ${values}
+        )
+        SELECT gm.cursor, gm.group_id, gm.ephemeral_sender_pubkey, gm.opaque_message, gm.created_at
+        FROM requested r
+        JOIN group_messages gm
+          ON gm.group_id = r.group_id
+         AND gm.cursor > r.after_cursor
+        ORDER BY r.group_order ASC, gm.cursor ASC
+      `);
+
+    this.fetchManyGroupMessagesStatements.set(groupCount, statement);
+    return statement;
   }
 
   getGroupRouting(groupId: string): GroupRoutingRecord | null {

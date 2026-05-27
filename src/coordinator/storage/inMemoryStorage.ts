@@ -1,4 +1,5 @@
 import type {
+  FetchManyGroupMessagesInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -156,6 +157,12 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
     }
 
     return messages.slice(startIndex);
+  }
+
+  fetchManyGroupMessages(
+    input: FetchManyGroupMessagesInput,
+  ): GroupMessageRecord[] {
+    return input.groups.flatMap((group) => this.fetchGroupMessages(group));
   }
 
   getGroupRouting(groupId: string): GroupRoutingRecord | null {

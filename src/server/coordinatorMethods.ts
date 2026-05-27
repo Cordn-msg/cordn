@@ -662,20 +662,15 @@ export class CoordinatorAdapter {
       typeof clientPubkey === "string" && clientPubkey.length > 0
         ? `${clientPubkey.slice(0, 12)}…`
         : undefined;
-    const cursorsByGroup = new Map(
-      input.groups.map((group) => [group.gid, group.after ?? 0]),
-    );
-    const subscriptions = input.groups.map((group) => ({
-      group,
-      subscription: this.coordinator.subscribeGroupMessages({
+    const subscription = this.coordinator.subscribeManyGroupMessages({
+      groups: input.groups.map((group) => ({
         groupId: group.gid,
         afterCursor: group.after,
-      }),
-    }));
+      })),
+    });
     const originalAbort = stream.abort.bind(stream);
     let cleanedUp = false;
     let endLogged = false;
-    let liveError: unknown;
 
     this.logger.info(
       {
@@ -691,9 +686,7 @@ export class CoordinatorAdapter {
     const cleanupSubscriptions = (reason: string): void => {
       if (!cleanedUp) {
         cleanedUp = true;
-        for (const { subscription } of subscriptions) {
-          subscription.unsubscribe();
-        }
+        subscription.unsubscribe();
       }
 
       if (endLogged) {
@@ -719,62 +712,15 @@ export class CoordinatorAdapter {
       await originalAbort(reason);
     };
 
-    const livePump = async (
-      subscriptionEntry: (typeof subscriptions)[number],
-    ) => {
-      const { group, subscription } = subscriptionEntry;
-      for await (const record of subscription.messages) {
-        const lastEmittedCursor = cursorsByGroup.get(group.gid) ?? 0;
-        if (record.cursor <= lastEmittedCursor) {
-          continue;
-        }
-
-        await writeGroupMessage(stream, record);
-        cursorsByGroup.set(group.gid, record.cursor);
-      }
-    };
-
     try {
       await stream.start();
 
-      for (const { group } of subscriptions) {
-        const backlog = this.coordinator.fetchGroupMessages({
-          groupId: group.gid,
-          afterCursor: group.after,
-        });
-
-        for (const record of backlog) {
-          await writeGroupMessage(stream, record);
-          cursorsByGroup.set(group.gid, record.cursor);
+      for await (const record of subscription.messages) {
+        if (!stream.isActive) {
+          break;
         }
-      }
 
-      await Promise.race([
-        Promise.all(
-          subscriptions.map((subscriptionEntry) =>
-            livePump(subscriptionEntry).catch((error: unknown) => {
-              liveError = error;
-              cleanupSubscriptions(
-                error instanceof Error ? error.message : "stream error",
-              );
-              throw error;
-            }),
-          ),
-        ),
-        new Promise<void>((resolve) => {
-          const checkClosed = () => {
-            if (!stream.isActive) {
-              resolve();
-              return;
-            }
-            setTimeout(checkClosed, 10);
-          };
-          checkClosed();
-        }),
-      ]);
-
-      if (liveError) {
-        throw liveError;
+        await writeGroupMessage(stream, record);
       }
 
       if (stream.isActive) {

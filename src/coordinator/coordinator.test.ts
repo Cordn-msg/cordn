@@ -452,4 +452,93 @@ describe("Coordinator group message flow", () => {
       done: true,
     });
   });
+
+  test("multi-group subscription replays backlog and streams live messages through one iterator", async () => {
+    const coordinator = new Coordinator();
+
+    const alphaBacklog = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alpha-live-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const betaSkipped = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "beta-live-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-beta",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    const betaBacklog = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "beta-live-2",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-beta",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+
+    const subscription = coordinator.subscribeManyGroupMessages({
+      groups: [
+        { groupId: "group-alpha", afterCursor: 0 },
+        { groupId: "group-beta", afterCursor: betaSkipped.cursor },
+      ],
+    });
+    const iterator = subscription.messages[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { groupId: "group-alpha", cursor: alphaBacklog.cursor },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { groupId: "group-beta", cursor: betaBacklog.cursor },
+    });
+
+    const alphaLive = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alpha-live-2",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [4],
+      }),
+    });
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { groupId: "group-alpha", cursor: alphaLive.cursor },
+    });
+    expect(coordinator.getActiveSubscriptionCount()).toBe(2);
+
+    subscription.unsubscribe();
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+    await expect(iterator.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  test("multi-group subscription deduplicates repeated group registrations during cleanup", async () => {
+    const coordinator = new Coordinator();
+
+    const subscription = coordinator.subscribeManyGroupMessages({
+      groups: [
+        { groupId: "group-dup", afterCursor: 0 },
+        { groupId: "group-dup", afterCursor: 0 },
+      ],
+    });
+
+    expect(coordinator.getActiveSubscriptionCount()).toBe(1);
+
+    subscription.unsubscribe();
+
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
 });

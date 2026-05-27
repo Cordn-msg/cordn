@@ -1,6 +1,6 @@
 {
   "name": "cordn",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -21,6 +21,7 @@
     "client:cli": "node ./src/cli/main.ts",
     "server:start": "node ./src/server/main.ts",
     "test": "vitest run ./src",
+    "bench:sqlite-subscriptions": "node ./src/coordinator/storage/sqliteSubscriptionBenchmark.ts",
     "format": "prettier --write ./src ./tsconfig.json ./package.json ./README.md"
   },
   "devDependencies": {

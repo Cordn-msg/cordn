@@ -391,4 +391,61 @@ describe.each<StorageFixture>([
       }),
     ).toEqual([]);
   });
+
+  test("fetches many group messages with independent cursors in input group order", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alpha-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const betaFirst = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "beta-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-beta",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    const alphaSecond = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alpha-2",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+    const betaSecond = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "beta-2",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-beta",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [4],
+      }),
+    });
+
+    expect(
+      coordinator
+        .fetchManyGroupMessages({
+          groups: [
+            { groupId: "group-beta", afterCursor: betaFirst.cursor },
+            { groupId: "group-alpha", afterCursor: 1 },
+          ],
+        })
+        .map((message) => [message.groupId, message.cursor]),
+    ).toEqual([
+      ["group-beta", betaSecond.cursor],
+      ["group-alpha", alphaSecond.cursor],
+    ]);
+  });
 });

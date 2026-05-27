@@ -1,4 +1,5 @@
 import type {
+  FetchManyGroupMessagesInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -6,6 +7,7 @@ import type {
   PublishedKeyPackageRecord,
   PublishKeyPackageInput,
   SubscribeGroupMessagesInput,
+  SubscribeManyGroupMessagesInput,
   StoreWelcomeInput,
   WelcomeQueueRecord,
 } from "./types.ts";
@@ -80,6 +82,7 @@ function resolveLatestHandshakeEpoch(
 
 class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
   private readonly values: GroupMessageRecord[] = [];
+  private nextValueIndex = 0;
   private readonly waiters: Array<{
     resolve: (result: IteratorResult<GroupMessageRecord>) => void;
     reject: (error: unknown) => void;
@@ -106,7 +109,7 @@ class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
   }
 
   getDepth(): number {
-    return this.values.length;
+    return this.values.length - this.nextValueIndex;
   }
 
   getMaxDepth(): number {
@@ -138,10 +141,16 @@ class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
   [Symbol.asyncIterator](): AsyncIterator<GroupMessageRecord> {
     return {
       next: async (): Promise<IteratorResult<GroupMessageRecord>> => {
-        if (this.values.length > 0) {
-          const value = this.values.shift();
-          if (!value) {
-            throw new Error("Queue invariant violated");
+        if (this.nextValueIndex < this.values.length) {
+          const value = this.values[this.nextValueIndex]!;
+          this.nextValueIndex += 1;
+
+          if (
+            this.nextValueIndex > 1024 &&
+            this.nextValueIndex * 2 >= this.values.length
+          ) {
+            this.values.splice(0, this.nextValueIndex);
+            this.nextValueIndex = 0;
           }
 
           return { value, done: false };
@@ -174,10 +183,18 @@ interface GroupMessageSubscription {
   unsubscribe: () => void;
 }
 
+interface GroupMessageSubscriber {
+  push(record: GroupMessageRecord): void;
+  close(): void;
+}
+
 export class Coordinator {
   private readonly storage: CoordinatorStorage;
   private readonly now: () => number;
-  private readonly groupSubscribers = new Map<string, Set<AsyncMessageQueue>>();
+  private readonly groupSubscribers = new Map<
+    string,
+    Set<GroupMessageSubscriber>
+  >();
 
   constructor(options: CoordinatorOptions = {}) {
     this.storage = options.storage ?? new InMemoryCoordinatorStorage();
@@ -273,28 +290,97 @@ export class Coordinator {
     return this.storage.fetchGroupMessages(input);
   }
 
+  fetchManyGroupMessages(
+    input: FetchManyGroupMessagesInput,
+  ): GroupMessageRecord[] {
+    return this.storage.fetchManyGroupMessages(input);
+  }
+
   subscribeGroupMessages(
     input: SubscribeGroupMessagesInput,
   ): GroupMessageSubscription {
     const queue = new AsyncMessageQueue();
-    const subscribers = this.groupSubscribers.get(input.groupId) ?? new Set();
+    const subscriber: GroupMessageSubscriber = queue;
 
-    if (!this.groupSubscribers.has(input.groupId)) {
-      this.groupSubscribers.set(input.groupId, subscribers);
-    }
-
-    subscribers.add(queue);
+    this.addGroupSubscriber(input.groupId, subscriber);
 
     return {
       messages: queue,
       unsubscribe: () => {
-        queue.close();
-        subscribers.delete(queue);
-        if (subscribers.size === 0) {
-          this.groupSubscribers.delete(input.groupId);
+        subscriber.close();
+        this.removeGroupSubscriber(input.groupId, subscriber);
+      },
+    };
+  }
+
+  subscribeManyGroupMessages(
+    input: SubscribeManyGroupMessagesInput,
+  ): GroupMessageSubscription {
+    const queue = new AsyncMessageQueue();
+    const cursorsByGroup = new Map<string, number>();
+    for (const group of input.groups) {
+      cursorsByGroup.set(group.groupId, group.afterCursor ?? 0);
+    }
+    const groupIds = [...cursorsByGroup.keys()];
+    const subscriber: GroupMessageSubscriber = {
+      push: (record) => {
+        const lastEmittedCursor = cursorsByGroup.get(record.groupId) ?? 0;
+        if (record.cursor <= lastEmittedCursor) {
+          return;
+        }
+
+        cursorsByGroup.set(record.groupId, record.cursor);
+        queue.push(record);
+      },
+      close: () => queue.close(),
+    };
+
+    for (const groupId of groupIds) {
+      this.addGroupSubscriber(groupId, subscriber);
+    }
+
+    const backlog = this.fetchManyGroupMessages(input);
+    for (const record of backlog) {
+      subscriber.push(record);
+    }
+
+    return {
+      messages: queue,
+      unsubscribe: () => {
+        subscriber.close();
+        for (const groupId of groupIds) {
+          this.removeGroupSubscriber(groupId, subscriber);
         }
       },
     };
+  }
+
+  private addGroupSubscriber(
+    groupId: string,
+    subscriber: GroupMessageSubscriber,
+  ): void {
+    let subscribers = this.groupSubscribers.get(groupId);
+    if (!subscribers) {
+      subscribers = new Set();
+      this.groupSubscribers.set(groupId, subscribers);
+    }
+
+    subscribers.add(subscriber);
+  }
+
+  private removeGroupSubscriber(
+    groupId: string,
+    subscriber: GroupMessageSubscriber,
+  ): void {
+    const subscribers = this.groupSubscribers.get(groupId);
+    if (!subscribers) {
+      return;
+    }
+
+    subscribers.delete(subscriber);
+    if (subscribers.size === 0) {
+      this.groupSubscribers.delete(groupId);
+    }
   }
 
   private publishLiveGroupMessage(record: GroupMessageRecord): void {
