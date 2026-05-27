@@ -719,7 +719,9 @@ export class CoordinatorAdapter {
       await originalAbort(reason);
     };
 
-    const livePump = async (subscriptionEntry: (typeof subscriptions)[number]) => {
+    const livePump = async (
+      subscriptionEntry: (typeof subscriptions)[number],
+    ) => {
       const { group, subscription } = subscriptionEntry;
       for await (const record of subscription.messages) {
         const lastEmittedCursor = cursorsByGroup.get(group.gid) ?? 0;

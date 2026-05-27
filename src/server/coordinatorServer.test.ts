@@ -22,6 +22,7 @@ import { CoordinatorAdapter } from "./coordinatorMethods.ts";
 import { decodeBase64 } from "./base64.ts";
 import { encodeBase64 } from "./base64.ts";
 import type { ServerLogger } from "./logger.ts";
+import { subscribeManyGroupMessagesInputSchema } from "../contracts/index.ts";
 
 const TEST_ABUSE_PROTECTION = {
   rateLimit: {
@@ -803,7 +804,10 @@ describe("CoordinatorAdapter", () => {
     await expect(subscribePromise).resolves.toMatchObject({
       structuredContent: {
         subscribed: true,
-        groups: [firstPosted.structuredContent.gid, secondPosted.structuredContent.gid],
+        groups: [
+          firstPosted.structuredContent.gid,
+          secondPosted.structuredContent.gid,
+        ],
       },
     });
     expect(writtenChunks.map((chunk) => JSON.parse(chunk))).toMatchObject([
@@ -854,13 +858,117 @@ describe("CoordinatorAdapter", () => {
     });
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);
     expect(
-      entries.find((entry) => entry.bindings.type === "subscription_end")
+      entries.find((entry) => entry.bindings.type === "multi_subscription_end")
         ?.bindings,
     ).toMatchObject({
-        groupIds: ["group-abort-a", "group-abort-b"],
-        groupCount: 2,
-        reason: "user stop many",
-      });
+      groupIds: ["group-abort-a", "group-abort-b"],
+      groupCount: 2,
+      reason: "user stop many",
+      backlogMessagesEmitted: 0,
+      liveMessagesEmitted: 0,
+    });
+  });
+
+  test("multi-group subscription ignores messages from unsubscribed groups", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(
+      createActor("alice-many-isolate"),
+    );
+    const cipherSuite = await getTestCiphersuite();
+    const subscribedState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-many-isolate-a"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const otherState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-many-isolate-c"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+
+    const writtenChunks: string[] = [];
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(data: string) {
+        writtenChunks.push(data);
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeManyGroupMessages(
+      {
+        groups: [
+          { gid: "group-many-isolate-a" },
+          { gid: "group-many-isolate-b" },
+        ],
+      },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    expect(coordinator.getActiveSubscriptionCount()).toBe(2);
+
+    const otherMessage = await createApplicationMessageBytes({
+      state: otherState,
+      plaintext: "should not cross-talk",
+    });
+    adapter.postGroupMessage(
+      { msg_64: encodeBase64(otherMessage.encodedMessage) },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(writtenChunks).toHaveLength(0);
+
+    const subscribedMessage = await createApplicationMessageBytes({
+      state: subscribedState,
+      plaintext: "subscribed live",
+    });
+    const subscribedPosted = adapter.postGroupMessage(
+      { msg_64: encodeBase64(subscribedMessage.encodedMessage) },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await stream.abort("done isolation");
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: { subscribed: true },
+    });
+    expect(writtenChunks.map((chunk) => JSON.parse(chunk))).toMatchObject([
+      { gid: subscribedPosted.structuredContent.gid, cursor: 1 },
+    ]);
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
+  test("multi-group subscription schema rejects empty group lists and malformed entries", () => {
+    expect(() =>
+      subscribeManyGroupMessagesInputSchema.parse({ groups: [] }),
+    ).toThrow();
+    expect(() =>
+      subscribeManyGroupMessagesInputSchema.parse({ groups: [{ gid: "" }] }),
+    ).toThrow();
+    expect(() =>
+      subscribeManyGroupMessagesInputSchema.parse({
+        groups: [{ gid: "group", after: -1 }],
+      }),
+    ).toThrow();
+    expect(
+      subscribeManyGroupMessagesInputSchema.parse({
+        groups: [{ gid: "group", after: 1 }],
+      }),
+    ).toEqual({ groups: [{ gid: "group", after: 1 }] });
   });
 
   test("rejects requests once the token bucket burst is exhausted", async () => {
