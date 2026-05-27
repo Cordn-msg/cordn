@@ -20,6 +20,7 @@ export const COORDINATOR_METHODS = {
   postGroupMessage: "msg_post",
   fetchGroupMessages: "msg_fetch",
   subscribeGroupMessages: "msg_sub",
+  subscribeManyGroupMessages: "msg_sub_many",
 } as const;
 
 export const emptyInputSchema = z.object({});
@@ -126,6 +127,15 @@ export const subscribeGroupMessagesOutputSchema = z.object({
   subscribed: z.literal(true),
 });
 
+export const subscribeManyGroupMessagesInputSchema = z.object({
+  groups: z.array(fetchGroupMessagesInputSchema).min(1),
+});
+
+export const subscribeManyGroupMessagesOutputSchema = z.object({
+  subscribed: z.literal(true),
+  groups: z.array(z.string()),
+});
+
 export type PublishKeyPackageInput = z.infer<
   typeof publishKeyPackageInputSchema
 >;
@@ -173,6 +183,12 @@ export type SubscribeGroupMessagesInput = z.infer<
 >;
 export type SubscribeGroupMessagesOutput = z.infer<
   typeof subscribeGroupMessagesOutputSchema
+>;
+export type SubscribeManyGroupMessagesInput = z.infer<
+  typeof subscribeManyGroupMessagesInputSchema
+>;
+export type SubscribeManyGroupMessagesOutput = z.infer<
+  typeof subscribeManyGroupMessagesOutputSchema
 >;
 export type AvailableKeyPackage = z.infer<typeof availableKeyPackageSchema>;
 export type PendingWelcome = z.infer<typeof pendingWelcomeSchema>;

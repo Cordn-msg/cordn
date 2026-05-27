@@ -680,7 +680,7 @@ describe("CoordinatorAdapter", () => {
       async close() {
         this.isActive = false;
       },
-      async abort() {
+      async abort(_reason?: string) {
         this.isActive = false;
       },
     };
@@ -703,6 +703,164 @@ describe("CoordinatorAdapter", () => {
     expect(writtenChunks).toHaveLength(2);
     expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({ cursor: 1 });
     expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({ cursor: 2 });
+  });
+
+  test("multi-group subscription replays backlog with independent cursors and streams live messages", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-many-sub"));
+    const cipherSuite = await getTestCiphersuite();
+    const firstState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-many-sub-a"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const secondState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-many-sub-b"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+
+    const firstBacklog = await createApplicationMessageBytes({
+      state: firstState,
+      plaintext: "first backlog",
+    });
+    const secondSkipped = await createApplicationMessageBytes({
+      state: secondState,
+      plaintext: "second skipped",
+    });
+    const secondBacklog = await createApplicationMessageBytes({
+      state: secondSkipped.newState,
+      plaintext: "second backlog",
+    });
+
+    const firstPosted = adapter.postGroupMessage(
+      { msg_64: encodeBase64(firstBacklog.encodedMessage) },
+      createExtra(alice.actor.stablePubkey),
+    );
+    const secondSkippedPosted = adapter.postGroupMessage(
+      { msg_64: encodeBase64(secondSkipped.encodedMessage) },
+      createExtra(alice.actor.stablePubkey),
+    );
+    const secondPosted = adapter.postGroupMessage(
+      { msg_64: encodeBase64(secondBacklog.encodedMessage) },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    const writtenChunks: string[] = [];
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(data: string) {
+        writtenChunks.push(data);
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeManyGroupMessages(
+      {
+        groups: [
+          { gid: firstPosted.structuredContent.gid, after: 0 },
+          {
+            gid: secondPosted.structuredContent.gid,
+            after: secondSkippedPosted.structuredContent.cursor,
+          },
+        ],
+      },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(writtenChunks.map((chunk) => JSON.parse(chunk))).toMatchObject([
+      { gid: firstPosted.structuredContent.gid, cursor: 1 },
+      { gid: secondPosted.structuredContent.gid, cursor: 2 },
+    ]);
+
+    const firstLive = await createApplicationMessageBytes({
+      state: firstBacklog.newState,
+      plaintext: "first live",
+    });
+    const firstLivePosted = adapter.postGroupMessage(
+      { msg_64: encodeBase64(firstLive.encodedMessage) },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await stream.abort("stop multi");
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: {
+        subscribed: true,
+        groups: [firstPosted.structuredContent.gid, secondPosted.structuredContent.gid],
+      },
+    });
+    expect(writtenChunks.map((chunk) => JSON.parse(chunk))).toMatchObject([
+      { gid: firstPosted.structuredContent.gid, cursor: 1 },
+      { gid: secondPosted.structuredContent.gid, cursor: 2 },
+      { gid: firstLivePosted.structuredContent.gid, cursor: 2 },
+    ]);
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
+  test("multi-group subscription abort cleans up all child subscriptions", async () => {
+    const coordinator = new Coordinator();
+    const { logger, entries } = createTestLogger();
+    const adapter = new CoordinatorAdapter(
+      coordinator,
+      undefined,
+      undefined,
+      logger,
+    );
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write() {},
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeManyGroupMessages(
+      {
+        groups: [{ gid: "group-abort-a" }, { gid: "group-abort-b" }],
+      },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    expect(coordinator.getActiveSubscriptionCount()).toBe(2);
+    await stream.abort("user stop many");
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: {
+        subscribed: true,
+        groups: ["group-abort-a", "group-abort-b"],
+      },
+    });
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+    expect(
+      entries.find((entry) => entry.bindings.type === "subscription_end")
+        ?.bindings,
+    ).toMatchObject({
+        groupIds: ["group-abort-a", "group-abort-b"],
+        groupCount: 2,
+        reason: "user stop many",
+      });
   });
 
   test("rejects requests once the token bucket burst is exhausted", async () => {

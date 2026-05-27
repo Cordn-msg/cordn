@@ -17,6 +17,7 @@ Minimal MLS delivery service coordinator and ContextVM server adapter implemente
 - Group message cursors are monotonic per group, not global across all groups.
 - [`fetchGroupMessages({ groupId, afterCursor })`](src/coordinator/coordinator.ts:160) interprets `afterCursor` relative to the specified group only.
 - [`subscribeGroupMessages({ groupId, afterCursor })`](src/coordinator/coordinator.ts:265) uses the same per-group cursor model, replaying backlog first and then keeping the stream open for live delivery.
+- [`SubscribeManyGroupMessages`](src/cli/coordinatorClient.ts:371) opens one CEP-41 stream for multiple groups while preserving independent `afterCursor` semantics per group.
 - Storage backends must preserve parity for this behavior, including [`InMemoryCoordinatorStorage`](src/coordinator/storage/inMemoryStorage.ts:38) and [`SqliteCoordinatorStorage`](src/coordinator/storage/sqliteStorage.ts:104).
 - [`cordn`](package.json) supports last-resort MLS KeyPackages, deriving `isLastResort` from the KeyPackage extension rather than trusting an out-of-band publish flag.
 - Stable-identity KeyPackage consumption prefers regular KeyPackages first and falls back to last-resort KeyPackages without consuming them.
@@ -26,6 +27,8 @@ Active clients should prefer a fetch-then-subscribe flow:
 
 1. call [`FetchGroupMessages`](src/cli/coordinatorClient.ts:258) for bounded catch-up
 2. then call [`SubscribeGroupMessages`](src/cli/coordinatorClient.ts:269) from the freshest known cursor for CEP-41 live delivery
+
+Clients tracking many groups can use [`SubscribeManyGroupMessages`](src/cli/coordinatorClient.ts:371) after bounded catch-up to avoid opening one tool call per group. The stream emits the same group-message records as the single-group subscription, including `gid`, so clients should demultiplex by group and advance each local cursor independently.
 
 The reference client logic in [`src/cli/`](src/cli/) is intentionally opinionated about synchronization strategy:
 

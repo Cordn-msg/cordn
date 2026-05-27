@@ -35,6 +35,8 @@ import {
   removeKeyPackagesOutputSchema,
   storeWelcomeInputSchema,
   storeWelcomeOutputSchema,
+  subscribeManyGroupMessagesInputSchema,
+  subscribeManyGroupMessagesOutputSchema,
   subscribeGroupMessagesInputSchema,
   subscribeGroupMessagesOutputSchema,
 } from "../contracts/index.ts";
@@ -185,6 +187,13 @@ function mapGroupMessage(record: {
     msg_64: encodeBase64(record.opaqueMessage),
     at: record.createdAt,
   };
+}
+
+async function writeGroupMessage(
+  stream: OpenStreamWriter,
+  record: Parameters<typeof mapGroupMessage>[0],
+): Promise<void> {
+  await stream.write(JSON.stringify(mapGroupMessage(record)));
 }
 
 export class CoordinatorAdapter {
@@ -642,6 +651,158 @@ export class CoordinatorAdapter {
       },
     };
   }
+
+  async subscribeManyGroupMessages(
+    input: z.infer<typeof subscribeManyGroupMessagesInputSchema>,
+    extra: ToolExtra,
+  ) {
+    const stream = getOpenStreamWriter(extra);
+    const clientPubkey = extra._meta?.clientPubkey;
+    const clientPubkeyLabel =
+      typeof clientPubkey === "string" && clientPubkey.length > 0
+        ? `${clientPubkey.slice(0, 12)}…`
+        : undefined;
+    const cursorsByGroup = new Map(
+      input.groups.map((group) => [group.gid, group.after ?? 0]),
+    );
+    const subscriptions = input.groups.map((group) => ({
+      group,
+      subscription: this.coordinator.subscribeGroupMessages({
+        groupId: group.gid,
+        afterCursor: group.after,
+      }),
+    }));
+    const originalAbort = stream.abort.bind(stream);
+    let cleanedUp = false;
+    let endLogged = false;
+    let liveError: unknown;
+
+    this.logger.info(
+      {
+        type: "subscription_start",
+        groupIds: input.groups.map((group) => group.gid),
+        groupCount: input.groups.length,
+        activeSubscriptions: this.coordinator.getActiveSubscriptionCount(),
+        clientPubkey: clientPubkeyLabel,
+      },
+      "multi-group message subscription started",
+    );
+
+    const cleanupSubscriptions = (reason: string): void => {
+      if (!cleanedUp) {
+        cleanedUp = true;
+        for (const { subscription } of subscriptions) {
+          subscription.unsubscribe();
+        }
+      }
+
+      if (endLogged) {
+        return;
+      }
+
+      endLogged = true;
+      this.logger.info(
+        {
+          type: "subscription_end",
+          groupIds: input.groups.map((group) => group.gid),
+          groupCount: input.groups.length,
+          reason,
+          activeSubscriptions: this.coordinator.getActiveSubscriptionCount(),
+          clientPubkey: clientPubkeyLabel,
+        },
+        "multi-group message subscription ended",
+      );
+    };
+
+    stream.abort = async (reason?: string): Promise<void> => {
+      cleanupSubscriptions(reason ?? "abort");
+      await originalAbort(reason);
+    };
+
+    const livePump = async (subscriptionEntry: (typeof subscriptions)[number]) => {
+      const { group, subscription } = subscriptionEntry;
+      for await (const record of subscription.messages) {
+        const lastEmittedCursor = cursorsByGroup.get(group.gid) ?? 0;
+        if (record.cursor <= lastEmittedCursor) {
+          continue;
+        }
+
+        await writeGroupMessage(stream, record);
+        cursorsByGroup.set(group.gid, record.cursor);
+      }
+    };
+
+    try {
+      await stream.start();
+
+      for (const { group } of subscriptions) {
+        const backlog = this.coordinator.fetchGroupMessages({
+          groupId: group.gid,
+          afterCursor: group.after,
+        });
+
+        for (const record of backlog) {
+          await writeGroupMessage(stream, record);
+          cursorsByGroup.set(group.gid, record.cursor);
+        }
+      }
+
+      await Promise.race([
+        Promise.all(
+          subscriptions.map((subscriptionEntry) =>
+            livePump(subscriptionEntry).catch((error: unknown) => {
+              liveError = error;
+              cleanupSubscriptions(
+                error instanceof Error ? error.message : "stream error",
+              );
+              throw error;
+            }),
+          ),
+        ),
+        new Promise<void>((resolve) => {
+          const checkClosed = () => {
+            if (!stream.isActive) {
+              resolve();
+              return;
+            }
+            setTimeout(checkClosed, 10);
+          };
+          checkClosed();
+        }),
+      ]);
+
+      if (liveError) {
+        throw liveError;
+      }
+
+      if (stream.isActive) {
+        await stream.close();
+      }
+      cleanupSubscriptions("complete");
+    } catch (error) {
+      try {
+        await stream.abort(
+          error instanceof Error ? error.message : "Stream aborted",
+        );
+      } catch {
+        // Ignore secondary abort cleanup failures.
+      }
+      throw error;
+    } finally {
+      stream.abort = originalAbort;
+      cleanupSubscriptions("finally");
+    }
+
+    this.recordOperation("subscribeManyGroupMessages");
+
+    return {
+      content: [],
+      structuredContent: {
+        subscribed: true,
+        groups: input.groups.map((group) => group.gid),
+      },
+    };
+  }
 }
 
 export function registerCoordinatorMethods(
@@ -783,6 +944,20 @@ export function registerCoordinatorMethods(
     },
     withRateLimit(COORDINATOR_METHODS.subscribeGroupMessages, (input, extra) =>
       adapter.subscribeGroupMessages(input, extra),
+    ),
+  );
+
+  server.registerTool(
+    COORDINATOR_METHODS.subscribeManyGroupMessages,
+    {
+      description:
+        "Replay and stream MLS opaque group messages for multiple groups with independent optional cursors.",
+      inputSchema: subscribeManyGroupMessagesInputSchema,
+      outputSchema: subscribeManyGroupMessagesOutputSchema,
+    },
+    withRateLimit(
+      COORDINATOR_METHODS.subscribeManyGroupMessages,
+      (input, extra) => adapter.subscribeManyGroupMessages(input, extra),
     ),
   );
 }

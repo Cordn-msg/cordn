@@ -22,6 +22,7 @@ import {
   type PublishKeyPackageInput,
   publishKeyPackageOutputSchema,
   storeWelcomeOutputSchema,
+  subscribeManyGroupMessagesOutputSchema,
   subscribeGroupMessagesOutputSchema,
   type ConsumeKeyPackageOutput,
   type FetchGroupMessagesOutput,
@@ -36,6 +37,8 @@ import {
   type RemoveKeyPackagesOutput,
   type SubscribeGroupMessagesInput,
   type SubscribeGroupMessagesOutput,
+  type SubscribeManyGroupMessagesInput,
+  type SubscribeManyGroupMessagesOutput,
   type StoreWelcomeInput,
   type StoreWelcomeOutput,
   groupMessageSchema,
@@ -68,6 +71,13 @@ export type coordinatorClient = {
   SubscribeGroupMessages: (input: SubscribeGroupMessagesInput) => Promise<{
     stream: AsyncIterable<GroupMessage>;
     result: Promise<SubscribeGroupMessagesOutput>;
+    abort: (reason?: string) => Promise<void>;
+  }>;
+  SubscribeManyGroupMessages: (
+    input: SubscribeManyGroupMessagesInput,
+  ) => Promise<{
+    stream: AsyncIterable<GroupMessage>;
+    result: Promise<SubscribeManyGroupMessagesOutput>;
     abort: (reason?: string) => Promise<void>;
   }>;
 };
@@ -356,6 +366,46 @@ export class cordnClient implements coordinatorClient {
       stream,
       result: call.result.then((result) =>
         subscribeGroupMessagesOutputSchema.parse(result.structuredContent),
+      ),
+      abort: async (reason?: string) => {
+        try {
+          await call.abort(reason);
+        } catch {
+          return;
+        }
+      },
+    };
+  }
+
+  async SubscribeManyGroupMessages(
+    input: SubscribeManyGroupMessagesInput,
+  ): Promise<{
+    stream: AsyncIterable<GroupMessage>;
+    result: Promise<SubscribeManyGroupMessagesOutput>;
+    abort: (reason?: string) => Promise<void>;
+  }> {
+    await this.ephemeralConnected;
+
+    const call = await callToolStream<CallToolResult>({
+      client: this.ephemeralClient,
+      transport: this.ephemeralTransport,
+      name: COORDINATOR_METHODS.subscribeManyGroupMessages,
+      arguments: { ...input },
+    });
+    void call.stream.closed.catch(() => undefined);
+
+    const stream: AsyncIterable<GroupMessage> = {
+      async *[Symbol.asyncIterator]() {
+        for await (const chunk of call.stream) {
+          yield groupMessageSchema.parse(JSON.parse(chunk.value));
+        }
+      },
+    };
+
+    return {
+      stream,
+      result: call.result.then((result) =>
+        subscribeManyGroupMessagesOutputSchema.parse(result.structuredContent),
       ),
       abort: async (reason?: string) => {
         try {
