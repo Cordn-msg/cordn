@@ -1,5 +1,4 @@
 import type {
-  DeliveryServiceSnapshot,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -87,6 +86,7 @@ class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
   }> = [];
   private closed = false;
   private aborted: unknown = null;
+  private maxDepth = 0;
 
   push(value: GroupMessageRecord): void {
     if (this.closed || this.aborted) {
@@ -100,6 +100,17 @@ class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
     }
 
     this.values.push(value);
+    if (this.values.length > this.maxDepth) {
+      this.maxDepth = this.values.length;
+    }
+  }
+
+  getDepth(): number {
+    return this.values.length;
+  }
+
+  getMaxDepth(): number {
+    return this.maxDepth;
   }
 
   close(): void {
@@ -307,10 +318,6 @@ export class Coordinator {
       count += subscribers.size;
     }
     return count;
-  }
-
-  snapshot(): DeliveryServiceSnapshot {
-    return this.storage.snapshot();
   }
 }
 

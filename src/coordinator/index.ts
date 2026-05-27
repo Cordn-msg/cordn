@@ -7,7 +7,6 @@ export type {
 } from "./storage/storage.ts";
 export type { CoordinatorOptions } from "./coordinator.ts";
 export type {
-  DeliveryServiceSnapshot,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,

@@ -48,6 +48,7 @@ import { consoleServerLogger, type ServerLogger } from "./logger.ts";
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 export type ResolveRequestEvent = (requestEventId: string) => NostrEvent | null;
+const credentialIdentityDecoder = new TextDecoder();
 
 export interface AbuseProtectionOptions {
   rateLimit: TokenBucketRateLimitConfig;
@@ -119,7 +120,7 @@ function readStablePubkeyFromCredential(keyPackage: KeyPackage): string {
     throw new Error("Only BasicCredential key packages are supported");
   }
 
-  return new TextDecoder().decode(credential.identity);
+  return credentialIdentityDecoder.decode(credential.identity);
 }
 
 async function verifyPublishedKeyPackageBinding(params: {
@@ -177,13 +178,13 @@ function mapGroupMessage(record: {
   groupId: string;
   opaqueMessage: Uint8Array;
   createdAt: number;
-}) {
-  return groupMessageSchema.parse({
+}): z.infer<typeof groupMessageSchema> {
+  return {
     cursor: record.cursor,
     gid: record.groupId,
     msg_64: encodeBase64(record.opaqueMessage),
     at: record.createdAt,
-  });
+  };
 }
 
 export class CoordinatorAdapter {
@@ -538,21 +539,6 @@ export class CoordinatorAdapter {
     const clientPubkey = extra._meta?.clientPubkey;
     const groupId = input.gid;
 
-    const activeSubscriptions = this.coordinator.getActiveSubscriptionCount();
-
-    this.logger.info(
-      {
-        type: "subscription_start",
-        groupId,
-        activeSubscriptions,
-        clientPubkey:
-          typeof clientPubkey === "string" && clientPubkey.length > 0
-            ? `${clientPubkey.slice(0, 12)}…`
-            : undefined,
-      },
-      "group message subscription started",
-    );
-
     const subscription = this.coordinator.subscribeGroupMessages({
       groupId,
       afterCursor: input.after,
@@ -563,18 +549,50 @@ export class CoordinatorAdapter {
     });
     let lastEmittedCursor = input.after ?? 0;
     const originalAbort = stream.abort.bind(stream);
+    const clientPubkeyLabel =
+      typeof clientPubkey === "string" && clientPubkey.length > 0
+        ? `${clientPubkey.slice(0, 12)}…`
+        : undefined;
+    let cleanedUp = false;
+    let endLogged = false;
 
-    stream.abort = async (reason?: string): Promise<void> => {
+    this.logger.info(
+      {
+        type: "subscription_start",
+        groupId,
+        activeSubscriptions: this.coordinator.getActiveSubscriptionCount(),
+        clientPubkey: clientPubkeyLabel,
+      },
+      "group message subscription started",
+    );
+
+    const cleanupSubscription = (reason: string): void => {
+      if (cleanedUp) {
+        return;
+      }
+
+      cleanedUp = true;
+      subscription.unsubscribe();
+
+      if (endLogged) {
+        return;
+      }
+
+      endLogged = true;
       this.logger.info(
         {
           type: "subscription_end",
           groupId,
           reason,
           activeSubscriptions: this.coordinator.getActiveSubscriptionCount(),
+          clientPubkey: clientPubkeyLabel,
         },
         "group message subscription ended",
       );
-      subscription.unsubscribe();
+    };
+
+    stream.abort = async (reason?: string): Promise<void> => {
+      cleanupSubscription(reason ?? "abort");
       await originalAbort(reason);
     };
 
@@ -600,6 +618,7 @@ export class CoordinatorAdapter {
       if (stream.isActive) {
         await stream.close();
       }
+      cleanupSubscription("complete");
     } catch (error) {
       try {
         await stream.abort(
@@ -611,7 +630,7 @@ export class CoordinatorAdapter {
       throw error;
     } finally {
       stream.abort = originalAbort;
-      subscription.unsubscribe();
+      cleanupSubscription("finally");
     }
 
     this.recordOperation("subscribeGroupMessages");

@@ -14,7 +14,7 @@ import {
 } from "./testUtils.ts";
 
 describe("Coordinator key package flow", () => {
-  test("publishes, lists, consumes, and snapshots key packages in FIFO order", async () => {
+  test("publishes, lists, consumes, in FIFO order", async () => {
     const coordinator = new Coordinator();
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const stablePubkey = alice.actor.stablePubkey;
@@ -47,10 +47,6 @@ describe("Coordinator key package flow", () => {
     expect(listed).toHaveLength(2);
     expect(listed[0]?.keyPackageRef).toBe(firstRecord.keyPackageRef);
     expect(listed[1]?.keyPackageRef).toBe(secondRecord.keyPackageRef);
-    expect(coordinator.snapshot()).toMatchObject({
-      stableIdentities: 1,
-      publishedKeyPackages: 2,
-    });
 
     const consumedFirst = coordinator.consumeKeyPackage(stablePubkey);
     const consumedSecond = coordinator.consumeKeyPackage(stablePubkey);
@@ -60,10 +56,6 @@ describe("Coordinator key package flow", () => {
     expect(consumedSecond?.keyPackageRef).toBe(secondRecord.keyPackageRef);
     expect(consumedEmpty).toBeNull();
     expect(coordinator.listKeyPackagesForIdentity(stablePubkey)).toEqual([]);
-    expect(coordinator.snapshot()).toMatchObject({
-      stableIdentities: 0,
-      publishedKeyPackages: 0,
-    });
   });
 
   test("consumes an exact published key package by key package ref", async () => {
@@ -242,10 +234,6 @@ describe("Coordinator welcome flow", () => {
       welcome: secondFixture.welcome,
     });
 
-    expect(coordinator.snapshot()).toMatchObject({
-      pendingWelcomes: 2,
-    });
-
     const fetchedBob = coordinator.fetchPendingWelcomes(bob.actor.stablePubkey);
     const fetchedCarol = coordinator.fetchPendingWelcomes(
       carol.actor.stablePubkey,
@@ -265,9 +253,6 @@ describe("Coordinator welcome flow", () => {
     expect(coordinator.fetchPendingWelcomes(carol.actor.stablePubkey)).toEqual(
       [],
     );
-    expect(coordinator.snapshot()).toMatchObject({
-      pendingWelcomes: 0,
-    });
   });
 });
 
@@ -318,10 +303,6 @@ describe("Coordinator group message flow", () => {
 
     expect(fetchedAfterCursor).toHaveLength(1);
     expect(fetchedAfterCursor[0]?.cursor).toBe(secondMessage.cursor);
-    expect(coordinator.snapshot()).toMatchObject({
-      trackedGroups: 1,
-      queuedMessages: 2,
-    });
   });
 
   test("tracks handshake epochs and rejects stale handshake traffic", () => {

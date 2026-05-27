@@ -69,10 +69,6 @@ export class TokenBucketRateLimiter {
     return true;
   }
 
-  snapshotSize(): number {
-    return this.buckets.size;
-  }
-
   private evictIdleBuckets(now: number): void {
     if (this.idleTtlMs <= 0 || this.buckets.size === 0) {
       return;

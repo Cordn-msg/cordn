@@ -1,5 +1,4 @@
 import type {
-  DeliveryServiceSnapshot,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -161,30 +160,6 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   getGroupRouting(groupId: string): GroupRoutingRecord | null {
     return this.groups.get(groupId)?.routing ?? null;
-  }
-
-  snapshot(): DeliveryServiceSnapshot {
-    let publishedKeyPackages = 0;
-    for (const records of this.keyPackagesByIdentity.values()) {
-      publishedKeyPackages += records.length;
-    }
-
-    const pendingWelcomes = Array.from(this.welcomesByIdentity.values()).reduce(
-      (total, current) => total + current.length,
-      0,
-    );
-    let queuedMessages = 0;
-    for (const group of this.groups.values()) {
-      queuedMessages += group.messages.length;
-    }
-
-    return {
-      stableIdentities: this.keyPackagesByIdentity.size,
-      publishedKeyPackages,
-      pendingWelcomes,
-      trackedGroups: this.groups.size,
-      queuedMessages,
-    };
   }
 
   close(): void {}

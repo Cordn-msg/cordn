@@ -136,14 +136,6 @@ describe("Coordinator integration flow", () => {
         ),
       }),
     ).toThrow();
-
-    expect(coordinator.snapshot()).toEqual({
-      stableIdentities: 0,
-      publishedKeyPackages: 0,
-      pendingWelcomes: 0,
-      trackedGroups: 1,
-      queuedMessages: 3,
-    });
   });
 
   test("round-trips queued application messages through coordinator fetch and MLS processing", async () => {

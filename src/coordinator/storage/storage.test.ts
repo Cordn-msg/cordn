@@ -92,7 +92,7 @@ describe.each<StorageFixture>([
       "idx_key_packages_identity_last_resort_order",
     );
   });
-  test("publishes, lists, consumes, and snapshots key packages in FIFO order", async () => {
+  test("publishes, lists, consumes, in FIFO order", async () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     const coordinator = createCoordinatorWithStorage(storage);
@@ -138,10 +138,6 @@ describe.each<StorageFixture>([
     expect(consumedFirst?.keyPackageRef).toBe(firstRecord.keyPackageRef);
     expect(consumedSecond?.keyPackageRef).toBe(secondRecord.keyPackageRef);
     expect(consumedEmpty).toBeNull();
-    expect(coordinator.snapshot()).toMatchObject({
-      stableIdentities: 0,
-      publishedKeyPackages: 0,
-    });
   });
 
   test("keeps last-resort key packages after consume and supports explicit remove", async () => {
@@ -234,7 +230,6 @@ describe.each<StorageFixture>([
     expect(coordinator.fetchPendingWelcomes(carol.actor.stablePubkey)).toEqual(
       [],
     );
-    expect(coordinator.snapshot()).toMatchObject({ pendingWelcomes: 0 });
   });
 
   test("stores group messages, tracks routing, and rejects stale handshakes", () => {
@@ -273,10 +268,6 @@ describe.each<StorageFixture>([
       groupId: "group-local",
       latestHandshakeEpoch: 5n,
       lastMessageCursor: secondMessage.cursor,
-    });
-    expect(coordinator.snapshot()).toMatchObject({
-      trackedGroups: 1,
-      queuedMessages: 2,
     });
 
     expect(() =>

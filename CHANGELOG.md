@@ -1,5 +1,13 @@
 # cordn
 
+## 0.1.3
+
+### Patch Changes
+
+- refactor(coordinator): remove snapshot API and add queue depth tracking
+
+  Removes the DeliveryServiceSnapshot type and snapshot() method from Coordinator and storage implementations. Adds getDepth() and getMaxDepth() methods to AsyncMessageQueue for monitoring queue sizes. Also optimizes base64 decoding and improves subscription cleanup handling.
+
 ## 0.1.2
 
 ### Patch Changes

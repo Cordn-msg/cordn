@@ -55,11 +55,3 @@ export interface FetchGroupMessagesInput {
 }
 
 export type SubscribeGroupMessagesInput = FetchGroupMessagesInput;
-
-export interface DeliveryServiceSnapshot {
-  stableIdentities: number;
-  publishedKeyPackages: number;
-  pendingWelcomes: number;
-  trackedGroups: number;
-  queuedMessages: number;
-}

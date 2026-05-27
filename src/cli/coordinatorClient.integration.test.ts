@@ -183,14 +183,6 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       expect(newerMessages.messages).toHaveLength(2);
       expect(newerMessages.messages[0]?.cursor).toBe(postedAliceMessage.cursor);
       expect(newerMessages.messages[1]?.cursor).toBe(postedBobMessage.cursor);
-
-      expect(server.coordinator.snapshot()).toEqual({
-        stableIdentities: 0,
-        publishedKeyPackages: 0,
-        pendingWelcomes: 0,
-        trackedGroups: 1,
-        queuedMessages: 3,
-      });
     } finally {
       await server.transport.close();
     }

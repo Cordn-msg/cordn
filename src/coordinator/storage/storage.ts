@@ -1,5 +1,4 @@
 import type {
-  DeliveryServiceSnapshot,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -54,6 +53,5 @@ export interface CoordinatorStorage {
    */
   fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[];
   getGroupRouting(groupId: string): GroupRoutingRecord | null;
-  snapshot(): DeliveryServiceSnapshot;
   close?(): void;
 }

@@ -3,17 +3,14 @@ export function decodeBase64(value: string): Uint8Array {
     throw new Error("Invalid base64 payload");
   }
 
-  const decoded = Uint8Array.from(Buffer.from(value, "base64"));
+  const decoded = Buffer.from(value, "base64");
   const normalizedInput = value.replace(/\s+/g, "");
 
-  if (
-    decoded.length === 0 ||
-    Buffer.from(decoded).toString("base64") !== normalizedInput
-  ) {
+  if (decoded.length === 0 || decoded.toString("base64") !== normalizedInput) {
     throw new Error("Invalid base64 payload");
   }
 
-  return decoded;
+  return Uint8Array.from(decoded);
 }
 
 export function encodeBase64(value: Uint8Array): string {

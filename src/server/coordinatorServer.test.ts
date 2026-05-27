@@ -504,7 +504,13 @@ describe("CoordinatorAdapter", () => {
 
   test("completes the subscription handler after stream abort", async () => {
     const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
+    const { logger, entries } = createTestLogger();
+    const adapter = new CoordinatorAdapter(
+      coordinator,
+      undefined,
+      undefined,
+      logger,
+    );
     const alice = await createMemberArtifacts(createActor("alice-abort"));
     const cipherSuite = await getTestCiphersuite();
     const aliceState = await createGroup({
@@ -561,6 +567,61 @@ describe("CoordinatorAdapter", () => {
       },
     });
     expect(abortedReason).toBe("user requested stop");
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+
+    const startLog = entries.find(
+      (entry) => entry.bindings.type === "subscription_start",
+    );
+    const endLog = entries.find(
+      (entry) => entry.bindings.type === "subscription_end",
+    );
+
+    expect(startLog?.bindings).toMatchObject({
+      groupId: posted.structuredContent.gid,
+      activeSubscriptions: 1,
+    });
+    expect(endLog?.bindings).toMatchObject({
+      groupId: posted.structuredContent.gid,
+      reason: "user requested stop",
+      activeSubscriptions: 0,
+    });
+  });
+
+  test("returns fetch output shape without runtime schema parsing", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-fetch-shape"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-fetch-shape"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+
+    const messageBytes = await createApplicationMessageBytes({
+      state: aliceState,
+      plaintext: "shape-check",
+    });
+
+    const posted = adapter.postGroupMessage(
+      {
+        msg_64: encodeBase64(messageBytes.encodedMessage),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    const fetchedMessages = adapter.fetchGroupMessages({
+      gid: posted.structuredContent.gid,
+    });
+    const message = fetchedMessages.structuredContent.messages[0];
+
+    expect(message).toEqual({
+      cursor: 1,
+      gid: posted.structuredContent.gid,
+      msg_64: encodeBase64(messageBytes.encodedMessage),
+      at: expect.any(Number),
+    });
   });
 
   test("subscribes before backlog fetch to preserve messages posted during setup", async () => {

@@ -7,7 +7,6 @@ import {
 } from "../../mlsCodec.ts";
 
 import type {
-  DeliveryServiceSnapshot,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -117,10 +116,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   private readonly fetchGroupMessagesAfterCursorStatement: Database.Statement<
     [string, number],
     GroupMessageRow
-  >;
-  private readonly snapshotCountsStatement: Database.Statement<
-    [],
-    DeliveryServiceSnapshot
   >;
   private readonly consumeKeyPackageByReferenceTransaction: (
     identifier: string,
@@ -334,17 +329,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       WHERE group_id = ? AND cursor > ?
       ORDER BY cursor ASC
     `);
-    this.snapshotCountsStatement = this.database.prepare<
-      [],
-      DeliveryServiceSnapshot
-    >(`
-      SELECT
-        (SELECT COUNT(DISTINCT stable_pubkey) FROM key_packages) AS stableIdentities,
-        (SELECT COUNT(*) FROM key_packages) AS publishedKeyPackages,
-        (SELECT COUNT(*) FROM welcomes) AS pendingWelcomes,
-        (SELECT COUNT(*) FROM group_routing) AS trackedGroups,
-        (SELECT COUNT(*) FROM group_messages) AS queuedMessages
-    `);
 
     this.consumeKeyPackageByReferenceTransaction = this.database.transaction(
       (identifier: string) => {
@@ -513,15 +497,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       latestHandshakeEpoch: BigInt(row.latest_handshake_epoch),
       lastMessageCursor: row.last_message_cursor,
     };
-  }
-
-  snapshot(): DeliveryServiceSnapshot {
-    const row = this.snapshotCountsStatement.get();
-    if (!row) {
-      throw new Error("Unable to read storage snapshot");
-    }
-
-    return row;
   }
 
   close(): void {
