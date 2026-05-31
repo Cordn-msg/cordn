@@ -1,5 +1,11 @@
 # cordn
 
+## 0.1.6
+
+### Patch Changes
+
+- feat(coordinator): add FetchManyGroupMessages API for multi-group bounded catch-up
+
 ## 0.1.5
 
 ### Patch Changes

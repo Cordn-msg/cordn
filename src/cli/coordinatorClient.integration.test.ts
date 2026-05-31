@@ -178,9 +178,13 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         gid: postedCommit.gid,
         after: postedCommit.cursor,
       });
+      const manyMessages = await aliceClient.FetchManyGroupMessages({
+        groups: [{ gid: postedCommit.gid, after: postedCommit.cursor }],
+      });
 
       expect(allMessages.messages).toHaveLength(3);
       expect(newerMessages.messages).toHaveLength(2);
+      expect(manyMessages.messages).toEqual(newerMessages.messages);
       expect(newerMessages.messages[0]?.cursor).toBe(postedAliceMessage.cursor);
       expect(newerMessages.messages[1]?.cursor).toBe(postedBobMessage.cursor);
     } finally {

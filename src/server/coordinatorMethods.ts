@@ -20,6 +20,8 @@ import {
   consumeKeyPackageInputSchema,
   consumeKeyPackageOutputSchema,
   COORDINATOR_METHODS,
+  fetchManyGroupMessagesInputSchema,
+  fetchManyGroupMessagesOutputSchema,
   fetchGroupMessagesInputSchema,
   fetchGroupMessagesOutputSchema,
   fetchPendingWelcomesInputSchema,
@@ -540,6 +542,26 @@ export class CoordinatorAdapter {
     };
   }
 
+  fetchManyGroupMessages(
+    input: z.infer<typeof fetchManyGroupMessagesInputSchema>,
+  ) {
+    const records = this.coordinator.fetchManyGroupMessages({
+      groups: input.groups.map((group) => ({
+        groupId: group.gid,
+        afterCursor: group.after,
+      })),
+    });
+
+    this.recordOperation("fetchManyGroupMessages");
+
+    return {
+      content: [],
+      structuredContent: {
+        messages: records.map(mapGroupMessage),
+      },
+    };
+  }
+
   async subscribeGroupMessages(
     input: z.infer<typeof subscribeGroupMessagesInputSchema>,
     extra: ToolExtra,
@@ -880,6 +902,23 @@ export function registerCoordinatorMethods(
       void extra;
       return adapter.fetchGroupMessages(input);
     }),
+  );
+
+  server.registerTool(
+    COORDINATOR_METHODS.fetchManyGroupMessages,
+    {
+      description:
+        "Fetch queued MLS opaque group messages for multiple groups with independent optional cursors.",
+      inputSchema: fetchManyGroupMessagesInputSchema,
+      outputSchema: fetchManyGroupMessagesOutputSchema,
+    },
+    withRateLimit(
+      COORDINATOR_METHODS.fetchManyGroupMessages,
+      (input, extra) => {
+        void extra;
+        return adapter.fetchManyGroupMessages(input);
+      },
+    ),
   );
 
   server.registerTool(

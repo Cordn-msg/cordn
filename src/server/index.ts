@@ -7,6 +7,8 @@ export {
   consumeKeyPackageOutputSchema,
   fetchGroupMessagesInputSchema,
   fetchGroupMessagesOutputSchema,
+  fetchManyGroupMessagesInputSchema,
+  fetchManyGroupMessagesOutputSchema,
   fetchPendingWelcomesInputSchema,
   fetchPendingWelcomesOutputSchema,
   postGroupMessageInputSchema,

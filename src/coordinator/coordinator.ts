@@ -185,6 +185,7 @@ interface GroupMessageSubscription {
 
 interface GroupMessageSubscriber {
   push(record: GroupMessageRecord): void;
+  replay?(records: GroupMessageRecord[]): void;
   close(): void;
 }
 
@@ -318,19 +319,34 @@ export class Coordinator {
   ): GroupMessageSubscription {
     const queue = new AsyncMessageQueue();
     const cursorsByGroup = new Map<string, number>();
+    const liveBuffer: GroupMessageRecord[] = [];
+    let replayingBacklog = true;
     for (const group of input.groups) {
       cursorsByGroup.set(group.groupId, group.afterCursor ?? 0);
     }
     const groupIds = [...cursorsByGroup.keys()];
+    const emitIfNew = (record: GroupMessageRecord): void => {
+      const lastEmittedCursor = cursorsByGroup.get(record.groupId) ?? 0;
+      if (record.cursor <= lastEmittedCursor) {
+        return;
+      }
+
+      cursorsByGroup.set(record.groupId, record.cursor);
+      queue.push(record);
+    };
     const subscriber: GroupMessageSubscriber = {
       push: (record) => {
-        const lastEmittedCursor = cursorsByGroup.get(record.groupId) ?? 0;
-        if (record.cursor <= lastEmittedCursor) {
+        if (replayingBacklog) {
+          liveBuffer.push(record);
           return;
         }
 
-        cursorsByGroup.set(record.groupId, record.cursor);
-        queue.push(record);
+        emitIfNew(record);
+      },
+      replay: (records) => {
+        for (const record of records) {
+          emitIfNew(record);
+        }
       },
       close: () => queue.close(),
     };
@@ -340,7 +356,9 @@ export class Coordinator {
     }
 
     const backlog = this.fetchManyGroupMessages(input);
-    for (const record of backlog) {
+    subscriber.replay?.(backlog);
+    replayingBacklog = false;
+    for (const record of liveBuffer.splice(0)) {
       subscriber.push(record);
     }
 

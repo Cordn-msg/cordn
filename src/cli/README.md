@@ -57,7 +57,7 @@ Useful commands:
 The CLI is intended to act as a reference client for the core local sync logic.
 
 - Every group tracks a monotonic local fetch cursor.
-- Bounded catch-up still uses [`FetchGroupMessages()`](src/cli/coordinatorClient.ts:255) as the canonical recovery API.
+- Bounded catch-up still uses [`FetchGroupMessages()`](src/cli/coordinatorClient.ts:331) or [`FetchManyGroupMessages()`](src/cli/coordinatorClient.ts:342) as the canonical recovery API.
 - Watch mode follows a strict `fetch first, then subscribe` flow matching [`design/group-message-stream-subscription-plan.md`](design/group-message-stream-subscription-plan.md:200).
 - Clients watching many groups can replace multiple single-group subscribe calls with [`SubscribeManyGroupMessages()`](src/cli/coordinatorClient.ts:371) after catch-up; streamed records keep the same shape and must still be ingested by `gid` with independent cursors.
 - Fetched backlog and streamed live records are both treated as the same raw group-message input and are processed through one shared ingestion pipeline in [`ingestGroupMessages()`](src/cli/groupSync.ts:31).

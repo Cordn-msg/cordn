@@ -18,6 +18,7 @@ Coordinator contract notes:
 
 - Group delivery cursors are monotonic per group, never global across all groups.
 - [`fetchGroupMessages({ groupId, afterCursor })`](src/coordinator/coordinator.ts:160) must treat `afterCursor` as a cursor within that group only.
+- [`FetchManyGroupMessages`](src/cli/coordinatorClient.ts:342) must preserve bounded catch-up semantics with independent per-group cursors.
 - [`subscribeGroupMessages({ groupId, afterCursor })`](src/coordinator/coordinator.ts:265) must preserve the same cursor semantics while replaying backlog before live delivery.
 - [`SubscribeManyGroupMessages`](src/cli/coordinatorClient.ts:371) must remain backwards-compatible with the single-group subscription stream shape while preserving independent per-group cursor semantics.
 - Keep storage backends behaviorally aligned; changes in [`src/coordinator/storage/inMemoryStorage.ts`](src/coordinator/storage/inMemoryStorage.ts) and [`src/coordinator/storage/sqliteStorage.ts`](src/coordinator/storage/sqliteStorage.ts) require parity coverage in [`src/coordinator/storage/storage.test.ts`](src/coordinator/storage/storage.test.ts).

@@ -393,6 +393,18 @@ describe("CoordinatorAdapter", () => {
     expect(fetchedMessages.structuredContent.messages[0]?.msg_64).toBe(
       encodeBase64(messageBytes.encodedMessage),
     );
+
+    const fetchedManyMessages = adapter.fetchManyGroupMessages({
+      groups: [{ gid: posted.structuredContent.gid, after: 0 }],
+    });
+
+    expect(fetchedManyMessages.content).toEqual([]);
+    expect(fetchedManyMessages.structuredContent.messages).toHaveLength(1);
+    expect(fetchedManyMessages.structuredContent.messages[0]).toMatchObject({
+      cursor: posted.structuredContent.cursor,
+      gid: posted.structuredContent.gid,
+      msg_64: encodeBase64(messageBytes.encodedMessage),
+    });
   });
 
   test("streams backlog and live group messages as JSON chunks", async () => {
@@ -816,6 +828,93 @@ describe("CoordinatorAdapter", () => {
       { gid: firstLivePosted.structuredContent.gid, cursor: 2 },
     ]);
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
+  test("multi-group subscription subscribes before backlog fetch to preserve setup-race messages", async () => {
+    const coordinator = new Coordinator();
+    const alice = await createMemberArtifacts(createActor("alice-many-race"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-many-race"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+
+    const firstMessage = await createApplicationMessageBytes({
+      state: aliceState,
+      plaintext: "multi seed",
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: firstMessage.encodedMessage,
+    });
+
+    let secondMessageBytes: Uint8Array | null = null;
+    const originalFetchManyGroupMessages =
+      coordinator.fetchManyGroupMessages.bind(coordinator);
+    coordinator.fetchManyGroupMessages = ((input) => {
+      if (
+        input.groups.some((group) => group.groupId === "group-many-race") &&
+        secondMessageBytes
+      ) {
+        coordinator.postGroupMessage({
+          ephemeralSenderPubkey: alice.actor.stablePubkey,
+          opaqueMessage: secondMessageBytes,
+        });
+        secondMessageBytes = null;
+      }
+
+      return originalFetchManyGroupMessages(input);
+    }) as typeof coordinator.fetchManyGroupMessages;
+
+    const secondMessage = await createApplicationMessageBytes({
+      state: firstMessage.newState,
+      plaintext: "multi during setup",
+    });
+    secondMessageBytes = secondMessage.encodedMessage;
+
+    const adapter = new CoordinatorAdapter(coordinator);
+    const writtenChunks: string[] = [];
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(data: string) {
+        writtenChunks.push(data);
+        if (writtenChunks.length >= 2) {
+          this.isActive = false;
+        }
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeManyGroupMessages(
+      { groups: [{ gid: "group-many-race", after: 0 }] },
+      { _meta: { stream } } as never,
+    );
+
+    for (
+      let attempt = 0;
+      attempt < 10 && writtenChunks.length < 2;
+      attempt += 1
+    ) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await stream.abort();
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: { subscribed: true, groups: ["group-many-race"] },
+    });
+    expect(writtenChunks).toHaveLength(2);
+    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({ cursor: 1 });
+    expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({ cursor: 2 });
   });
 
   test("multi-group subscription abort cleans up all child subscriptions", async () => {
