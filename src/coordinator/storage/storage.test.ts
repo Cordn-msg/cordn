@@ -226,10 +226,12 @@ describe.each<StorageFixture>([
     expect(fetchedBob[0]?.keyPackageReference).toBe(
       firstFixture.keyPackageRefHex,
     );
+    expect(fetchedBob[0]?.readAt).not.toBeNull();
     expect(fetchedCarol).toHaveLength(1);
     expect(fetchedCarol[0]?.keyPackageReference).toBe(
       secondFixture.keyPackageRefHex,
     );
+    expect(fetchedCarol[0]?.readAt).not.toBeNull();
 
     // Welcomes survive subsequent fetches (non-destructive).
     expect(
@@ -240,7 +242,7 @@ describe.each<StorageFixture>([
     ).toHaveLength(1);
   });
 
-  test("deletes expired welcomes via TTL cleanup", async () => {
+  test("deletes read welcomes that exceed TTL", async () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     let tick = 1_700_000_000_000;
@@ -272,23 +274,23 @@ describe.each<StorageFixture>([
       welcome: fixture.welcome,
     });
 
-    // Welcomes are present before TTL.
+    // Fetch marks the welcome as read.
     expect(
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(1);
 
-    // Advance time past TTL and run cleanup.
-    tick += 90_000_000; // 25 hours
-    const deleted = coordinator.deleteExpiredWelcomes(tick - 86_400_000); // 24h TTL
+    // Advance time past the 1h default TTL.
+    tick += 3_700_000; // ~1h 2min
+    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000); // 1h TTL
     expect(deleted).toBe(1);
 
-    // Welcomes are gone after cleanup.
+    // Welcome is gone after cleanup.
     expect(
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(0);
   });
 
-  test("deleteExpiredWelcomes only removes welcomes older than the threshold", async () => {
+  test("does not delete unread welcomes regardless of age", async () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     let tick = 1_700_000_000_000;
@@ -320,11 +322,66 @@ describe.each<StorageFixture>([
       welcome: fixture.welcome,
     });
 
-    // Cleanup with a threshold 24h in the past should delete nothing
-    // because the welcome was just created.
-    const pastThreshold = tick - 86_400_000;
-    const deleted = coordinator.deleteExpiredWelcomes(pastThreshold);
+    // Never fetch, so readAt remains null.
+
+    // Advance time well past any reasonable TTL.
+    tick += 90_000_000; // 25 hours
+    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000);
     expect(deleted).toBe(0);
+
+    // Unread welcome is still present.
+    expect(
+      coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
+    ).toHaveLength(1);
+  });
+
+  test("deleteExpiredWelcomes uses readAt timestamp, not createdAt", async () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+    });
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("welcome-ttl-3"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: fixture.keyPackageRefHex,
+      welcome: fixture.welcome,
+    });
+
+    // Advance time 2 hours before fetching (welcome is 2h old by createdAt).
+    tick += 7_200_000; // 2 hours
+
+    // Now fetch — this sets readAt to now (2h after createdAt).
+    expect(
+      coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
+    ).toHaveLength(1);
+
+    // Advance only 30min past readAt — welcome is 2.5h old by createdAt
+    // but only 30min old by readAt. A 1h TTL threshold should NOT delete it.
+    tick += 1_800_000; // 30 minutes
+    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000); // 1h TTL
+    expect(deleted).toBe(0);
+
+    // Welcome is still present.
     expect(
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(1);

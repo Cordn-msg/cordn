@@ -47,18 +47,24 @@ export interface CoordinatorStorage {
   consumeKeyPackage(identifier: string): PublishedKeyPackageRecord | null;
   storeWelcome(record: WelcomeQueueRecord): WelcomeQueueRecord;
   /**
-   * Fetch all pending welcomes for a target identity.
+   * Fetch all pending welcomes for a target identity and mark unread
+   * welcomes as read at the given timestamp.
    *
-   * This is non-destructive: welcomes are returned without being deleted.
-   * Implementations must NOT drain the queue on read. Cleanup is handled
-   * separately via {@link deleteExpiredWelcomes}.
+   * Welcomes whose `readAt` is already set are returned without updating
+   * their timestamp, preserving the original read time for TTL calculations.
+   * This method never deletes records; cleanup is handled separately via
+   * {@link deleteExpiredWelcomes}.
    */
-  fetchPendingWelcomes(targetStablePubkey: string): WelcomeQueueRecord[];
+  fetchPendingWelcomes(
+    targetStablePubkey: string,
+    now: number,
+  ): WelcomeQueueRecord[];
   /**
-   * Delete welcomes whose `createdAt` timestamp is older than `createdBefore`.
-   * Returns the number of deleted records.
+   * Delete welcomes that have been read (readAt is not null) and whose
+   * `readAt` timestamp is older than `threshold`. Unread welcomes
+   * are never deleted. Returns the number of deleted records.
    */
-  deleteExpiredWelcomes(createdBefore: number): number;
+  deleteExpiredWelcomes(threshold: number): number;
   appendGroupMessage(params: AppendGroupMessageParams): GroupMessageRecord;
   /**
    * Fetch messages for one group only. If `afterCursor` is provided, it is a

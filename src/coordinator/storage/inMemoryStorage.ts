@@ -100,24 +100,34 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
   }
 
   storeWelcome(record: WelcomeQueueRecord): WelcomeQueueRecord {
+    const stored: WelcomeQueueRecord = { ...record };
     const existing =
-      this.welcomesByIdentity.get(record.targetStablePubkey) ?? [];
-    existing.push(record);
-    this.welcomesByIdentity.set(record.targetStablePubkey, existing);
+      this.welcomesByIdentity.get(stored.targetStablePubkey) ?? [];
+    existing.push(stored);
+    this.welcomesByIdentity.set(stored.targetStablePubkey, existing);
 
-    return record;
+    return stored;
   }
 
-  fetchPendingWelcomes(targetStablePubkey: string): WelcomeQueueRecord[] {
-    return this.welcomesByIdentity.get(targetStablePubkey) ?? [];
+  fetchPendingWelcomes(
+    targetStablePubkey: string,
+    now: number,
+  ): WelcomeQueueRecord[] {
+    const records = this.welcomesByIdentity.get(targetStablePubkey) ?? [];
+    for (const record of records) {
+      if (record.readAt === null) {
+        record.readAt = now;
+      }
+    }
+    return records;
   }
 
-  deleteExpiredWelcomes(createdBefore: number): number {
+  deleteExpiredWelcomes(threshold: number): number {
     let deleted = 0;
 
     for (const [targetStablePubkey, records] of this.welcomesByIdentity) {
       const kept = records.filter(
-        (record) => record.createdAt >= createdBefore,
+        (record) => record.readAt === null || record.readAt >= threshold,
       );
       deleted += records.length - kept.length;
 

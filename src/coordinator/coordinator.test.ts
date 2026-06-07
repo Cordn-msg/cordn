@@ -243,10 +243,12 @@ describe("Coordinator welcome flow", () => {
     expect(fetchedBob[0]?.keyPackageReference).toBe(
       firstFixture.keyPackageRefHex,
     );
+    expect(fetchedBob[0]?.readAt).not.toBeNull();
     expect(fetchedCarol).toHaveLength(1);
     expect(fetchedCarol[0]?.keyPackageReference).toBe(
       secondFixture.keyPackageRefHex,
     );
+    expect(fetchedCarol[0]?.readAt).not.toBeNull();
 
     // Welcomes survive subsequent fetches (non-destructive).
     expect(
@@ -290,13 +292,55 @@ describe("Coordinator welcome flow", () => {
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(1);
 
-    // Advance time past TTL and run cleanup.
-    tick += 90_000_000;
-    const deleted = coordinator.deleteExpiredWelcomes(tick - 86_400_000);
+    // Advance time past the 1h default TTL and run cleanup.
+    tick += 3_700_000; // ~1h 2min
+    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000); // 1h TTL
     expect(deleted).toBe(1);
     expect(
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(0);
+  });
+
+  test("does not delete unread welcomes regardless of age", async () => {
+    let tick = 1_700_000_000_000;
+    const coordinator = new Coordinator({
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+    });
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("welcome-unread"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: fixture.keyPackageRefHex,
+      welcome: fixture.welcome,
+    });
+
+    // Never fetch, so readAt remains null.
+
+    // Advance time well past any reasonable TTL.
+    tick += 90_000_000; // 25 hours
+    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000);
+    expect(deleted).toBe(0);
+
+    // Unread welcome is still present.
+    expect(
+      coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
+    ).toHaveLength(1);
   });
 });
 

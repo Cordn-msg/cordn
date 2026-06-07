@@ -15,6 +15,7 @@ export interface WelcomeQueueRecord {
   keyPackageReference: string;
   welcome: Welcome;
   createdAt: number;
+  readAt: number | null;
 }
 
 export interface GroupRoutingRecord {

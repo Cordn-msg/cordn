@@ -41,6 +41,7 @@ interface WelcomeRow {
   key_package_reference: string;
   welcome_bytes: Buffer;
   created_at: number;
+  read_at: number | null;
 }
 
 interface GroupMessageRow {
@@ -89,7 +90,10 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     KeyPackageRow
   >;
   private readonly storeWelcomeStatement: Database.Statement<
-    [string, string, Buffer, number]
+    [string, string, Buffer, number, number | null]
+  >;
+  private readonly markWelcomesReadStatement: Database.Statement<
+    [number, string]
   >;
   private readonly fetchPendingWelcomesStatement: Database.Statement<
     [string],
@@ -130,6 +134,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   ) => KeyPackageRow | null;
   private readonly fetchPendingWelcomesTransaction: (
     targetStablePubkey: string,
+    now: number,
   ) => WelcomeRow[];
   private readonly appendGroupMessageTransaction: (
     params: AppendGroupMessageParams,
@@ -166,12 +171,24 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         target_stable_pubkey TEXT NOT NULL,
         key_package_reference TEXT NOT NULL,
         welcome_bytes BLOB NOT NULL,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        read_at INTEGER
       );
 
       CREATE INDEX IF NOT EXISTS idx_welcomes_target_order
       ON welcomes (target_stable_pubkey, id);
+    `);
 
+    // Migration: add read_at column for existing databases that predate
+    // the read-before-delete welcome TTL model. Skip if already present.
+    const welcomesColumns = this.database
+      .prepare("PRAGMA table_info('welcomes')")
+      .all() as Array<{ name: string }>;
+    if (!welcomesColumns.some((col) => col.name === "read_at")) {
+      this.database.exec("ALTER TABLE welcomes ADD COLUMN read_at INTEGER");
+    }
+
+    this.database.exec(`
       CREATE TABLE IF NOT EXISTS group_routing (
         group_id TEXT PRIMARY KEY,
         latest_handshake_epoch TEXT NOT NULL,
@@ -255,26 +272,32 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       "DELETE FROM key_packages WHERE id = ?",
     );
     this.storeWelcomeStatement = this.database.prepare<
-      [string, string, Buffer, number]
+      [string, string, Buffer, number, number | null]
     >(`
       INSERT INTO welcomes (
         target_stable_pubkey,
         key_package_reference,
         welcome_bytes,
-        created_at
-      ) VALUES (?, ?, ?, ?)
+        created_at,
+        read_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `);
+    this.markWelcomesReadStatement = this.database.prepare<[number, string]>(`
+      UPDATE welcomes
+      SET read_at = ?
+      WHERE target_stable_pubkey = ? AND read_at IS NULL
     `);
     this.fetchPendingWelcomesStatement = this.database.prepare<
       [string],
       WelcomeRow & { id: number }
     >(`
-      SELECT id, target_stable_pubkey, key_package_reference, welcome_bytes, created_at
+      SELECT id, target_stable_pubkey, key_package_reference, welcome_bytes, created_at, read_at
       FROM welcomes
       WHERE target_stable_pubkey = ?
       ORDER BY id ASC
     `);
     this.deleteExpiredWelcomesStatement = this.database.prepare<[number]>(
-      "DELETE FROM welcomes WHERE created_at < ?",
+      "DELETE FROM welcomes WHERE read_at IS NOT NULL AND read_at < ?",
     );
     this.upsertGroupRoutingStatement = this.database.prepare<
       [string, string, number]
@@ -364,7 +387,8 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     );
 
     this.fetchPendingWelcomesTransaction = this.database.transaction(
-      (targetStablePubkey: string) => {
+      (targetStablePubkey: string, now: number) => {
+        this.markWelcomesReadStatement.run(now, targetStablePubkey);
         const rows = this.fetchPendingWelcomesStatement.all(targetStablePubkey);
         return rows;
       },
@@ -463,19 +487,23 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       record.keyPackageReference,
       Buffer.from(encodeWelcome(record.welcome)),
       record.createdAt,
+      record.readAt ?? null,
     );
 
     return record;
   }
 
-  fetchPendingWelcomes(targetStablePubkey: string): WelcomeQueueRecord[] {
-    return this.fetchPendingWelcomesTransaction(targetStablePubkey).map((row) =>
-      this.mapWelcomeRow(row),
+  fetchPendingWelcomes(
+    targetStablePubkey: string,
+    now: number,
+  ): WelcomeQueueRecord[] {
+    return this.fetchPendingWelcomesTransaction(targetStablePubkey, now).map(
+      (row) => this.mapWelcomeRow(row),
     );
   }
 
-  deleteExpiredWelcomes(createdBefore: number): number {
-    const result = this.deleteExpiredWelcomesStatement.run(createdBefore);
+  deleteExpiredWelcomes(threshold: number): number {
+    const result = this.deleteExpiredWelcomesStatement.run(threshold);
     return result.changes;
   }
 
@@ -578,6 +606,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       keyPackageReference: row.key_package_reference,
       welcome: decodeWelcome(toUint8Array(row.welcome_bytes)),
       createdAt: row.created_at,
+      readAt: row.read_at,
     };
   }
 

@@ -1,5 +1,22 @@
 # cordn
 
+## 0.1.8
+
+### Patch Changes
+
+- feat(coordinator): preserve unread welcomes past TTL
+
+  Mark fetched welcomes with a readAt timestamp so cleanup only removes
+  welcomes that have been read and are older than the TTL. Default TTL
+  lowered from 24h to 1h. Unread welcomes are now retained indefinitely
+  regardless of age, ensuring members do not lose pending invites.
+  - Add readAt field to WelcomeQueueRecord (null until first fetch)
+  - Update fetchPendingWelcomes to stamp readAt on returned records
+  - Update deleteExpiredWelcomes to skip records with null readAt
+  - Change default welcomeTtlMs from 86_400_000 to 3_600_000
+  - Adjust inMemoryStorage to support read tracking
+  - Add tests covering read marking and unread retention behavior
+
 ## 0.1.7
 
 ### Patch Changes

@@ -27,7 +27,7 @@ const groupIdDecoder = new TextDecoder();
 export interface CoordinatorOptions {
   storage?: CoordinatorStorage;
   now?: () => number;
-  /** TTL in ms for welcome cleanup. Welcomes older than this are deleted. Default: 24h. */
+  /** TTL in ms for welcome cleanup. Read welcomes older than this are deleted. Default: 1h. */
   welcomeTtlMs?: number;
   /** Interval in ms between cleanup runs. Set to 0 to disable. Default: 1h. */
   welcomeCleanupIntervalMs?: number;
@@ -208,7 +208,7 @@ export class Coordinator {
 
     const intervalMs = options.welcomeCleanupIntervalMs ?? 3_600_000;
     if (intervalMs > 0) {
-      const ttlMs = options.welcomeTtlMs ?? 86_400_000;
+      const ttlMs = options.welcomeTtlMs ?? 3_600_000;
       this.cleanupTimer = setInterval(() => {
         this.deleteExpiredWelcomes(this.now() - ttlMs);
       }, intervalMs);
@@ -260,17 +260,18 @@ export class Coordinator {
       keyPackageReference: input.keyPackageReference,
       welcome: input.welcome,
       createdAt: this.now(),
+      readAt: null,
     };
 
     return this.storage.storeWelcome(record);
   }
 
   fetchPendingWelcomes(targetStablePubkey: string): WelcomeQueueRecord[] {
-    return this.storage.fetchPendingWelcomes(targetStablePubkey);
+    return this.storage.fetchPendingWelcomes(targetStablePubkey, this.now());
   }
 
-  deleteExpiredWelcomes(createdBefore: number): number {
-    return this.storage.deleteExpiredWelcomes(createdBefore);
+  deleteExpiredWelcomes(threshold: number): number {
+    return this.storage.deleteExpiredWelcomes(threshold);
   }
 
   close(): void {

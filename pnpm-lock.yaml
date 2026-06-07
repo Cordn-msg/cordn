@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@contextvm/sdk':
-        specifier: ^0.11.11
-        version: 0.11.11(typescript@5.9.3)
+        specifier: ^0.11.12
+        version: 0.11.12(typescript@5.9.3)
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -143,8 +143,8 @@ packages:
   '@changesets/write@0.4.0':
     resolution: {integrity: sha512-CdTLvIOPiCNuH71pyDu3rA+Q0n65cmAbXnwWH84rKGiFumFzkmHNT8KHTMEchcxN+Kl8I54xGUhJ7l3E7X396Q==}
 
-  '@contextvm/sdk@0.11.11':
-    resolution: {integrity: sha512-wpfxLMYUSvCm3vOgGkbS3oSQlFzgz7TjIszgZv9e3d9Noi97eOKlo3+O4WTdBJtl3xK4w4bTiIZUDp76a764jg==}
+  '@contextvm/sdk@0.11.12':
+    resolution: {integrity: sha512-1BFuJRe3J9ZK4ShxgKcltuAtKNTRet3lUpy0MG2sfTG4gFZxp7CsJ8dc0biPFl71TkigSxoHJIb2eBPulhrfSA==}
     engines: {bun: '>=1.2.0'}
     peerDependencies:
       typescript: ^5.9.3
@@ -2021,7 +2021,7 @@ snapshots:
       human-id: 4.1.3
       prettier: 2.8.8
 
-  '@contextvm/sdk@0.11.11(typescript@5.9.3)':
+  '@contextvm/sdk@0.11.12(typescript@5.9.3)':
     dependencies:
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@noble/hashes': 2.2.0

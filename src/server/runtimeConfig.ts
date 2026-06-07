@@ -41,7 +41,7 @@ export interface ServerRuntimeConfig {
     logRejections: boolean;
   };
   welcomeTtl: {
-    /** TTL in ms before delivered welcomes are cleaned up. Default: 24h. */
+    /** TTL in ms before read welcomes are cleaned up. Default: 1h. */
     ttlMs: number;
     /** Interval in ms between cleanup runs. Default: 1h. */
     cleanupIntervalMs: number;
