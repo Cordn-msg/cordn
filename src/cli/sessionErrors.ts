@@ -1,114 +1,120 @@
 export class CliSessionError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = new.target.name;
-	}
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
 }
 
 export class UnknownGroupAliasError extends CliSessionError {
-	constructor(alias: string) {
-		super(`Unknown group alias: ${alias}`);
-	}
+  constructor(alias: string) {
+    super(`Unknown group alias: ${alias}`);
+  }
 }
 
 export class DuplicateGroupAliasError extends CliSessionError {
-	constructor(alias: string) {
-		super(`Group alias already exists: ${alias}`);
-	}
+  constructor(alias: string) {
+    super(`Group alias already exists: ${alias}`);
+  }
 }
 
 export class DuplicateKeyPackageAliasError extends CliSessionError {
-	constructor(alias: string) {
-		super(`Key package alias already exists: ${alias}`);
-	}
+  constructor(alias: string) {
+    super(`Key package alias already exists: ${alias}`);
+  }
 }
 
 export class UnknownKeyPackageAliasError extends CliSessionError {
-	constructor(alias: string) {
-		super(`Unknown key package alias: ${alias}`);
-	}
+  constructor(alias: string) {
+    super(`Unknown key package alias: ${alias}`);
+  }
 }
 
 export class UnknownWelcomeReferenceError extends CliSessionError {
-	constructor(keyPackageReference: string) {
-		super(`Unknown welcome key package reference: ${keyPackageReference}`);
-	}
+  constructor(keyPackageReference: string) {
+    super(`Unknown welcome key package reference: ${keyPackageReference}`);
+  }
 }
 
 export class MissingLocalKeyPackageForWelcomeError extends CliSessionError {
-	constructor(keyPackageReference: string) {
-		super(`No local key package matches welcome reference ${keyPackageReference}`);
-	}
+  constructor(keyPackageReference: string) {
+    super(
+      `No local key package matches welcome reference ${keyPackageReference}`,
+    );
+  }
 }
 
 export class NoPublishedKeyPackageError extends CliSessionError {
-	constructor(identifier: string) {
-		super(`No published key package available for ${identifier}`);
-	}
+  constructor(identifier: string) {
+    super(`No published key package available for ${identifier}`);
+  }
 }
 
 export class InvalidConsumedKeyPackageError extends CliSessionError {
-	constructor() {
-		super('Unable to decode consumed key package');
-	}
+  constructor() {
+    super("Unable to decode consumed key package");
+  }
 }
 
 export class InvalidMlsMessageError extends CliSessionError {
-	constructor(message = 'Unable to decode MLS message') {
-		super(message);
-	}
+  constructor(message = "Unable to decode MLS message") {
+    super(message);
+  }
 }
 
 export class InvalidWelcomeMessageError extends CliSessionError {
-	constructor() {
-		super('Expected MLS welcome message');
-	}
+  constructor() {
+    super("Expected MLS welcome message");
+  }
 }
 
 export class MissingCommitWelcomeError extends CliSessionError {
-	constructor() {
-		super('Expected add-member commit to produce a welcome');
-	}
+  constructor() {
+    super("Expected add-member commit to produce a welcome");
+  }
 }
 
 export class UnknownGroupMemberError extends CliSessionError {
-	constructor(identifier: string) {
-		super(`Unknown group member: ${identifier}`);
-	}
+  constructor(identifier: string) {
+    super(`Unknown group member: ${identifier}`);
+  }
 }
 
 export class RemovedFromGroupError extends CliSessionError {
-	constructor(alias: string) {
-		super(`Group is no longer active because this session was removed: ${alias}`);
-	}
+  constructor(alias: string) {
+    super(
+      `Group is no longer active because this session was removed: ${alias}`,
+    );
+  }
 }
 
 export class SelfRemovalNotSupportedError extends CliSessionError {
-	constructor(alias: string) {
-		super(`Cannot remove yourself from a group: ${alias}`);
-	}
+  constructor(alias: string) {
+    super(`Cannot remove yourself from a group: ${alias}`);
+  }
 }
 
 export class UnauthorizedGroupAdminActionError extends CliSessionError {
-	constructor(alias: string) {
-		super(`Current session is not authorized to perform admin actions in group: ${alias}`);
-	}
+  constructor(alias: string) {
+    super(
+      `Current session is not authorized to perform admin actions in group: ${alias}`,
+    );
+  }
 }
 
 export class AdminPolicyViolationError extends CliSessionError {
-	constructor(message: string) {
-		super(message);
-	}
+  constructor(message: string) {
+    super(message);
+  }
 }
 
 export class CliUsageError extends CliSessionError {
-	constructor(message: string) {
-		super(message);
-	}
+  constructor(message: string) {
+    super(message);
+  }
 }
 
 export class UnknownCommandError extends CliUsageError {
-	constructor(command: string) {
-		super(`Unknown command: ${command}`);
-	}
+  constructor(command: string) {
+    super(`Unknown command: ${command}`);
+  }
 }
