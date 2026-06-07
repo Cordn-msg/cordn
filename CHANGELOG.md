@@ -1,5 +1,17 @@
 # cordn
 
+## 0.1.7
+
+### Patch Changes
+
+- coordinator: replace destructive welcome drain with TTL-based non-destructive storage
+
+  FetchPendingWelcomes no longer deletes welcomes on read. Welcomes are now
+  retained on the coordinator and cleaned up via a periodic TTL sweep instead
+  of being drained at fetch time. This eliminates permanent welcome loss when
+  the relay response fails to reach the client after the coordinator already
+  deleted the records.
+
 ## 0.1.6
 
 ### Patch Changes
