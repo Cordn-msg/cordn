@@ -1,129 +1,119 @@
-import { createInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
+import { createInterface } from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
 
-import { CliSession } from "./session.ts";
+import { CliSession } from './session.ts';
+import { executeReplCommand, knownCommands, tokenizeInput } from './replCommands.ts';
 import {
-  executeReplCommand,
-  knownCommands,
-  tokenizeInput,
-} from "./replCommands.ts";
-import {
-  ansi,
-  colorize,
-  formatPromptGroupLabel,
-  formatSyncResult,
-  printHelp,
-} from "./replFormat.ts";
+	ansi,
+	colorize,
+	formatPromptGroupLabel,
+	formatSyncResult,
+	printHelp
+} from './replFormat.ts';
 
 export async function startCliRepl(session: CliSession): Promise<void> {
-  const rl = createInterface({ input, output });
-  let selectedGroupAlias: string | undefined;
-  let currentPrompt = "cordn> ";
+	const rl = createInterface({ input, output });
+	let selectedGroupAlias: string | undefined;
+	let currentPrompt = 'cordn> ';
 
-  const renderPrompt = (): void => {
-    currentPrompt = selectedGroupAlias
-      ? `cordn:${formatPromptGroupLabel(session, selectedGroupAlias)}> `
-      : "cordn> ";
-  };
+	const renderPrompt = (): void => {
+		currentPrompt = selectedGroupAlias
+			? `cordn:${formatPromptGroupLabel(session, selectedGroupAlias)}> `
+			: 'cordn> ';
+	};
 
-  const redrawAfterAsyncOutput = (): void => {
-    output.write("\n");
-    rl.prompt(true);
-  };
+	const redrawAfterAsyncOutput = (): void => {
+		output.write('\n');
+		rl.prompt(true);
+	};
 
-  const unsubscribeWatchEvents = session.onGroupEvent((event) => {
-    if (event.groupAlias !== selectedGroupAlias) {
-      return;
-    }
+	const unsubscribeWatchEvents = session.onGroupEvent((event) => {
+		if (event.groupAlias !== selectedGroupAlias) {
+			return;
+		}
 
-    if (event.type === "watch-status-changed") {
-      if (!event.error) {
-        return;
-      }
+		if (event.type === 'watch-status-changed') {
+			if (!event.error) {
+				return;
+			}
 
-      output.write(
-        `${colorize(`watch error: ${event.error}`, ansi.red)} ${formatPromptGroupLabel(session, event.groupAlias)}\n`,
-      );
-      redrawAfterAsyncOutput();
-      return;
-    }
+			output.write(
+				`${colorize(`watch error: ${event.error}`, ansi.red)} ${formatPromptGroupLabel(session, event.groupAlias)}\n`
+			);
+			redrawAfterAsyncOutput();
+			return;
+		}
 
-    for (const issue of event.issues) {
-      output.write(
-        `${colorize(issue.detail, ansi.yellow)} ${formatPromptGroupLabel(session, event.groupAlias)} ${formatSyncResult(session, event.groupAlias, [])}\n`,
-      );
-    }
+		for (const issue of event.issues) {
+			output.write(
+				`${colorize(issue.detail, ansi.yellow)} ${formatPromptGroupLabel(session, event.groupAlias)} ${formatSyncResult(session, event.groupAlias, [])}\n`
+			);
+		}
 
-    if (event.received.length === 0) {
-      return;
-    }
+		if (event.received.length === 0) {
+			return;
+		}
 
-    output.write(
-      `${formatSyncResult(session, event.groupAlias, event.received)}\n`,
-    );
-    redrawAfterAsyncOutput();
-  });
+		output.write(`${formatSyncResult(session, event.groupAlias, event.received)}\n`);
+		redrawAfterAsyncOutput();
+	});
 
-  printHelp();
+	printHelp();
 
-  try {
-    while (true) {
-      renderPrompt();
-      rl.setPrompt(currentPrompt);
-      const line = (await rl.question(currentPrompt)).trim();
+	try {
+		while (true) {
+			renderPrompt();
+			rl.setPrompt(currentPrompt);
+			const line = (await rl.question(currentPrompt)).trim();
 
-      if (!line) {
-        if (selectedGroupAlias) {
-          try {
-            const messages = await session.syncGroup(selectedGroupAlias);
-            output.write(
-              `${formatSyncResult(session, selectedGroupAlias, messages)}\n`,
-            );
-          } catch (error) {
-            output.write(
-              `${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`,
-            );
-          }
-        }
-        continue;
-      }
+			if (!line) {
+				if (selectedGroupAlias) {
+					try {
+						const messages = await session.syncGroup(selectedGroupAlias);
+						output.write(`${formatSyncResult(session, selectedGroupAlias, messages)}\n`);
+					} catch (error) {
+						output.write(
+							`${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`
+						);
+					}
+				}
+				continue;
+			}
 
-      const [rawCommand = "", ...args] = tokenizeInput(line);
-      const command = rawCommand;
+			const [rawCommand = '', ...args] = tokenizeInput(line);
+			const command = rawCommand;
 
-      if (selectedGroupAlias && !knownCommands.has(command)) {
-        try {
-          const stored = await session.sendMessage(selectedGroupAlias, line);
-          output.write(`sent cursor=${stored.cursor}\n`);
-        } catch (error) {
-          output.write(
-            `${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        }
-        continue;
-      }
+			if (selectedGroupAlias && !knownCommands.has(command)) {
+				try {
+					const stored = await session.sendMessage(selectedGroupAlias, line);
+					output.write(`sent cursor=${stored.cursor}\n`);
+				} catch (error) {
+					output.write(`${error instanceof Error ? error.message : String(error)}\n`);
+				}
+				continue;
+			}
 
-      try {
-        const result = await executeReplCommand(command, args, {
-          session,
-          output,
-          selectedGroupAlias,
-        });
+			try {
+				const result = await executeReplCommand(command, args, {
+					session,
+					output,
+					selectedGroupAlias
+				});
 
-        selectedGroupAlias = result.selectedGroupAlias;
-        renderPrompt();
+				selectedGroupAlias = result.selectedGroupAlias;
+				renderPrompt();
 
-        if (result.shouldExit) {
-          return;
-        }
-      } catch (error) {
-        output.write(
-          `${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`,
-        );
-      }
-    }
-  } finally {
-    unsubscribeWatchEvents();
-    rl.close();
-  }
+				if (result.shouldExit) {
+					return;
+				}
+			} catch (error) {
+				output.write(
+					`${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`
+				);
+			}
+		}
+	} finally {
+		unsubscribeWatchEvents();
+		rl.close();
+	}
 }

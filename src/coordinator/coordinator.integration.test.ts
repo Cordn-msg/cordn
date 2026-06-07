@@ -1,423 +1,397 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from 'vitest';
 import {
-  createGroup,
-  defaultProposalTypes,
-  processMessage,
-  unsafeTestingAuthenticationService,
-} from "ts-mls";
+	createGroup,
+	defaultProposalTypes,
+	processMessage,
+	unsafeTestingAuthenticationService
+} from 'ts-mls';
 
-import { Coordinator } from "./coordinator.ts";
+import { Coordinator } from './coordinator.ts';
 import {
-  createActor,
-  createApplicationMessageBytes,
-  createCommitMessageBytes,
-  createEphemeralPubkey,
-  createMemberArtifacts,
-  createSignedPublicationEvent,
-  createProposalMessageBytes,
-  createThreeActorGroupScenario,
-  createWelcomeForNewMember,
-  decodeMlsFramedMessage,
-  getTestCiphersuite,
-  processMessageBytes,
-} from "./testUtils.ts";
+	createActor,
+	createApplicationMessageBytes,
+	createCommitMessageBytes,
+	createEphemeralPubkey,
+	createMemberArtifacts,
+	createSignedPublicationEvent,
+	createProposalMessageBytes,
+	createThreeActorGroupScenario,
+	createWelcomeForNewMember,
+	decodeMlsFramedMessage,
+	getTestCiphersuite,
+	processMessageBytes
+} from './testUtils.ts';
 
-describe("Coordinator integration flow", () => {
-  test("supports an alice, bob, and carol invitation and delivery scenario", async () => {
-    const coordinator = new Coordinator();
-    const scenario = await createThreeActorGroupScenario();
-    const { alice, bob, carol } = scenario;
+describe('Coordinator integration flow', () => {
+	test('supports an alice, bob, and carol invitation and delivery scenario', async () => {
+		const coordinator = new Coordinator();
+		const scenario = await createThreeActorGroupScenario();
+		const { alice, bob, carol } = scenario;
 
-    expect(alice.actor.stablePubkey).not.toBe(bob.actor.stablePubkey);
-    expect(bob.actor.stablePubkey).not.toBe(carol.actor.stablePubkey);
+		expect(alice.actor.stablePubkey).not.toBe(bob.actor.stablePubkey);
+		expect(bob.actor.stablePubkey).not.toBe(carol.actor.stablePubkey);
 
-    const bobKeyPackage = coordinator.publishKeyPackage({
-      stablePubkey: bob.actor.stablePubkey,
-      keyPackage: scenario.bob.keyPackage,
-      keyPackageRef: scenario.bobKeyPackageRef,
-      publicationEvent: createSignedPublicationEvent({
-        actor: bob.actor,
-        keyPackage: scenario.bob.keyPackage,
-      }),
-    });
+		const bobKeyPackage = coordinator.publishKeyPackage({
+			stablePubkey: bob.actor.stablePubkey,
+			keyPackage: scenario.bob.keyPackage,
+			keyPackageRef: scenario.bobKeyPackageRef,
+			publicationEvent: createSignedPublicationEvent({
+				actor: bob.actor,
+				keyPackage: scenario.bob.keyPackage
+			})
+		});
 
-    const carolKeyPackage = coordinator.publishKeyPackage({
-      stablePubkey: carol.actor.stablePubkey,
-      keyPackage: scenario.carol.keyPackage,
-      keyPackageRef: scenario.carolKeyPackageRef,
-      publicationEvent: createSignedPublicationEvent({
-        actor: carol.actor,
-        keyPackage: scenario.carol.keyPackage,
-      }),
-    });
+		const carolKeyPackage = coordinator.publishKeyPackage({
+			stablePubkey: carol.actor.stablePubkey,
+			keyPackage: scenario.carol.keyPackage,
+			keyPackageRef: scenario.carolKeyPackageRef,
+			publicationEvent: createSignedPublicationEvent({
+				actor: carol.actor,
+				keyPackage: scenario.carol.keyPackage
+			})
+		});
 
-    expect(
-      coordinator.listKeyPackagesForIdentity(bob.actor.stablePubkey),
-    ).toHaveLength(1);
-    expect(
-      coordinator.listKeyPackagesForIdentity(carol.actor.stablePubkey),
-    ).toHaveLength(1);
+		expect(coordinator.listKeyPackagesForIdentity(bob.actor.stablePubkey)).toHaveLength(1);
+		expect(coordinator.listKeyPackagesForIdentity(carol.actor.stablePubkey)).toHaveLength(1);
 
-    expect(
-      coordinator.consumeKeyPackage(bob.actor.stablePubkey)?.keyPackageRef,
-    ).toBe(bobKeyPackage.keyPackageRef);
-    expect(
-      coordinator.consumeKeyPackage(carol.actor.stablePubkey)?.keyPackageRef,
-    ).toBe(carolKeyPackage.keyPackageRef);
+		expect(coordinator.consumeKeyPackage(bob.actor.stablePubkey)?.keyPackageRef).toBe(
+			bobKeyPackage.keyPackageRef
+		);
+		expect(coordinator.consumeKeyPackage(carol.actor.stablePubkey)?.keyPackageRef).toBe(
+			carolKeyPackage.keyPackageRef
+		);
 
-    coordinator.storeWelcome({
-      targetStablePubkey: bob.actor.stablePubkey,
-      keyPackageReference: bobKeyPackage.keyPackageRef,
-      welcome: scenario.bobWelcome,
-    });
+		coordinator.storeWelcome({
+			targetStablePubkey: bob.actor.stablePubkey,
+			keyPackageReference: bobKeyPackage.keyPackageRef,
+			welcome: scenario.bobWelcome
+		});
 
-    coordinator.storeWelcome({
-      targetStablePubkey: carol.actor.stablePubkey,
-      keyPackageReference: carolKeyPackage.keyPackageRef,
-      welcome: scenario.carolWelcome,
-    });
+		coordinator.storeWelcome({
+			targetStablePubkey: carol.actor.stablePubkey,
+			keyPackageReference: carolKeyPackage.keyPackageRef,
+			welcome: scenario.carolWelcome
+		});
 
-    const bobWelcomes = coordinator.fetchPendingWelcomes(
-      bob.actor.stablePubkey,
-    );
-    const carolWelcomes = coordinator.fetchPendingWelcomes(
-      carol.actor.stablePubkey,
-    );
+		const bobWelcomes = coordinator.fetchPendingWelcomes(bob.actor.stablePubkey);
+		const carolWelcomes = coordinator.fetchPendingWelcomes(carol.actor.stablePubkey);
 
-    expect(bobWelcomes).toHaveLength(1);
-    expect(carolWelcomes).toHaveLength(1);
-    expect(coordinator.fetchPendingWelcomes(bob.actor.stablePubkey)).toEqual(
-      [],
-    );
-    expect(coordinator.fetchPendingWelcomes(carol.actor.stablePubkey)).toEqual(
-      [],
-    );
+		expect(bobWelcomes).toHaveLength(1);
+		expect(carolWelcomes).toHaveLength(1);
+		// Non-destructive fetch: welcomes survive subsequent reads.
+		expect(coordinator.fetchPendingWelcomes(bob.actor.stablePubkey)).toHaveLength(1);
+		expect(coordinator.fetchPendingWelcomes(carol.actor.stablePubkey)).toHaveLength(1);
 
-    const commitMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: scenario.commitMessageBytes,
-    });
+		const commitMessage = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: scenario.commitMessageBytes
+		});
 
-    const aliceApplicationMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: scenario.aliceApplicationBytes,
-    });
+		const aliceApplicationMessage = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: scenario.aliceApplicationBytes
+		});
 
-    const bobApplicationMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: scenario.bobApplicationBytes,
-    });
+		const bobApplicationMessage = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: scenario.bobApplicationBytes
+		});
 
-    const groupId = commitMessage.groupId;
+		const groupId = commitMessage.groupId;
 
-    const allMessages = coordinator.fetchGroupMessages({ groupId });
-    const newerMessages = coordinator.fetchGroupMessages({
-      groupId,
-      afterCursor: commitMessage.cursor,
-    });
+		const allMessages = coordinator.fetchGroupMessages({ groupId });
+		const newerMessages = coordinator.fetchGroupMessages({
+			groupId,
+			afterCursor: commitMessage.cursor
+		});
 
-    expect(allMessages).toHaveLength(3);
-    expect(newerMessages).toHaveLength(2);
-    expect(newerMessages[0]?.cursor).toBe(aliceApplicationMessage.cursor);
-    expect(newerMessages[1]?.cursor).toBe(bobApplicationMessage.cursor);
+		expect(allMessages).toHaveLength(3);
+		expect(newerMessages).toHaveLength(2);
+		expect(newerMessages[0]?.cursor).toBe(aliceApplicationMessage.cursor);
+		expect(newerMessages[1]?.cursor).toBe(bobApplicationMessage.cursor);
 
-    expect(coordinator.getGroupRouting(groupId)).toEqual({
-      groupId,
-      latestHandshakeEpoch: 1n,
-      lastMessageCursor: bobApplicationMessage.cursor,
-    });
+		expect(coordinator.getGroupRouting(groupId)).toEqual({
+			groupId,
+			latestHandshakeEpoch: 1n,
+			lastMessageCursor: bobApplicationMessage.cursor
+		});
 
-    expect(() =>
-      coordinator.postGroupMessage({
-        ephemeralSenderPubkey: createEphemeralPubkey(),
-        opaqueMessage: scenario.commitMessageBytes.slice(
-          0,
-          scenario.commitMessageBytes.length - 1,
-        ),
-      }),
-    ).toThrow();
-  });
+		expect(() =>
+			coordinator.postGroupMessage({
+				ephemeralSenderPubkey: createEphemeralPubkey(),
+				opaqueMessage: scenario.commitMessageBytes.slice(0, scenario.commitMessageBytes.length - 1)
+			})
+		).toThrow();
+	});
 
-  test("round-trips queued application messages through coordinator fetch and MLS processing", async () => {
-    const coordinator = new Coordinator();
-    const scenario = await createThreeActorGroupScenario();
+	test('round-trips queued application messages through coordinator fetch and MLS processing', async () => {
+		const coordinator = new Coordinator();
+		const scenario = await createThreeActorGroupScenario();
 
-    const posted = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: scenario.aliceApplicationBytes,
-    });
+		const posted = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: scenario.aliceApplicationBytes
+		});
 
-    const [fetched] = coordinator.fetchGroupMessages({
-      groupId: posted.groupId,
-    });
-    expect(fetched?.cursor).toBe(posted.cursor);
+		const [fetched] = coordinator.fetchGroupMessages({
+			groupId: posted.groupId
+		});
+		expect(fetched?.cursor).toBe(posted.cursor);
 
-    const bobResult = await processMessageBytes({
-      state: scenario.bob.state,
-      encodedMessage: fetched!.opaqueMessage,
-    });
-    const carolResult = await processMessageBytes({
-      state: scenario.carol.state,
-      encodedMessage: fetched!.opaqueMessage,
-    });
+		const bobResult = await processMessageBytes({
+			state: scenario.bob.state,
+			encodedMessage: fetched!.opaqueMessage
+		});
+		const carolResult = await processMessageBytes({
+			state: scenario.carol.state,
+			encodedMessage: fetched!.opaqueMessage
+		});
 
-    expect(bobResult.kind).toBe("applicationMessage");
-    expect(carolResult.kind).toBe("applicationMessage");
-    if (
-      bobResult.kind !== "applicationMessage" ||
-      carolResult.kind !== "applicationMessage"
-    ) {
-      throw new Error("Expected application message results");
-    }
+		expect(bobResult.kind).toBe('applicationMessage');
+		expect(carolResult.kind).toBe('applicationMessage');
+		if (bobResult.kind !== 'applicationMessage' || carolResult.kind !== 'applicationMessage') {
+			throw new Error('Expected application message results');
+		}
 
-    expect(new TextDecoder().decode(bobResult.message)).toBe(
-      "hello from alice",
-    );
-    expect(new TextDecoder().decode(carolResult.message)).toBe(
-      "hello from alice",
-    );
-  });
+		expect(new TextDecoder().decode(bobResult.message)).toBe('hello from alice');
+		expect(new TextDecoder().decode(carolResult.message)).toBe('hello from alice');
+	});
 
-  test("supports commit propagation and post-commit state convergence through the coordinator", async () => {
-    const coordinator = new Coordinator();
-    const scenario = await createThreeActorGroupScenario();
+	test('supports commit propagation and post-commit state convergence through the coordinator', async () => {
+		const coordinator = new Coordinator();
+		const scenario = await createThreeActorGroupScenario();
 
-    const extraMember = await createMemberArtifacts(createActor("dave"));
-    const commit = await createCommitMessageBytes({
-      state: scenario.alice.state,
-      extraProposals: [
-        {
-          proposalType: defaultProposalTypes.add,
-          add: { keyPackage: extraMember.keyPackage },
-        },
-      ],
-    });
+		const extraMember = await createMemberArtifacts(createActor('dave'));
+		const commit = await createCommitMessageBytes({
+			state: scenario.alice.state,
+			extraProposals: [
+				{
+					proposalType: defaultProposalTypes.add,
+					add: { keyPackage: extraMember.keyPackage }
+				}
+			]
+		});
 
-    const postedCommit = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: commit.encodedMessage,
-    });
+		const postedCommit = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: commit.encodedMessage
+		});
 
-    const [queuedCommit] = coordinator.fetchGroupMessages({
-      groupId: postedCommit.groupId,
-    });
-    const bobCommitResult = await processMessageBytes({
-      state: scenario.bob.state,
-      encodedMessage: queuedCommit!.opaqueMessage,
-    });
-    const carolCommitResult = await processMessageBytes({
-      state: scenario.carol.state,
-      encodedMessage: queuedCommit!.opaqueMessage,
-    });
+		const [queuedCommit] = coordinator.fetchGroupMessages({
+			groupId: postedCommit.groupId
+		});
+		const bobCommitResult = await processMessageBytes({
+			state: scenario.bob.state,
+			encodedMessage: queuedCommit!.opaqueMessage
+		});
+		const carolCommitResult = await processMessageBytes({
+			state: scenario.carol.state,
+			encodedMessage: queuedCommit!.opaqueMessage
+		});
 
-    expect(bobCommitResult.kind).toBe("newState");
-    expect(carolCommitResult.kind).toBe("newState");
-    if (
-      bobCommitResult.kind !== "newState" ||
-      carolCommitResult.kind !== "newState"
-    ) {
-      throw new Error("Expected commit processing to advance member state");
-    }
+		expect(bobCommitResult.kind).toBe('newState');
+		expect(carolCommitResult.kind).toBe('newState');
+		if (bobCommitResult.kind !== 'newState' || carolCommitResult.kind !== 'newState') {
+			throw new Error('Expected commit processing to advance member state');
+		}
 
-    const application = await createApplicationMessageBytes({
-      state: bobCommitResult.newState,
-      plaintext: "post-commit hello from bob",
-    });
+		const application = await createApplicationMessageBytes({
+			state: bobCommitResult.newState,
+			plaintext: 'post-commit hello from bob'
+		});
 
-    const postedApplication = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: application.encodedMessage,
-    });
+		const postedApplication = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: application.encodedMessage
+		});
 
-    const queuedApplications = coordinator.fetchGroupMessages({
-      groupId: postedApplication.groupId,
-      afterCursor: postedCommit.cursor,
-    });
+		const queuedApplications = coordinator.fetchGroupMessages({
+			groupId: postedApplication.groupId,
+			afterCursor: postedCommit.cursor
+		});
 
-    const aliceApplicationResult = await processMessageBytes({
-      state: commit.newState,
-      encodedMessage: queuedApplications[0]!.opaqueMessage,
-    });
-    const carolApplicationResult = await processMessageBytes({
-      state: carolCommitResult.newState,
-      encodedMessage: queuedApplications[0]!.opaqueMessage,
-    });
+		const aliceApplicationResult = await processMessageBytes({
+			state: commit.newState,
+			encodedMessage: queuedApplications[0]!.opaqueMessage
+		});
+		const carolApplicationResult = await processMessageBytes({
+			state: carolCommitResult.newState,
+			encodedMessage: queuedApplications[0]!.opaqueMessage
+		});
 
-    expect(aliceApplicationResult.kind).toBe("applicationMessage");
-    expect(carolApplicationResult.kind).toBe("applicationMessage");
-    if (
-      aliceApplicationResult.kind !== "applicationMessage" ||
-      carolApplicationResult.kind !== "applicationMessage"
-    ) {
-      throw new Error("Expected application message after commit convergence");
-    }
+		expect(aliceApplicationResult.kind).toBe('applicationMessage');
+		expect(carolApplicationResult.kind).toBe('applicationMessage');
+		if (
+			aliceApplicationResult.kind !== 'applicationMessage' ||
+			carolApplicationResult.kind !== 'applicationMessage'
+		) {
+			throw new Error('Expected application message after commit convergence');
+		}
 
-    expect(new TextDecoder().decode(aliceApplicationResult.message)).toBe(
-      "post-commit hello from bob",
-    );
-    expect(new TextDecoder().decode(carolApplicationResult.message)).toBe(
-      "post-commit hello from bob",
-    );
-  });
+		expect(new TextDecoder().decode(aliceApplicationResult.message)).toBe(
+			'post-commit hello from bob'
+		);
+		expect(new TextDecoder().decode(carolApplicationResult.message)).toBe(
+			'post-commit hello from bob'
+		);
+	});
 
-  test("queues competing same-epoch commits so conflict handling can be exercised by clients", async () => {
-    const coordinator = new Coordinator();
-    const cipherSuite = await getTestCiphersuite();
-    const alice = await createMemberArtifacts(createActor("alice"));
-    const bob = await createMemberArtifacts(createActor("bob"));
-    const carol = await createMemberArtifacts(createActor("carol"));
-    const dave = await createMemberArtifacts(createActor("dave"));
+	test('queues competing same-epoch commits so conflict handling can be exercised by clients', async () => {
+		const coordinator = new Coordinator();
+		const cipherSuite = await getTestCiphersuite();
+		const alice = await createMemberArtifacts(createActor('alice'));
+		const bob = await createMemberArtifacts(createActor('bob'));
+		const carol = await createMemberArtifacts(createActor('carol'));
+		const dave = await createMemberArtifacts(createActor('dave'));
 
-    let aliceState = await createGroup({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      groupId: new TextEncoder().encode("group-conflicting-commits"),
-      keyPackage: alice.keyPackage,
-      privateKeyPackage: alice.privateKeyPackage,
-    });
+		let aliceState = await createGroup({
+			context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+			groupId: new TextEncoder().encode('group-conflicting-commits'),
+			keyPackage: alice.keyPackage,
+			privateKeyPackage: alice.privateKeyPackage
+		});
 
-    const bobJoin = await createWelcomeForNewMember({
-      senderState: aliceState,
-      member: bob,
-    });
-    aliceState = bobJoin.senderState;
+		const bobJoin = await createWelcomeForNewMember({
+			senderState: aliceState,
+			member: bob
+		});
+		aliceState = bobJoin.senderState;
 
-    const aliceCommit = await createCommitMessageBytes({
-      state: aliceState,
-      extraProposals: [
-        {
-          proposalType: defaultProposalTypes.add,
-          add: { keyPackage: carol.keyPackage },
-        },
-      ],
-    });
-    const bobCommit = await createCommitMessageBytes({
-      state: bobJoin.receiverState,
-      extraProposals: [
-        {
-          proposalType: defaultProposalTypes.add,
-          add: { keyPackage: dave.keyPackage },
-        },
-      ],
-    });
+		const aliceCommit = await createCommitMessageBytes({
+			state: aliceState,
+			extraProposals: [
+				{
+					proposalType: defaultProposalTypes.add,
+					add: { keyPackage: carol.keyPackage }
+				}
+			]
+		});
+		const bobCommit = await createCommitMessageBytes({
+			state: bobJoin.receiverState,
+			extraProposals: [
+				{
+					proposalType: defaultProposalTypes.add,
+					add: { keyPackage: dave.keyPackage }
+				}
+			]
+		});
 
-    const postedAliceCommit = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: aliceCommit.encodedMessage,
-    });
-    const postedBobCommit = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: bobCommit.encodedMessage,
-    });
+		const postedAliceCommit = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: aliceCommit.encodedMessage
+		});
+		const postedBobCommit = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: bobCommit.encodedMessage
+		});
 
-    const queued = coordinator.fetchGroupMessages({
-      groupId: postedAliceCommit.groupId,
-    });
+		const queued = coordinator.fetchGroupMessages({
+			groupId: postedAliceCommit.groupId
+		});
 
-    expect(queued.map((message) => message.cursor)).toEqual([
-      postedAliceCommit.cursor,
-      postedBobCommit.cursor,
-    ]);
-    expect(coordinator.getGroupRouting(postedAliceCommit.groupId)).toEqual({
-      groupId: postedAliceCommit.groupId,
-      latestHandshakeEpoch: 1n,
-      lastMessageCursor: postedBobCommit.cursor,
-    });
+		expect(queued.map((message) => message.cursor)).toEqual([
+			postedAliceCommit.cursor,
+			postedBobCommit.cursor
+		]);
+		expect(coordinator.getGroupRouting(postedAliceCommit.groupId)).toEqual({
+			groupId: postedAliceCommit.groupId,
+			latestHandshakeEpoch: 1n,
+			lastMessageCursor: postedBobCommit.cursor
+		});
 
-    const bobAppliesAlice = await processMessageBytes({
-      state: bobJoin.receiverState,
-      encodedMessage: queued[0]!.opaqueMessage,
-    });
+		const bobAppliesAlice = await processMessageBytes({
+			state: bobJoin.receiverState,
+			encodedMessage: queued[0]!.opaqueMessage
+		});
 
-    expect(bobAppliesAlice.kind).toBe("newState");
-    if (bobAppliesAlice.kind !== "newState") {
-      throw new Error("Expected first competing commit to advance Bob state");
-    }
+		expect(bobAppliesAlice.kind).toBe('newState');
+		if (bobAppliesAlice.kind !== 'newState') {
+			throw new Error('Expected first competing commit to advance Bob state');
+		}
 
-    await expect(
-      processMessageBytes({
-        state: bobAppliesAlice.newState,
-        encodedMessage: queued[1]!.opaqueMessage,
-      }),
-    ).rejects.toThrow(/former epoch|epoch too old/i);
-  });
+		await expect(
+			processMessageBytes({
+				state: bobAppliesAlice.newState,
+				encodedMessage: queued[1]!.opaqueMessage
+			})
+		).rejects.toThrow(/former epoch|epoch too old/i);
+	});
 
-  test("preserves ordered queue semantics across proposal, commit, and application traffic", async () => {
-    const coordinator = new Coordinator();
-    const scenario = await createThreeActorGroupScenario();
-    const cipherSuite = await getTestCiphersuite();
+	test('preserves ordered queue semantics across proposal, commit, and application traffic', async () => {
+		const coordinator = new Coordinator();
+		const scenario = await createThreeActorGroupScenario();
+		const cipherSuite = await getTestCiphersuite();
 
-    const proposal = await createProposalMessageBytes({
-      state: scenario.alice.state,
-      proposal: {
-        proposalType: defaultProposalTypes.remove,
-        remove: { removed: 2 },
-      },
-      wireAsPublicMessage: true,
-    });
+		const proposal = await createProposalMessageBytes({
+			state: scenario.alice.state,
+			proposal: {
+				proposalType: defaultProposalTypes.remove,
+				remove: { removed: 2 }
+			},
+			wireAsPublicMessage: true
+		});
 
-    const postedProposal = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: proposal.encodedMessage,
-    });
+		const postedProposal = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: proposal.encodedMessage
+		});
 
-    const commit = await createCommitMessageBytes({
-      state: proposal.newState,
-    });
-    const postedCommit = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: commit.encodedMessage,
-    });
+		const commit = await createCommitMessageBytes({
+			state: proposal.newState
+		});
+		const postedCommit = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: commit.encodedMessage
+		});
 
-    const application = await createApplicationMessageBytes({
-      state: commit.newState,
-      plaintext: "ordered traffic",
-    });
-    const postedApplication = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
-      opaqueMessage: application.encodedMessage,
-    });
+		const application = await createApplicationMessageBytes({
+			state: commit.newState,
+			plaintext: 'ordered traffic'
+		});
+		const postedApplication = coordinator.postGroupMessage({
+			ephemeralSenderPubkey: createEphemeralPubkey(),
+			opaqueMessage: application.encodedMessage
+		});
 
-    const queued = coordinator.fetchGroupMessages({
-      groupId: postedProposal.groupId,
-    });
-    expect(queued.map((message) => message.cursor)).toEqual([
-      postedProposal.cursor,
-      postedCommit.cursor,
-      postedApplication.cursor,
-    ]);
+		const queued = coordinator.fetchGroupMessages({
+			groupId: postedProposal.groupId
+		});
+		expect(queued.map((message) => message.cursor)).toEqual([
+			postedProposal.cursor,
+			postedCommit.cursor,
+			postedApplication.cursor
+		]);
 
-    const bobProposalResult = await processMessage({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      state: scenario.bob.state,
-      message: decodeMlsFramedMessage(queued[0]!.opaqueMessage),
-    });
-    expect(bobProposalResult.kind).toBe("newState");
-    if (bobProposalResult.kind !== "newState") {
-      throw new Error("Expected public proposal to update state");
-    }
+		const bobProposalResult = await processMessage({
+			context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+			state: scenario.bob.state,
+			message: decodeMlsFramedMessage(queued[0]!.opaqueMessage)
+		});
+		expect(bobProposalResult.kind).toBe('newState');
+		if (bobProposalResult.kind !== 'newState') {
+			throw new Error('Expected public proposal to update state');
+		}
 
-    const bobCommitResult = await processMessage({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      state: bobProposalResult.newState,
-      message: decodeMlsFramedMessage(queued[1]!.opaqueMessage),
-    });
-    expect(bobCommitResult.kind).toBe("newState");
-    if (bobCommitResult.kind !== "newState") {
-      throw new Error("Expected commit to update state");
-    }
+		const bobCommitResult = await processMessage({
+			context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+			state: bobProposalResult.newState,
+			message: decodeMlsFramedMessage(queued[1]!.opaqueMessage)
+		});
+		expect(bobCommitResult.kind).toBe('newState');
+		if (bobCommitResult.kind !== 'newState') {
+			throw new Error('Expected commit to update state');
+		}
 
-    const bobApplicationResult = await processMessage({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      state: bobCommitResult.newState,
-      message: decodeMlsFramedMessage(queued[2]!.opaqueMessage),
-    });
-    expect(bobApplicationResult.kind).toBe("applicationMessage");
-    if (bobApplicationResult.kind !== "applicationMessage") {
-      throw new Error("Expected ordered application delivery");
-    }
+		const bobApplicationResult = await processMessage({
+			context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+			state: bobCommitResult.newState,
+			message: decodeMlsFramedMessage(queued[2]!.opaqueMessage)
+		});
+		expect(bobApplicationResult.kind).toBe('applicationMessage');
+		if (bobApplicationResult.kind !== 'applicationMessage') {
+			throw new Error('Expected ordered application delivery');
+		}
 
-    expect(new TextDecoder().decode(bobApplicationResult.message)).toBe(
-      "ordered traffic",
-    );
-  });
+		expect(new TextDecoder().decode(bobApplicationResult.message)).toBe('ordered traffic');
+	});
 });

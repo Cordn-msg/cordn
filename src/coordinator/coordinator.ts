@@ -1,432 +1,420 @@
 import type {
-  FetchManyGroupMessagesInput,
-  FetchGroupMessagesInput,
-  GroupMessageRecord,
-  GroupRoutingRecord,
-  PostGroupMessageInput,
-  PublishedKeyPackageRecord,
-  PublishKeyPackageInput,
-  SubscribeGroupMessagesInput,
-  SubscribeManyGroupMessagesInput,
-  StoreWelcomeInput,
-  WelcomeQueueRecord,
-} from "./types.ts";
-import type { CoordinatorStorage } from "./storage/storage.ts";
-import { InMemoryCoordinatorStorage } from "./storage/inMemoryStorage.ts";
-import { isLastResortKeyPackage } from "../lastResortKeyPackage.ts";
+	FetchManyGroupMessagesInput,
+	FetchGroupMessagesInput,
+	GroupMessageRecord,
+	GroupRoutingRecord,
+	PostGroupMessageInput,
+	PublishedKeyPackageRecord,
+	PublishKeyPackageInput,
+	SubscribeGroupMessagesInput,
+	SubscribeManyGroupMessagesInput,
+	StoreWelcomeInput,
+	WelcomeQueueRecord
+} from './types.ts';
+import type { CoordinatorStorage } from './storage/storage.ts';
+import { InMemoryCoordinatorStorage } from './storage/inMemoryStorage.ts';
+import { isLastResortKeyPackage } from '../lastResortKeyPackage.ts';
 
-import {
-  contentTypes,
-  mlsMessageDecoder,
-  wireformats,
-  type MlsMessage,
-} from "ts-mls";
+import { contentTypes, mlsMessageDecoder, wireformats, type MlsMessage } from 'ts-mls';
 
 const groupIdDecoder = new TextDecoder();
 
 export interface CoordinatorOptions {
-  storage?: CoordinatorStorage;
-  now?: () => number;
+	storage?: CoordinatorStorage;
+	now?: () => number;
+	/** TTL in ms for welcome cleanup. Welcomes older than this are deleted. Default: 24h. */
+	welcomeTtlMs?: number;
+	/** Interval in ms between cleanup runs. Set to 0 to disable. Default: 1h. */
+	welcomeCleanupIntervalMs?: number;
 }
 
 function decodeOpaqueMessage(opaqueMessage: Uint8Array): MlsMessage {
-  const decoded = mlsMessageDecoder(opaqueMessage, 0);
-  if (!decoded) {
-    throw new Error("Unable to decode MLS message");
-  }
+	const decoded = mlsMessageDecoder(opaqueMessage, 0);
+	if (!decoded) {
+		throw new Error('Unable to decode MLS message');
+	}
 
-  return decoded[0];
+	return decoded[0];
 }
 
 function getMessageMetadata(message: MlsMessage): {
-  groupId: string;
-  epoch: bigint;
-  handshakeMessage: boolean;
+	groupId: string;
+	epoch: bigint;
+	handshakeMessage: boolean;
 } {
-  switch (message.wireformat) {
-    case wireformats.mls_private_message:
-      return {
-        groupId: groupIdDecoder.decode(message.privateMessage.groupId),
-        epoch: message.privateMessage.epoch,
-        handshakeMessage:
-          message.privateMessage.contentType !== contentTypes.application,
-      };
-    case wireformats.mls_public_message:
-      return {
-        groupId: groupIdDecoder.decode(message.publicMessage.content.groupId),
-        epoch: message.publicMessage.content.epoch,
-        handshakeMessage:
-          message.publicMessage.content.contentType !==
-          contentTypes.application,
-      };
-    default:
-      throw new Error(
-        "Group delivery only accepts MLS private or public messages",
-      );
-  }
+	switch (message.wireformat) {
+		case wireformats.mls_private_message:
+			return {
+				groupId: groupIdDecoder.decode(message.privateMessage.groupId),
+				epoch: message.privateMessage.epoch,
+				handshakeMessage: message.privateMessage.contentType !== contentTypes.application
+			};
+		case wireformats.mls_public_message:
+			return {
+				groupId: groupIdDecoder.decode(message.publicMessage.content.groupId),
+				epoch: message.publicMessage.content.epoch,
+				handshakeMessage: message.publicMessage.content.contentType !== contentTypes.application
+			};
+		default:
+			throw new Error('Group delivery only accepts MLS private or public messages');
+	}
 }
 
 function resolveLatestHandshakeEpoch(
-  currentRouting: GroupRoutingRecord | null,
-  epoch: bigint,
-  handshakeMessage: boolean,
+	currentRouting: GroupRoutingRecord | null,
+	epoch: bigint,
+	handshakeMessage: boolean
 ): bigint {
-  if (!handshakeMessage) {
-    return currentRouting?.latestHandshakeEpoch ?? epoch;
-  }
+	if (!handshakeMessage) {
+		return currentRouting?.latestHandshakeEpoch ?? epoch;
+	}
 
-  return currentRouting && currentRouting.latestHandshakeEpoch > epoch
-    ? currentRouting.latestHandshakeEpoch
-    : epoch;
+	return currentRouting && currentRouting.latestHandshakeEpoch > epoch
+		? currentRouting.latestHandshakeEpoch
+		: epoch;
 }
 
 class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
-  private readonly values: GroupMessageRecord[] = [];
-  private nextValueIndex = 0;
-  private readonly waiters: Array<{
-    resolve: (result: IteratorResult<GroupMessageRecord>) => void;
-    reject: (error: unknown) => void;
-  }> = [];
-  private closed = false;
-  private aborted: unknown = null;
-  private maxDepth = 0;
+	private readonly values: GroupMessageRecord[] = [];
+	private nextValueIndex = 0;
+	private readonly waiters: Array<{
+		resolve: (result: IteratorResult<GroupMessageRecord>) => void;
+		reject: (error: unknown) => void;
+	}> = [];
+	private closed = false;
+	private aborted: unknown = null;
+	private maxDepth = 0;
 
-  push(value: GroupMessageRecord): void {
-    if (this.closed || this.aborted) {
-      return;
-    }
+	push(value: GroupMessageRecord): void {
+		if (this.closed || this.aborted) {
+			return;
+		}
 
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter.resolve({ value, done: false });
-      return;
-    }
+		const waiter = this.waiters.shift();
+		if (waiter) {
+			waiter.resolve({ value, done: false });
+			return;
+		}
 
-    this.values.push(value);
-    if (this.values.length > this.maxDepth) {
-      this.maxDepth = this.values.length;
-    }
-  }
+		this.values.push(value);
+		if (this.values.length > this.maxDepth) {
+			this.maxDepth = this.values.length;
+		}
+	}
 
-  getDepth(): number {
-    return this.values.length - this.nextValueIndex;
-  }
+	getDepth(): number {
+		return this.values.length - this.nextValueIndex;
+	}
 
-  getMaxDepth(): number {
-    return this.maxDepth;
-  }
+	getMaxDepth(): number {
+		return this.maxDepth;
+	}
 
-  close(): void {
-    if (this.closed || this.aborted) {
-      return;
-    }
+	close(): void {
+		if (this.closed || this.aborted) {
+			return;
+		}
 
-    this.closed = true;
-    for (const waiter of this.waiters.splice(0)) {
-      waiter.resolve({ value: undefined, done: true });
-    }
-  }
+		this.closed = true;
+		for (const waiter of this.waiters.splice(0)) {
+			waiter.resolve({ value: undefined, done: true });
+		}
+	}
 
-  abort(error: unknown): void {
-    if (this.aborted || this.closed) {
-      return;
-    }
+	abort(error: unknown): void {
+		if (this.aborted || this.closed) {
+			return;
+		}
 
-    this.aborted = error;
-    for (const waiter of this.waiters.splice(0)) {
-      waiter.reject(error);
-    }
-  }
+		this.aborted = error;
+		for (const waiter of this.waiters.splice(0)) {
+			waiter.reject(error);
+		}
+	}
 
-  [Symbol.asyncIterator](): AsyncIterator<GroupMessageRecord> {
-    return {
-      next: async (): Promise<IteratorResult<GroupMessageRecord>> => {
-        if (this.nextValueIndex < this.values.length) {
-          const value = this.values[this.nextValueIndex]!;
-          this.nextValueIndex += 1;
+	[Symbol.asyncIterator](): AsyncIterator<GroupMessageRecord> {
+		return {
+			next: async (): Promise<IteratorResult<GroupMessageRecord>> => {
+				if (this.nextValueIndex < this.values.length) {
+					const value = this.values[this.nextValueIndex]!;
+					this.nextValueIndex += 1;
 
-          if (
-            this.nextValueIndex > 1024 &&
-            this.nextValueIndex * 2 >= this.values.length
-          ) {
-            this.values.splice(0, this.nextValueIndex);
-            this.nextValueIndex = 0;
-          }
+					if (this.nextValueIndex > 1024 && this.nextValueIndex * 2 >= this.values.length) {
+						this.values.splice(0, this.nextValueIndex);
+						this.nextValueIndex = 0;
+					}
 
-          return { value, done: false };
-        }
+					return { value, done: false };
+				}
 
-        if (this.aborted) {
-          throw this.aborted;
-        }
+				if (this.aborted) {
+					throw this.aborted;
+				}
 
-        if (this.closed) {
-          return { value: undefined, done: true };
-        }
+				if (this.closed) {
+					return { value: undefined, done: true };
+				}
 
-        return new Promise<IteratorResult<GroupMessageRecord>>(
-          (resolve, reject) => {
-            this.waiters.push({ resolve, reject });
-          },
-        );
-      },
-      return: async (): Promise<IteratorResult<GroupMessageRecord>> => {
-        this.close();
-        return { value: undefined, done: true };
-      },
-    };
-  }
+				return new Promise<IteratorResult<GroupMessageRecord>>((resolve, reject) => {
+					this.waiters.push({ resolve, reject });
+				});
+			},
+			return: async (): Promise<IteratorResult<GroupMessageRecord>> => {
+				this.close();
+				return { value: undefined, done: true };
+			}
+		};
+	}
 }
 
 interface GroupMessageSubscription {
-  messages: AsyncIterable<GroupMessageRecord>;
-  unsubscribe: () => void;
+	messages: AsyncIterable<GroupMessageRecord>;
+	unsubscribe: () => void;
 }
 
 interface GroupMessageSubscriber {
-  push(record: GroupMessageRecord): void;
-  replay?(records: GroupMessageRecord[]): void;
-  close(): void;
+	push(record: GroupMessageRecord): void;
+	replay?(records: GroupMessageRecord[]): void;
+	close(): void;
 }
 
 export class Coordinator {
-  private readonly storage: CoordinatorStorage;
-  private readonly now: () => number;
-  private readonly groupSubscribers = new Map<
-    string,
-    Set<GroupMessageSubscriber>
-  >();
+	private readonly storage: CoordinatorStorage;
+	private readonly now: () => number;
+	private readonly groupSubscribers = new Map<string, Set<GroupMessageSubscriber>>();
+	private readonly cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(options: CoordinatorOptions = {}) {
-    this.storage = options.storage ?? new InMemoryCoordinatorStorage();
-    this.now = options.now ?? Date.now;
-  }
+	constructor(options: CoordinatorOptions = {}) {
+		this.storage = options.storage ?? new InMemoryCoordinatorStorage();
+		this.now = options.now ?? Date.now;
 
-  publishKeyPackage(input: PublishKeyPackageInput): PublishedKeyPackageRecord {
-    const record: PublishedKeyPackageRecord = {
-      stablePubkey: input.stablePubkey,
-      keyPackage: input.keyPackage,
-      keyPackageRef: input.keyPackageRef,
-      isLastResort: isLastResortKeyPackage(input.keyPackage),
-      publishedAt: this.now(),
-      publicationEvent: input.publicationEvent,
-    };
+		const intervalMs = options.welcomeCleanupIntervalMs ?? 3_600_000;
+		if (intervalMs > 0) {
+			const ttlMs = options.welcomeTtlMs ?? 86_400_000;
+			this.cleanupTimer = setInterval(() => {
+				this.deleteExpiredWelcomes(this.now() - ttlMs);
+			}, intervalMs);
+			// Allow the timer to not keep the process alive.
+			if (this.cleanupTimer && 'unref' in this.cleanupTimer) {
+				this.cleanupTimer.unref();
+			}
+		}
+	}
 
-    return this.storage.publishKeyPackage(record);
-  }
+	publishKeyPackage(input: PublishKeyPackageInput): PublishedKeyPackageRecord {
+		const record: PublishedKeyPackageRecord = {
+			stablePubkey: input.stablePubkey,
+			keyPackage: input.keyPackage,
+			keyPackageRef: input.keyPackageRef,
+			isLastResort: isLastResortKeyPackage(input.keyPackage),
+			publishedAt: this.now(),
+			publicationEvent: input.publicationEvent
+		};
 
-  listKeyPackagesForIdentity(
-    stablePubkey: string,
-  ): PublishedKeyPackageRecord[] {
-    return this.storage.listKeyPackagesForIdentity(stablePubkey);
-  }
+		return this.storage.publishKeyPackage(record);
+	}
 
-  listAllKeyPackages(): PublishedKeyPackageRecord[] {
-    return this.storage.listAllKeyPackages();
-  }
+	listKeyPackagesForIdentity(stablePubkey: string): PublishedKeyPackageRecord[] {
+		return this.storage.listKeyPackagesForIdentity(stablePubkey);
+	}
 
-  getKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
-    return this.storage.getKeyPackage(keyPackageRef);
-  }
+	listAllKeyPackages(): PublishedKeyPackageRecord[] {
+		return this.storage.listAllKeyPackages();
+	}
 
-  removeKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
-    return this.storage.removeKeyPackage(keyPackageRef);
-  }
+	getKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
+		return this.storage.getKeyPackage(keyPackageRef);
+	}
 
-  consumeKeyPackage(identifier: string): PublishedKeyPackageRecord | null {
-    return this.storage.consumeKeyPackage(identifier);
-  }
+	removeKeyPackage(keyPackageRef: string): PublishedKeyPackageRecord | null {
+		return this.storage.removeKeyPackage(keyPackageRef);
+	}
 
-  storeWelcome(input: StoreWelcomeInput): WelcomeQueueRecord {
-    const record: WelcomeQueueRecord = {
-      targetStablePubkey: input.targetStablePubkey,
-      keyPackageReference: input.keyPackageReference,
-      welcome: input.welcome,
-      createdAt: this.now(),
-    };
+	consumeKeyPackage(identifier: string): PublishedKeyPackageRecord | null {
+		return this.storage.consumeKeyPackage(identifier);
+	}
 
-    return this.storage.storeWelcome(record);
-  }
+	storeWelcome(input: StoreWelcomeInput): WelcomeQueueRecord {
+		const record: WelcomeQueueRecord = {
+			targetStablePubkey: input.targetStablePubkey,
+			keyPackageReference: input.keyPackageReference,
+			welcome: input.welcome,
+			createdAt: this.now()
+		};
 
-  fetchPendingWelcomes(targetStablePubkey: string): WelcomeQueueRecord[] {
-    return this.storage.fetchPendingWelcomes(targetStablePubkey);
-  }
+		return this.storage.storeWelcome(record);
+	}
 
-  postGroupMessage(input: PostGroupMessageInput): GroupMessageRecord {
-    const decodedMessage = decodeOpaqueMessage(input.opaqueMessage);
-    const { groupId, epoch, handshakeMessage } =
-      getMessageMetadata(decodedMessage);
-    const currentRouting = this.storage.getGroupRouting(groupId);
+	fetchPendingWelcomes(targetStablePubkey: string): WelcomeQueueRecord[] {
+		return this.storage.fetchPendingWelcomes(targetStablePubkey);
+	}
 
-    if (
-      handshakeMessage &&
-      currentRouting &&
-      epoch < currentRouting.latestHandshakeEpoch
-    ) {
-      throw new Error(
-        `Rejected stale handshake message for group ${groupId}: ${epoch} < ${currentRouting.latestHandshakeEpoch}`,
-      );
-    }
+	deleteExpiredWelcomes(olderThanMs: number): number {
+		return this.storage.deleteExpiredWelcomes(olderThanMs);
+	}
 
-    const latestHandshakeEpoch = resolveLatestHandshakeEpoch(
-      currentRouting,
-      epoch,
-      handshakeMessage,
-    );
+	close(): void {
+		if (this.cleanupTimer) {
+			clearInterval(this.cleanupTimer);
+		}
+	}
 
-    const record = this.storage.appendGroupMessage({
-      groupId,
-      latestHandshakeEpoch,
-      ephemeralSenderPubkey: input.ephemeralSenderPubkey,
-      opaqueMessage: input.opaqueMessage,
-      createdAt: this.now(),
-    });
+	postGroupMessage(input: PostGroupMessageInput): GroupMessageRecord {
+		const decodedMessage = decodeOpaqueMessage(input.opaqueMessage);
+		const { groupId, epoch, handshakeMessage } = getMessageMetadata(decodedMessage);
+		const currentRouting = this.storage.getGroupRouting(groupId);
 
-    this.publishLiveGroupMessage(record);
+		if (handshakeMessage && currentRouting && epoch < currentRouting.latestHandshakeEpoch) {
+			throw new Error(
+				`Rejected stale handshake message for group ${groupId}: ${epoch} < ${currentRouting.latestHandshakeEpoch}`
+			);
+		}
 
-    return record;
-  }
+		const latestHandshakeEpoch = resolveLatestHandshakeEpoch(
+			currentRouting,
+			epoch,
+			handshakeMessage
+		);
 
-  fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[] {
-    return this.storage.fetchGroupMessages(input);
-  }
+		const record = this.storage.appendGroupMessage({
+			groupId,
+			latestHandshakeEpoch,
+			ephemeralSenderPubkey: input.ephemeralSenderPubkey,
+			opaqueMessage: input.opaqueMessage,
+			createdAt: this.now()
+		});
 
-  fetchManyGroupMessages(
-    input: FetchManyGroupMessagesInput,
-  ): GroupMessageRecord[] {
-    return this.storage.fetchManyGroupMessages(input);
-  }
+		this.publishLiveGroupMessage(record);
 
-  subscribeGroupMessages(
-    input: SubscribeGroupMessagesInput,
-  ): GroupMessageSubscription {
-    const queue = new AsyncMessageQueue();
-    const subscriber: GroupMessageSubscriber = queue;
+		return record;
+	}
 
-    this.addGroupSubscriber(input.groupId, subscriber);
+	fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[] {
+		return this.storage.fetchGroupMessages(input);
+	}
 
-    return {
-      messages: queue,
-      unsubscribe: () => {
-        subscriber.close();
-        this.removeGroupSubscriber(input.groupId, subscriber);
-      },
-    };
-  }
+	fetchManyGroupMessages(input: FetchManyGroupMessagesInput): GroupMessageRecord[] {
+		return this.storage.fetchManyGroupMessages(input);
+	}
 
-  subscribeManyGroupMessages(
-    input: SubscribeManyGroupMessagesInput,
-  ): GroupMessageSubscription {
-    const queue = new AsyncMessageQueue();
-    const cursorsByGroup = new Map<string, number>();
-    const liveBuffer: GroupMessageRecord[] = [];
-    let replayingBacklog = true;
-    for (const group of input.groups) {
-      cursorsByGroup.set(group.groupId, group.afterCursor ?? 0);
-    }
-    const groupIds = [...cursorsByGroup.keys()];
-    const emitIfNew = (record: GroupMessageRecord): void => {
-      const lastEmittedCursor = cursorsByGroup.get(record.groupId) ?? 0;
-      if (record.cursor <= lastEmittedCursor) {
-        return;
-      }
+	subscribeGroupMessages(input: SubscribeGroupMessagesInput): GroupMessageSubscription {
+		const queue = new AsyncMessageQueue();
+		const subscriber: GroupMessageSubscriber = queue;
 
-      cursorsByGroup.set(record.groupId, record.cursor);
-      queue.push(record);
-    };
-    const subscriber: GroupMessageSubscriber = {
-      push: (record) => {
-        if (replayingBacklog) {
-          liveBuffer.push(record);
-          return;
-        }
+		this.addGroupSubscriber(input.groupId, subscriber);
 
-        emitIfNew(record);
-      },
-      replay: (records) => {
-        for (const record of records) {
-          emitIfNew(record);
-        }
-      },
-      close: () => queue.close(),
-    };
+		return {
+			messages: queue,
+			unsubscribe: () => {
+				subscriber.close();
+				this.removeGroupSubscriber(input.groupId, subscriber);
+			}
+		};
+	}
 
-    for (const groupId of groupIds) {
-      this.addGroupSubscriber(groupId, subscriber);
-    }
+	subscribeManyGroupMessages(input: SubscribeManyGroupMessagesInput): GroupMessageSubscription {
+		const queue = new AsyncMessageQueue();
+		const cursorsByGroup = new Map<string, number>();
+		const liveBuffer: GroupMessageRecord[] = [];
+		let replayingBacklog = true;
+		for (const group of input.groups) {
+			cursorsByGroup.set(group.groupId, group.afterCursor ?? 0);
+		}
+		const groupIds = [...cursorsByGroup.keys()];
+		const emitIfNew = (record: GroupMessageRecord): void => {
+			const lastEmittedCursor = cursorsByGroup.get(record.groupId) ?? 0;
+			if (record.cursor <= lastEmittedCursor) {
+				return;
+			}
 
-    const backlog = this.fetchManyGroupMessages(input);
-    subscriber.replay?.(backlog);
-    replayingBacklog = false;
-    for (const record of liveBuffer.splice(0)) {
-      subscriber.push(record);
-    }
+			cursorsByGroup.set(record.groupId, record.cursor);
+			queue.push(record);
+		};
+		const subscriber: GroupMessageSubscriber = {
+			push: (record) => {
+				if (replayingBacklog) {
+					liveBuffer.push(record);
+					return;
+				}
 
-    return {
-      messages: queue,
-      unsubscribe: () => {
-        subscriber.close();
-        for (const groupId of groupIds) {
-          this.removeGroupSubscriber(groupId, subscriber);
-        }
-      },
-    };
-  }
+				emitIfNew(record);
+			},
+			replay: (records) => {
+				for (const record of records) {
+					emitIfNew(record);
+				}
+			},
+			close: () => queue.close()
+		};
 
-  private addGroupSubscriber(
-    groupId: string,
-    subscriber: GroupMessageSubscriber,
-  ): void {
-    let subscribers = this.groupSubscribers.get(groupId);
-    if (!subscribers) {
-      subscribers = new Set();
-      this.groupSubscribers.set(groupId, subscribers);
-    }
+		for (const groupId of groupIds) {
+			this.addGroupSubscriber(groupId, subscriber);
+		}
 
-    subscribers.add(subscriber);
-  }
+		const backlog = this.fetchManyGroupMessages(input);
+		subscriber.replay?.(backlog);
+		replayingBacklog = false;
+		for (const record of liveBuffer.splice(0)) {
+			subscriber.push(record);
+		}
 
-  private removeGroupSubscriber(
-    groupId: string,
-    subscriber: GroupMessageSubscriber,
-  ): void {
-    const subscribers = this.groupSubscribers.get(groupId);
-    if (!subscribers) {
-      return;
-    }
+		return {
+			messages: queue,
+			unsubscribe: () => {
+				subscriber.close();
+				for (const groupId of groupIds) {
+					this.removeGroupSubscriber(groupId, subscriber);
+				}
+			}
+		};
+	}
 
-    subscribers.delete(subscriber);
-    if (subscribers.size === 0) {
-      this.groupSubscribers.delete(groupId);
-    }
-  }
+	private addGroupSubscriber(groupId: string, subscriber: GroupMessageSubscriber): void {
+		let subscribers = this.groupSubscribers.get(groupId);
+		if (!subscribers) {
+			subscribers = new Set();
+			this.groupSubscribers.set(groupId, subscribers);
+		}
 
-  private publishLiveGroupMessage(record: GroupMessageRecord): void {
-    const subscribers = this.groupSubscribers.get(record.groupId);
-    if (!subscribers) {
-      return;
-    }
+		subscribers.add(subscriber);
+	}
 
-    for (const subscriber of subscribers) {
-      subscriber.push(record);
-    }
-  }
+	private removeGroupSubscriber(groupId: string, subscriber: GroupMessageSubscriber): void {
+		const subscribers = this.groupSubscribers.get(groupId);
+		if (!subscribers) {
+			return;
+		}
 
-  getGroupRouting(groupId: string): GroupRoutingRecord | null {
-    return this.storage.getGroupRouting(groupId);
-  }
+		subscribers.delete(subscriber);
+		if (subscribers.size === 0) {
+			this.groupSubscribers.delete(groupId);
+		}
+	}
 
-  getActiveSubscriptionCount(): number {
-    let count = 0;
-    for (const subscribers of this.groupSubscribers.values()) {
-      count += subscribers.size;
-    }
-    return count;
-  }
+	private publishLiveGroupMessage(record: GroupMessageRecord): void {
+		const subscribers = this.groupSubscribers.get(record.groupId);
+		if (!subscribers) {
+			return;
+		}
+
+		for (const subscriber of subscribers) {
+			subscriber.push(record);
+		}
+	}
+
+	getGroupRouting(groupId: string): GroupRoutingRecord | null {
+		return this.storage.getGroupRouting(groupId);
+	}
+
+	getActiveSubscriptionCount(): number {
+		let count = 0;
+		for (const subscribers of this.groupSubscribers.values()) {
+			count += subscribers.size;
+		}
+		return count;
+	}
 }
 
-export function createCoordinator(
-  options: CoordinatorOptions = {},
-): Coordinator {
-  return new Coordinator(options);
+export function createCoordinator(options: CoordinatorOptions = {}): Coordinator {
+	return new Coordinator(options);
 }
