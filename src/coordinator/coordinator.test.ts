@@ -629,4 +629,108 @@ describe("Coordinator group message flow", () => {
 
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);
   });
+
+  test("subscribeGroupMessages accepts sinceEpoch and fetchGroupMessages respects it", () => {
+    const coordinator = new Coordinator();
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-sub-coord",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const epoch3 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-sub-coord",
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+
+    // The coordinator accepts sinceEpoch on subscribe (adapter fetches
+    // backlog separately); verify fetchGroupMessages filters correctly.
+    const subscription = coordinator.subscribeGroupMessages({
+      groupId: "group-sub-coord",
+      afterCursor: 0,
+      sinceEpoch: 3n,
+    });
+
+    const backlog = coordinator.fetchGroupMessages({
+      groupId: "group-sub-coord",
+      afterCursor: 0,
+      sinceEpoch: 3n,
+    });
+
+    expect(backlog).toHaveLength(1);
+    expect(backlog[0]?.cursor).toBe(epoch3.cursor);
+
+    subscription.unsubscribe();
+  });
+
+  test("subscribeManyGroupMessages passes per-group sinceEpoch through to fetchManyGroupMessages", async () => {
+    const coordinator = new Coordinator();
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-a-many-coord",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const aEpoch3 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-a-many-coord",
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-b-many-coord",
+        epoch: 2n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+    const bEpoch4 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-b-many-coord",
+        epoch: 4n,
+        contentType: 1,
+        bytes: [4],
+      }),
+    });
+
+    const subscription = coordinator.subscribeManyGroupMessages({
+      groups: [
+        { groupId: "group-a-many-coord", afterCursor: 0, sinceEpoch: 3n },
+        { groupId: "group-b-many-coord", afterCursor: 0, sinceEpoch: 4n },
+      ],
+    });
+
+    const iterator = subscription.messages[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { groupId: "group-a-many-coord", cursor: aEpoch3.cursor },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { groupId: "group-b-many-coord", cursor: bEpoch4.cursor },
+    });
+
+    subscription.unsubscribe();
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
 });

@@ -92,7 +92,17 @@ function encodeWelcomeBase64(welcome: Welcome): string {
 }
 
 function parseSinceEpoch(sinceEpoch: string | undefined): bigint | undefined {
-  return sinceEpoch !== undefined ? BigInt(sinceEpoch) : undefined;
+  if (sinceEpoch === undefined) {
+    return undefined;
+  }
+
+  try {
+    return BigInt(sinceEpoch);
+  } catch {
+    throw new Error(
+      `Invalid since_epoch value: "${sinceEpoch}". Must be a non-negative integer string.`,
+    );
+  }
 }
 
 function decodeOpaqueMessageBase64(msg_64: string): Uint8Array {

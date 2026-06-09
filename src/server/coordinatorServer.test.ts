@@ -1387,4 +1387,446 @@ describe("CoordinatorAdapter", () => {
       ["beta-se", betaEpoch5.cursor],
     ]);
   });
+
+  test("subscribeGroupMessages filters backlog by since_epoch through the adapter contract", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-sub-epoch"));
+
+    const gid = "group-sub-epoch";
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const epoch3Msg = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    const epoch5Msg = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 5n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+
+    const writtenChunks: string[] = [];
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(data: string) {
+        writtenChunks.push(data);
+        if (writtenChunks.length >= 2) {
+          this.isActive = false;
+        }
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeGroupMessages(
+      { gid, after: 0, since_epoch: "3" },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await stream.abort();
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: { subscribed: true },
+    });
+
+    expect(writtenChunks).toHaveLength(2);
+    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({
+      cursor: epoch3Msg.cursor,
+      gid,
+    });
+    expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({
+      cursor: epoch5Msg.cursor,
+      gid,
+    });
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
+  test("subscribeManyGroupMessages filters per-group backlog by since_epoch through the adapter contract", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(
+      createActor("alice-many-sub-epoch"),
+    );
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-a-sub-se",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const aEpoch3 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-a-sub-se",
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    const aEpoch5 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-a-sub-se",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-b-sub-se",
+        epoch: 2n,
+        contentType: 1,
+        bytes: [4],
+      }),
+    });
+    const bEpoch4 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-b-sub-se",
+        epoch: 4n,
+        contentType: 1,
+        bytes: [5],
+      }),
+    });
+
+    const writtenChunks: string[] = [];
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(data: string) {
+        writtenChunks.push(data);
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeManyGroupMessages(
+      {
+        groups: [
+          { gid: "group-a-sub-se", after: 0, since_epoch: "3" },
+          { gid: "group-b-sub-se", after: 0, since_epoch: "4" },
+        ],
+      },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await stream.abort("done");
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: {
+        subscribed: true,
+        groups: ["group-a-sub-se", "group-b-sub-se"],
+      },
+    });
+
+    expect(writtenChunks.map((chunk) => JSON.parse(chunk))).toMatchObject([
+      { gid: "group-a-sub-se", cursor: aEpoch3.cursor },
+      { gid: "group-a-sub-se", cursor: aEpoch5.cursor },
+      { gid: "group-b-sub-se", cursor: bEpoch4.cursor },
+    ]);
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
+  test("subscribeGroupMessages with since_epoch that filters entire backlog still delivers live messages", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(
+      createActor("alice-sub-empty-backlog"),
+    );
+
+    const gid = "group-sub-empty";
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 2n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+
+    const writtenChunks: string[] = [];
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(data: string) {
+        writtenChunks.push(data);
+        if (writtenChunks.length >= 1) {
+          this.isActive = false;
+        }
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeGroupMessages(
+      { gid, after: 0, since_epoch: "10" },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Backlog should be empty (all messages below epoch 10)
+    expect(writtenChunks).toHaveLength(0);
+
+    // Post a live message at epoch 10
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 10n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await stream.abort();
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: { subscribed: true },
+    });
+
+    // Only the live message should be delivered
+    expect(writtenChunks).toHaveLength(1);
+    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({
+      cursor: 3,
+      gid,
+    });
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
+  test("abort during backlog replay cleans up coordinator subscriptions", async () => {
+    const coordinator = new Coordinator();
+    const { logger, entries } = createTestLogger();
+    const adapter = new CoordinatorAdapter(
+      coordinator,
+      undefined,
+      undefined,
+      logger,
+    );
+    const alice = await createMemberArtifacts(
+      createActor("alice-abort-backlog"),
+    );
+    const gid = "group-abort-backlog";
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 1n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+
+    let writeCount = 0;
+    const writeGate: { release: (() => void) | null } = { release: null };
+    let abortedReason: string | undefined;
+
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(_data: string) {
+        writeCount += 1;
+        if (writeCount === 1) {
+          return new Promise<void>((resolve) => {
+            writeGate.release = () => resolve();
+          });
+        }
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort(reason?: string) {
+        abortedReason = reason;
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeGroupMessages({ gid, after: 0 }, {
+      _meta: { stream },
+    } as never);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writeCount).toBe(1);
+    expect(coordinator.getActiveSubscriptionCount()).toBe(1);
+
+    await stream.abort("stop mid-backlog");
+
+    expect(abortedReason).toBe("stop mid-backlog");
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+
+    writeGate.release?.();
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: { subscribed: true },
+    });
+
+    expect(
+      entries.find((entry) => entry.bindings.type === "subscription_end")
+        ?.bindings,
+    ).toMatchObject({
+      groupId: gid,
+      reason: "stop mid-backlog",
+    });
+  });
+
+  test("subscribe-before-backlog race: since_epoch filters backlog but race message arrives via live stream", async () => {
+    const coordinator = new Coordinator();
+    const alice = await createMemberArtifacts(createActor("alice-race-epoch"));
+    const gid = "group-race-epoch";
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+
+    let raceMessageBytes: Uint8Array | null = null;
+    const originalFetch = coordinator.fetchGroupMessages.bind(coordinator);
+    coordinator.fetchGroupMessages = ((input) => {
+      if (input.groupId === gid && raceMessageBytes) {
+        coordinator.postGroupMessage({
+          ephemeralSenderPubkey: alice.actor.stablePubkey,
+          opaqueMessage: raceMessageBytes,
+        });
+        raceMessageBytes = null;
+      }
+
+      return originalFetch(input);
+    }) as typeof coordinator.fetchGroupMessages;
+
+    raceMessageBytes = createPrivateMessage({
+      groupId: gid,
+      epoch: 2n,
+      contentType: 1,
+      bytes: [3],
+    });
+
+    const adapter = new CoordinatorAdapter(coordinator);
+    const writtenChunks: string[] = [];
+    const stream = {
+      isActive: true,
+      async start() {},
+      async write(data: string) {
+        writtenChunks.push(data);
+      },
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeGroupMessages(
+      { gid, after: 0, since_epoch: "3" },
+      { _meta: { stream } } as never,
+    );
+
+    for (
+      let attempt = 0;
+      attempt < 10 && writtenChunks.length < 2;
+      attempt += 1
+    ) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await stream.abort();
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: { subscribed: true },
+    });
+
+    // Cursor 2 (epoch 3) arrives via filtered backlog; cursor 3 (epoch 2)
+    // is the race message that arrives via the live subscriber.
+    expect(writtenChunks).toHaveLength(2);
+    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({
+      cursor: 2,
+      gid,
+    });
+    expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({
+      cursor: 3,
+      gid,
+    });
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
 });
