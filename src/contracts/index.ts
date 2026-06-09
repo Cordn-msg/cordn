@@ -109,6 +109,7 @@ export const postGroupMessageOutputSchema = z.object({
 export const fetchGroupMessagesInputSchema = z.object({
   gid: z.string().min(1),
   after: z.number().int().positive().optional(),
+  since_epoch: z.string().optional(),
 });
 
 export const groupMessageSchema = z.object({

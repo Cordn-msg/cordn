@@ -603,4 +603,192 @@ describe.each<StorageFixture>([
       ["group-alpha", alphaSecond.cursor],
     ]);
   });
+
+  test("filters group messages by sinceEpoch", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    const first = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const second = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    const third = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+
+    const all = coordinator.fetchGroupMessages({ groupId: "g" });
+    expect(all.map((m) => m.cursor)).toEqual([
+      first.cursor,
+      second.cursor,
+      third.cursor,
+    ]);
+
+    const fromEpoch3 = coordinator.fetchGroupMessages({
+      groupId: "g",
+      sinceEpoch: 3n,
+    });
+    expect(fromEpoch3.map((m) => m.cursor)).toEqual([
+      second.cursor,
+      third.cursor,
+    ]);
+
+    const fromEpoch5 = coordinator.fetchGroupMessages({
+      groupId: "g",
+      sinceEpoch: 5n,
+    });
+    expect(fromEpoch5.map((m) => m.cursor)).toEqual([third.cursor]);
+
+    const fromEpoch10 = coordinator.fetchGroupMessages({
+      groupId: "g",
+      sinceEpoch: 10n,
+    });
+    expect(fromEpoch10).toEqual([]);
+  });
+
+  test("combines sinceEpoch with afterCursor", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const second = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    const third = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+
+    const result = coordinator.fetchGroupMessages({
+      groupId: "g",
+      afterCursor: second.cursor,
+      sinceEpoch: 3n,
+    });
+    expect(result.map((m) => m.cursor)).toEqual([third.cursor]);
+  });
+
+  test("fetchManyGroupMessages respects per-group sinceEpoch", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    const alpha1 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "alpha",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "beta",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+    const beta2 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "beta",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [4],
+      }),
+    });
+
+    const result = coordinator.fetchManyGroupMessages({
+      groups: [
+        { groupId: "alpha", afterCursor: alpha1.cursor, sinceEpoch: 5n },
+        { groupId: "beta", sinceEpoch: 5n },
+      ],
+    });
+    expect(result.map((m) => [m.groupId, m.cursor])).toEqual([
+      ["alpha", alpha1.cursor + 1],
+      ["beta", beta2.cursor],
+    ]);
+  });
+
+  test("sinceEpoch of 0 returns all messages", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+
+    const result = coordinator.fetchGroupMessages({
+      groupId: "g",
+      sinceEpoch: 0n,
+    });
+    expect(result).toHaveLength(2);
+  });
 });

@@ -149,6 +149,7 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
     const record: GroupMessageRecord = {
       cursor: group.nextCursor,
       groupId: params.groupId,
+      epoch: params.epoch,
       ephemeralSenderPubkey: params.ephemeralSenderPubkey,
       opaqueMessage: params.opaqueMessage,
       createdAt: params.createdAt,
@@ -166,20 +167,19 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[] {
     const messages = this.groups.get(input.groupId)?.messages ?? [];
-    if (input.afterCursor === undefined) {
-      return messages;
+    const sinceEpoch = input.sinceEpoch;
+    const afterCursor = input.afterCursor;
+
+    let filtered = messages;
+    if (sinceEpoch !== undefined && sinceEpoch > 0n) {
+      filtered = messages.filter((record) => record.epoch >= sinceEpoch);
     }
 
-    const startIndex = input.afterCursor;
-    if (startIndex <= 0) {
-      return messages;
+    if (afterCursor === undefined) {
+      return filtered;
     }
 
-    if (startIndex >= messages.length) {
-      return [];
-    }
-
-    return messages.slice(startIndex);
+    return filtered.filter((record) => record.cursor > afterCursor);
   }
 
   fetchManyGroupMessages(

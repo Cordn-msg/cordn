@@ -47,6 +47,7 @@ interface WelcomeRow {
 interface GroupMessageRow {
   cursor: number;
   group_id: string;
+  epoch: string | null;
   ephemeral_sender_pubkey: string;
   opaque_message: Buffer;
   created_at: number;
@@ -108,7 +109,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     GroupRoutingRow
   >;
   private readonly insertGroupMessageStatement: Database.Statement<
-    [number, string, string, Buffer, number]
+    [number, string, string, string, Buffer, number]
   >;
   private readonly selectGroupRoutingForCursorStatement: Database.Statement<
     [string],
@@ -120,6 +121,14 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   >;
   private readonly fetchGroupMessagesAfterCursorStatement: Database.Statement<
     [string, number],
+    GroupMessageRow
+  >;
+  private readonly fetchGroupMessagesSinceEpochStatement: Database.Statement<
+    [string, string],
+    GroupMessageRow
+  >;
+  private readonly fetchGroupMessagesSinceEpochAfterCursorStatement: Database.Statement<
+    [string, number, string],
     GroupMessageRow
   >;
   private readonly fetchManyGroupMessagesStatements = new Map<
@@ -210,6 +219,16 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       CREATE INDEX IF NOT EXISTS idx_group_messages_group_cursor
       ON group_messages (group_id, cursor);
     `);
+
+    // Migration: add epoch column for group message sinceEpoch filtering.
+    // NULL means "unknown epoch" (legacy data); the fetch filter treats
+    // NULL as always passing the sinceEpoch bound.
+    const groupMessagesColumns = this.database
+      .prepare("PRAGMA table_info('group_messages')")
+      .all() as Array<{ name: string }>;
+    if (!groupMessagesColumns.some((col) => col.name === "epoch")) {
+      this.database.exec("ALTER TABLE group_messages ADD COLUMN epoch TEXT");
+    }
 
     this.publishKeyPackageStatement = this.database.prepare<
       [string, string, Buffer, number, number, string]
@@ -321,15 +340,16 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       LIMIT 1
     `);
     this.insertGroupMessageStatement = this.database.prepare<
-      [number, string, string, Buffer, number]
+      [number, string, string, string, Buffer, number]
     >(`
       INSERT INTO group_messages (
         cursor,
         group_id,
+        epoch,
         ephemeral_sender_pubkey,
         opaque_message,
         created_at
-      ) VALUES (?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?)
     `);
     this.selectGroupRoutingForCursorStatement = this.database.prepare<
       [string],
@@ -343,7 +363,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, ephemeral_sender_pubkey, opaque_message, created_at
+      SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at
       FROM group_messages
       WHERE group_id = ?
       ORDER BY cursor ASC
@@ -352,9 +372,27 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string, number],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, ephemeral_sender_pubkey, opaque_message, created_at
+      SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at
       FROM group_messages
       WHERE group_id = ? AND cursor > ?
+      ORDER BY cursor ASC
+    `);
+    this.fetchGroupMessagesSinceEpochStatement = this.database.prepare<
+      [string, string],
+      GroupMessageRow
+    >(`
+      SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at
+      FROM group_messages
+      WHERE group_id = ?
+        AND (epoch IS NULL OR CAST(epoch AS INTEGER) >= CAST(? AS INTEGER))
+      ORDER BY cursor ASC
+    `);
+    this.fetchGroupMessagesSinceEpochAfterCursorStatement = this.database
+      .prepare<[string, number, string], GroupMessageRow>(`
+      SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at
+      FROM group_messages
+      WHERE group_id = ? AND cursor > ?
+        AND (epoch IS NULL OR CAST(epoch AS INTEGER) >= CAST(? AS INTEGER))
       ORDER BY cursor ASC
     `);
 
@@ -407,6 +445,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         this.insertGroupMessageStatement.run(
           cursor,
           params.groupId,
+          params.epoch.toString(),
           params.ephemeralSenderPubkey,
           Buffer.from(params.opaqueMessage),
           params.createdAt,
@@ -421,6 +460,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         return {
           cursor,
           groupId: params.groupId,
+          epoch: params.epoch,
           ephemeralSenderPubkey: params.ephemeralSenderPubkey,
           opaqueMessage: params.opaqueMessage,
           createdAt: params.createdAt,
@@ -512,6 +552,22 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   }
 
   fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[] {
+    if (input.sinceEpoch !== undefined && input.sinceEpoch > 0n) {
+      const sinceEpochStr = input.sinceEpoch.toString();
+      const rows =
+        input.afterCursor === undefined
+          ? this.fetchGroupMessagesSinceEpochStatement.all(
+              input.groupId,
+              sinceEpochStr,
+            )
+          : this.fetchGroupMessagesSinceEpochAfterCursorStatement.all(
+              input.groupId,
+              input.afterCursor,
+              sinceEpochStr,
+            );
+      return rows.map((row) => this.mapGroupMessageRow(row));
+    }
+
     const rows =
       input.afterCursor === undefined
         ? this.fetchGroupMessagesStatement.all(input.groupId)
@@ -537,6 +593,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       index,
       group.groupId,
       group.afterCursor ?? 0,
+      group.sinceEpoch !== undefined && group.sinceEpoch > 0n
+        ? group.sinceEpoch.toString()
+        : "0",
     ]);
     const rows = statement.all(...params);
 
@@ -551,18 +610,20 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       return cached;
     }
 
-    const values = Array.from({ length: groupCount }, () => "(?, ?, ?)").join(
-      ", ",
-    );
+    const values = Array.from(
+      { length: groupCount },
+      () => "(?, ?, ?, ?)",
+    ).join(", ");
     const statement = this.database.prepare<unknown[], GroupMessageRow>(`
-        WITH requested(group_order, group_id, after_cursor) AS (
+        WITH requested(group_order, group_id, after_cursor, since_epoch) AS (
           VALUES ${values}
         )
-        SELECT gm.cursor, gm.group_id, gm.ephemeral_sender_pubkey, gm.opaque_message, gm.created_at
+        SELECT gm.cursor, gm.group_id, gm.epoch, gm.ephemeral_sender_pubkey, gm.opaque_message, gm.created_at
         FROM requested r
         JOIN group_messages gm
           ON gm.group_id = r.group_id
          AND gm.cursor > r.after_cursor
+         AND (gm.epoch IS NULL OR CAST(gm.epoch AS INTEGER) >= CAST(r.since_epoch AS INTEGER))
         ORDER BY r.group_order ASC, gm.cursor ASC
       `);
 
@@ -614,6 +675,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     return {
       cursor: row.cursor,
       groupId: row.group_id,
+      epoch: row.epoch !== null ? BigInt(row.epoch) : 0n,
       ephemeralSenderPubkey: row.ephemeral_sender_pubkey,
       opaqueMessage: toUint8Array(row.opaque_message),
       createdAt: row.created_at,

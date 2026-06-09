@@ -26,6 +26,7 @@ import type {
 export interface AppendGroupMessageParams {
   groupId: string;
   latestHandshakeEpoch: bigint;
+  epoch: bigint;
   ephemeralSenderPubkey: string;
   opaqueMessage: Uint8Array;
   createdAt: number;

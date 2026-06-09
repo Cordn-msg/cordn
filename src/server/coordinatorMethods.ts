@@ -15,6 +15,7 @@ import {
 } from "ts-mls";
 
 import { isLastResortKeyPackage } from "../lastResortKeyPackage.ts";
+import type { GroupMessageRecord } from "../coordinator/types.ts";
 import { Coordinator } from "../coordinator/coordinator.ts";
 import {
   consumeKeyPackageInputSchema,
@@ -88,6 +89,10 @@ function decodeWelcomeBase64(welcome_64: string): Welcome {
 
 function encodeWelcomeBase64(welcome: Welcome): string {
   return encodeBase64(encodeWelcome(welcome));
+}
+
+function parseSinceEpoch(sinceEpoch: string | undefined): bigint | undefined {
+  return sinceEpoch !== undefined ? BigInt(sinceEpoch) : undefined;
 }
 
 function decodeOpaqueMessageBase64(msg_64: string): Uint8Array {
@@ -177,12 +182,14 @@ function getOpenStreamWriter(extra: ToolExtra): OpenStreamWriter {
   return stream;
 }
 
-function mapGroupMessage(record: {
-  cursor: number;
-  groupId: string;
-  opaqueMessage: Uint8Array;
-  createdAt: number;
-}): z.infer<typeof groupMessageSchema> {
+/** Maps a GroupMessageRecord to the wire format, intentionally omitting
+ *  epoch (clients extract it from the decrypted MLS plaintext). */
+function mapGroupMessage(
+  record: Pick<
+    GroupMessageRecord,
+    "cursor" | "groupId" | "opaqueMessage" | "createdAt"
+  >,
+): z.infer<typeof groupMessageSchema> {
   return {
     cursor: record.cursor,
     gid: record.groupId,
@@ -534,6 +541,7 @@ export class CoordinatorAdapter {
     const records = this.coordinator.fetchGroupMessages({
       groupId: input.gid,
       afterCursor: input.after,
+      sinceEpoch: parseSinceEpoch(input.since_epoch),
     });
 
     this.recordOperation("fetchGroupMessages");
@@ -553,6 +561,7 @@ export class CoordinatorAdapter {
       groups: input.groups.map((group) => ({
         groupId: group.gid,
         afterCursor: group.after,
+        sinceEpoch: parseSinceEpoch(group.since_epoch),
       })),
     });
 
@@ -574,13 +583,17 @@ export class CoordinatorAdapter {
     const clientPubkey = extra._meta?.clientPubkey;
     const groupId = input.gid;
 
+    const sinceEpoch = parseSinceEpoch(input.since_epoch);
+
     const subscription = this.coordinator.subscribeGroupMessages({
       groupId,
       afterCursor: input.after,
+      sinceEpoch,
     });
     const backlog = this.coordinator.fetchGroupMessages({
       groupId,
       afterCursor: input.after,
+      sinceEpoch,
     });
     let lastEmittedCursor = input.after ?? 0;
     const originalAbort = stream.abort.bind(stream);
@@ -692,6 +705,7 @@ export class CoordinatorAdapter {
       groups: input.groups.map((group) => ({
         groupId: group.gid,
         afterCursor: group.after,
+        sinceEpoch: parseSinceEpoch(group.since_epoch),
       })),
     });
     const originalAbort = stream.abort.bind(stream);

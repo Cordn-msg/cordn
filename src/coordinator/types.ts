@@ -27,6 +27,7 @@ export interface GroupRoutingRecord {
 export interface GroupMessageRecord {
   cursor: number;
   groupId: string;
+  epoch: bigint;
   ephemeralSenderPubkey: string;
   opaqueMessage: Uint8Array;
   createdAt: number;
@@ -53,6 +54,7 @@ export interface PostGroupMessageInput {
 export interface FetchGroupMessagesInput {
   groupId: string;
   afterCursor?: number;
+  sinceEpoch?: bigint;
 }
 
 export type SubscribeGroupMessagesInput = FetchGroupMessagesInput;

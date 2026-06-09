@@ -305,6 +305,7 @@ export class Coordinator {
     const record = this.storage.appendGroupMessage({
       groupId,
       latestHandshakeEpoch,
+      epoch,
       ephemeralSenderPubkey: input.ephemeralSenderPubkey,
       opaqueMessage: input.opaqueMessage,
       createdAt: this.now(),

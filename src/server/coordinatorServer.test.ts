@@ -16,6 +16,7 @@ import {
   createMemberArtifacts,
   createWelcomeForNewMember,
   createActor,
+  createPrivateMessage,
   getTestCiphersuite,
 } from "../coordinator/testUtils.ts";
 import { CoordinatorAdapter } from "./coordinatorMethods.ts";
@@ -1262,5 +1263,128 @@ describe("CoordinatorAdapter", () => {
         createExtra(bob.actor.stablePubkey, secondEvent.id),
       ),
     ).rejects.toThrow("Key package quota exceeded");
+  });
+
+  test("fetchGroupMessages filters by since_epoch through the adapter contract", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-since-epoch"));
+
+    const gid = "group-since-epoch";
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const epoch3Msg = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 3n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    const epoch5Msg = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: gid,
+        epoch: 5n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+
+    const all = adapter.fetchGroupMessages({ gid });
+    expect(all.structuredContent.messages).toHaveLength(3);
+
+    const fromEpoch3 = adapter.fetchGroupMessages({
+      gid,
+      since_epoch: "3",
+    });
+    expect(fromEpoch3.structuredContent.messages).toHaveLength(2);
+    expect(fromEpoch3.structuredContent.messages.map((m) => m.cursor)).toEqual([
+      epoch3Msg.cursor,
+      epoch5Msg.cursor,
+    ]);
+
+    const fromEpoch5 = adapter.fetchGroupMessages({
+      gid,
+      since_epoch: "5",
+    });
+    expect(fromEpoch5.structuredContent.messages).toHaveLength(1);
+    expect(fromEpoch5.structuredContent.messages[0]?.cursor).toBe(
+      epoch5Msg.cursor,
+    );
+
+    const fromEpoch10 = adapter.fetchGroupMessages({
+      gid,
+      since_epoch: "10",
+    });
+    expect(fromEpoch10.structuredContent.messages).toHaveLength(0);
+  });
+
+  test("fetchManyGroupMessages filters by per-group since_epoch through the adapter contract", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(
+      createActor("alice-many-since-epoch"),
+    );
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "alpha-se",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const alphaEpoch5 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "alpha-se",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "beta-se",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+    const betaEpoch5 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "beta-se",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [4],
+      }),
+    });
+
+    const result = adapter.fetchManyGroupMessages({
+      groups: [
+        { gid: "alpha-se", after: 1, since_epoch: "5" },
+        { gid: "beta-se", since_epoch: "5" },
+      ],
+    });
+
+    expect(
+      result.structuredContent.messages.map((m) => [m.gid, m.cursor]),
+    ).toEqual([
+      ["alpha-se", alphaEpoch5.cursor],
+      ["beta-se", betaEpoch5.cursor],
+    ]);
   });
 });
