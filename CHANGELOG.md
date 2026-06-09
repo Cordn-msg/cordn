@@ -1,5 +1,17 @@
 # cordn
 
+## 0.1.10
+
+### Patch Changes
+
+- fix(sqlite): exclude NULL epochs from sinceEpoch filtering when > 0
+
+  Previously, NULL epochs (legacy data) were always included in sinceEpoch
+  filtering, which could return messages with unknown epochs even when a
+  positive sinceEpoch was specified. Now, NULL epochs are excluded when
+  sinceEpoch > 0, and included only when sinceEpoch = 0 for backward
+  compatibility. Updated SQL queries and added tests.
+
 ## 0.1.9
 
 ### Patch Changes

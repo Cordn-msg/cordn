@@ -791,4 +791,98 @@ describe.each<StorageFixture>([
     });
     expect(result).toHaveLength(2);
   });
+
+  test("sinceEpoch > 0 excludes messages with epoch 0n", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 0n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "g",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+
+    // sinceEpoch > 0 must exclude epoch 0n messages
+    const filtered = coordinator.fetchGroupMessages({
+      groupId: "g",
+      sinceEpoch: 3n,
+    });
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]?.epoch).toBe(5n);
+
+    // sinceEpoch = 0 includes everything (backward compat)
+    const all = coordinator.fetchGroupMessages({
+      groupId: "g",
+      sinceEpoch: 0n,
+    });
+    expect(all).toHaveLength(2);
+  });
+
+  test("fetchManyGroupMessages excludes 0n epoch messages per group with sinceEpoch > 0", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "alpha",
+        epoch: 0n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const alpha5 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "alpha",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "beta",
+        epoch: 0n,
+        contentType: 1,
+        bytes: [3],
+      }),
+    });
+    const beta5 = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "sender",
+      opaqueMessage: createPrivateMessage({
+        groupId: "beta",
+        epoch: 5n,
+        contentType: 1,
+        bytes: [4],
+      }),
+    });
+
+    const result = coordinator.fetchManyGroupMessages({
+      groups: [
+        { groupId: "alpha", sinceEpoch: 3n },
+        { groupId: "beta", sinceEpoch: 3n },
+      ],
+    });
+    expect(result.map((m) => [m.groupId, m.cursor])).toEqual([
+      ["alpha", alpha5.cursor],
+      ["beta", beta5.cursor],
+    ]);
+  });
 });

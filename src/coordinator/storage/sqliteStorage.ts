@@ -221,8 +221,8 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     `);
 
     // Migration: add epoch column for group message sinceEpoch filtering.
-    // NULL means "unknown epoch" (legacy data); the fetch filter treats
-    // NULL as always passing the sinceEpoch bound.
+    // NULL means "unknown epoch" (legacy data). SinceEpoch > 0 excludes NULL
+    // epochs; sinceEpoch = 0 (or undefined) includes them for backward compat.
     const groupMessagesColumns = this.database
       .prepare("PRAGMA table_info('group_messages')")
       .all() as Array<{ name: string }>;
@@ -384,7 +384,8 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at
       FROM group_messages
       WHERE group_id = ?
-        AND (epoch IS NULL OR CAST(epoch AS INTEGER) >= CAST(? AS INTEGER))
+        AND epoch IS NOT NULL
+        AND CAST(epoch AS INTEGER) >= CAST(? AS INTEGER)
       ORDER BY cursor ASC
     `);
     this.fetchGroupMessagesSinceEpochAfterCursorStatement = this.database
@@ -392,7 +393,8 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at
       FROM group_messages
       WHERE group_id = ? AND cursor > ?
-        AND (epoch IS NULL OR CAST(epoch AS INTEGER) >= CAST(? AS INTEGER))
+        AND epoch IS NOT NULL
+        AND CAST(epoch AS INTEGER) >= CAST(? AS INTEGER)
       ORDER BY cursor ASC
     `);
 
@@ -623,7 +625,10 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         JOIN group_messages gm
           ON gm.group_id = r.group_id
          AND gm.cursor > r.after_cursor
-         AND (gm.epoch IS NULL OR CAST(gm.epoch AS INTEGER) >= CAST(r.since_epoch AS INTEGER))
+         AND (
+           CAST(r.since_epoch AS INTEGER) = 0
+           OR gm.epoch IS NOT NULL AND CAST(gm.epoch AS INTEGER) >= CAST(r.since_epoch AS INTEGER)
+         )
         ORDER BY r.group_order ASC, gm.cursor ASC
       `);
 
