@@ -1,5 +1,13 @@
 # cordn
 
+## 0.1.9
+
+### Patch Changes
+
+- feat(coordinator): add epoch-based filtering for group messages
+
+  Add `since_epoch` parameter to `fetchGroupMessages` to allow clients to retrieve messages from a specific epoch onward. Update storage implementations (in-memory and SQLite) to store and filter by epoch. This enables efficient message retrieval based on epoch boundaries.
+
 ## 0.1.8
 
 ### Patch Changes
