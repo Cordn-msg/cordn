@@ -3,6 +3,7 @@ import type {
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
+  JoinRequestRecord,
   PublishedKeyPackageRecord,
   WelcomeQueueRecord,
 } from "../types.ts";
@@ -61,11 +62,43 @@ export interface CoordinatorStorage {
     now: number,
   ): WelcomeQueueRecord[];
   /**
-   * Delete welcomes that have been read (readAt is not null) and whose
-   * `readAt` timestamp is older than `threshold`. Unread welcomes
-   * are never deleted. Returns the number of deleted records.
+   * Delete expired welcomes.
+   *
+   * Two independent expiration conditions are applied:
+   * - Read welcomes whose `readAt` is older than `readThreshold`.
+   * - Unread welcomes whose `createdAt` is older than `unreadThreshold`.
+   *
+   * When `unreadThreshold` is 0 (epoch) the second condition never matches,
+   * preserving the current "unread lives forever" behavior.
+   * Returns the number of deleted records.
    */
-  deleteExpiredWelcomes(threshold: number): number;
+  deleteExpiredWelcomes(readThreshold: number, unreadThreshold: number): number;
+  storeJoinRequest(record: JoinRequestRecord): JoinRequestRecord;
+  /**
+   * Fetch all pending join requests for a group and mark unread
+   * requests as read at the given timestamp.
+   *
+   * Requests whose `readAt` is already set are returned without updating
+   * their timestamp, preserving the original read time for TTL calculations.
+   * This method never deletes records; cleanup is handled separately via
+   * {@link deleteExpiredJoinRequests}.
+   */
+  fetchPendingJoinRequests(groupId: string, now: number): JoinRequestRecord[];
+  /**
+   * Delete expired join requests.
+   *
+   * Two independent expiration conditions are applied:
+   * - Read requests whose `readAt` is older than `readThreshold`.
+   * - Unread requests whose `createdAt` is older than `unreadThreshold`.
+   *
+   * When `unreadThreshold` is 0 (epoch) the second condition never matches,
+   * preserving the current "unread lives forever" behavior.
+   * Returns the number of deleted records.
+   */
+  deleteExpiredJoinRequests(
+    readThreshold: number,
+    unreadThreshold: number,
+  ): number;
   appendGroupMessage(params: AppendGroupMessageParams): GroupMessageRecord;
   /**
    * Fetch messages for one group only. If `afterCursor` is provided, it is a

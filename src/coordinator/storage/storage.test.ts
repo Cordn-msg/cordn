@@ -281,7 +281,7 @@ describe.each<StorageFixture>([
 
     // Advance time past the 1h default TTL.
     tick += 3_700_000; // ~1h 2min
-    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000); // 1h TTL
+    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000, 0); // 1h TTL, unread preserved
     expect(deleted).toBe(1);
 
     // Welcome is gone after cleanup.
@@ -326,10 +326,102 @@ describe.each<StorageFixture>([
 
     // Advance time well past any reasonable TTL.
     tick += 90_000_000; // 25 hours
-    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000);
+    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000, 0);
     expect(deleted).toBe(0);
 
     // Unread welcome is still present.
+    expect(
+      coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
+    ).toHaveLength(1);
+  });
+
+  test("deletes unread welcomes older than welcomeMaxAgeMs", async () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const maxAgeMs = 3_600_000; // 1h max age for unread
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+      welcomeMaxAgeMs: maxAgeMs,
+    });
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("welcome-unread-maxage"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: fixture.keyPackageRefHex,
+      welcome: fixture.welcome,
+    });
+
+    // Never fetch.
+    tick += maxAgeMs + 60_000; // past maxAge
+    const deleted = coordinator.deleteExpiredWelcomes(
+      tick - 3_600_000,
+      tick - maxAgeMs,
+    );
+    expect(deleted).toBe(1);
+    expect(
+      coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
+    ).toHaveLength(0);
+  });
+
+  test("keeps unread welcomes younger than welcomeMaxAgeMs", async () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const maxAgeMs = 3_600_000;
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+      welcomeMaxAgeMs: maxAgeMs,
+    });
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("welcome-unread-keep"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: fixture.keyPackageRefHex,
+      welcome: fixture.welcome,
+    });
+
+    // Never fetch.
+    tick += maxAgeMs - 60_000; // within maxAge
+    const deleted = coordinator.deleteExpiredWelcomes(
+      tick - 3_600_000,
+      tick - maxAgeMs,
+    );
+    expect(deleted).toBe(0);
     expect(
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(1);
@@ -378,7 +470,7 @@ describe.each<StorageFixture>([
     // Advance only 30min past readAt — welcome is 2.5h old by createdAt
     // but only 30min old by readAt. A 1h TTL threshold should NOT delete it.
     tick += 1_800_000; // 30 minutes
-    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000); // 1h TTL
+    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000, 0); // 1h TTL, unread preserved
     expect(deleted).toBe(0);
 
     // Welcome is still present.
@@ -884,5 +976,397 @@ describe.each<StorageFixture>([
       ["alpha", alpha5.cursor],
       ["beta", beta5.cursor],
     ]);
+  });
+
+  test("stores and returns pending join requests per group without draining", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-2",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-beta",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "bob-requester",
+      keyPackageRef: "kp-ref-bob-1",
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-beta",
+      requesterStablePubkey: "carol-requester",
+      keyPackageRef: "kp-ref-carol-1",
+    });
+
+    const fetchedAlpha = coordinator.fetchPendingJoinRequests("group-alpha");
+    const fetchedBeta = coordinator.fetchPendingJoinRequests("group-beta");
+
+    expect(fetchedAlpha).toHaveLength(2);
+    expect(fetchedAlpha[0]?.requesterStablePubkey).toBe("alice-requester");
+    expect(fetchedAlpha[0]?.keyPackageRef).toBe("kp-ref-alice-1");
+    expect(fetchedAlpha[0]?.readAt).not.toBeNull();
+    expect(fetchedAlpha[1]?.requesterStablePubkey).toBe("bob-requester");
+    expect(fetchedAlpha[1]?.keyPackageRef).toBe("kp-ref-bob-1");
+    expect(fetchedAlpha[1]?.readAt).not.toBeNull();
+
+    expect(fetchedBeta).toHaveLength(1);
+    expect(fetchedBeta[0]?.requesterStablePubkey).toBe("carol-requester");
+    expect(fetchedBeta[0]?.keyPackageRef).toBe("kp-ref-carol-1");
+    expect(fetchedBeta[0]?.readAt).not.toBeNull();
+
+    // Requests survive subsequent fetches (non-destructive).
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(2);
+    expect(coordinator.fetchPendingJoinRequests("group-beta")).toHaveLength(1);
+  });
+
+  test("deduplicates join requests per group and requester", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    const first = coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    const second = coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-2",
+    });
+
+    // Second call returns the same record (dedup by unread request).
+    expect(second.keyPackageRef).toBe(first.keyPackageRef);
+    expect(second.createdAt).toBe(first.createdAt);
+
+    // Fetching still returns only one request for alice.
+    const fetched = coordinator.fetchPendingJoinRequests("group-alpha");
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]?.requesterStablePubkey).toBe("alice-requester");
+    expect(fetched[0]?.keyPackageRef).toBe("kp-ref-alice-1");
+  });
+
+  test("allows new join request after previous one was read", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    // Fetch marks as read.
+    coordinator.fetchPendingJoinRequests("group-alpha");
+
+    // Now a new request with a new kp_ref can be stored (old one is read).
+    const newRequest = coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-2",
+    });
+
+    expect(newRequest.keyPackageRef).toBe("kp-ref-alice-2");
+
+    const fetched = coordinator.fetchPendingJoinRequests("group-alpha");
+    // Both the old (read) and new (unread) requests are returned.
+    expect(fetched).toHaveLength(2);
+  });
+
+  test("deletes read join requests that exceed TTL", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    // Fetch marks the request as read.
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
+
+    // Advance time past the 1h default TTL.
+    tick += 3_700_000; // ~1h 2min
+    const deleted = coordinator.deleteExpiredJoinRequests(tick - 3_600_000, 0); // 1h TTL, unread preserved
+    expect(deleted).toBe(1);
+
+    // Request is gone after cleanup.
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(0);
+  });
+
+  test("does not delete unread join requests regardless of age", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    // Never fetch, so readAt remains null.
+
+    // Advance time well past any reasonable TTL.
+    tick += 90_000_000; // 25 hours
+    const deleted = coordinator.deleteExpiredJoinRequests(tick - 3_600_000, 0);
+    expect(deleted).toBe(0);
+
+    // Unread request is still present.
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
+  });
+
+  test("deletes unread join requests older than welcomeMaxAgeMs", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const maxAgeMs = 3_600_000;
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+      welcomeMaxAgeMs: maxAgeMs,
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    // Never fetch.
+    tick += maxAgeMs + 60_000;
+    const deleted = coordinator.deleteExpiredJoinRequests(
+      tick - 3_600_000,
+      tick - maxAgeMs,
+    );
+    expect(deleted).toBe(1);
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(0);
+  });
+
+  test("keeps unread join requests younger than welcomeMaxAgeMs", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const maxAgeMs = 3_600_000;
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+      welcomeMaxAgeMs: maxAgeMs,
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    // Never fetch.
+    tick += maxAgeMs - 60_000;
+    const deleted = coordinator.deleteExpiredJoinRequests(
+      tick - 3_600_000,
+      tick - maxAgeMs,
+    );
+    expect(deleted).toBe(0);
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
+  });
+
+  test("deleteExpiredJoinRequests uses readAt timestamp, not createdAt", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    // Advance time 2 hours before fetching.
+    tick += 7_200_000; // 2 hours
+
+    // Now fetch — this sets readAt to now (2h after createdAt).
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
+
+    // Advance only 30min past readAt — only 30min old by readAt.
+    tick += 1_800_000; // 30 minutes
+    const deleted = coordinator.deleteExpiredJoinRequests(tick - 3_600_000, 0); // 1h TTL, unread preserved
+    expect(deleted).toBe(0);
+
+    // Request is still present.
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
+  });
+
+  test("cleanup timer deletes both expired welcomes and join requests in the same interval", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    let tick = 1_700_000_000_000;
+    const coordinator = new Coordinator({
+      storage,
+      now: () => {
+        tick += 1;
+        return tick;
+      },
+      welcomeCleanupIntervalMs: 0,
+    });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    // Fetch marks as read.
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
+
+    // Manually simulate what the cleanup timer would do: delete both
+    // expired welcomes and join requests with the same threshold.
+    tick += 3_700_000; // ~1h 2min
+    const threshold = tick - 3_600_000; // 1h TTL
+    const deletedWelcomes = coordinator.deleteExpiredWelcomes(threshold, 0);
+    const deletedRequests = coordinator.deleteExpiredJoinRequests(threshold, 0);
+
+    // Both cleanup methods should have run (even if only requests were stored).
+    expect(deletedWelcomes).toBe(0); // No welcomes stored
+    expect(deletedRequests).toBe(1); // One read+expired request
+
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(0);
   });
 });

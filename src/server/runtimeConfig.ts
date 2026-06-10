@@ -45,6 +45,8 @@ export interface ServerRuntimeConfig {
     ttlMs: number;
     /** Interval in ms between cleanup runs. Default: 1h. */
     cleanupIntervalMs: number;
+    /** Max age in ms for unread welcomes before they are cleaned up. 0 disables. Default: 30 days. */
+    maxAgeMs: number;
   };
 }
 
@@ -243,6 +245,9 @@ export function readServerRuntimeConfig(
           "CORDN_WELCOME_CLEANUP_INTERVAL_MINUTES",
           60,
         ) * 60_000,
+      maxAgeMs:
+        readPositiveIntegerEnv(env, "CORDN_UNREAD_MAX_AGE_DAYS", 30) *
+        86_400_000,
     },
   };
 }
@@ -257,6 +262,7 @@ export function createConfiguredCoordinator(
     storage,
     welcomeTtlMs: welcomeTtl?.ttlMs,
     welcomeCleanupIntervalMs: welcomeTtl?.cleanupIntervalMs,
+    welcomeMaxAgeMs: welcomeTtl?.maxAgeMs,
   });
 }
 

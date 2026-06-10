@@ -3,9 +3,11 @@ import type {
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
+  JoinRequestRecord,
   PostGroupMessageInput,
   PublishedKeyPackageRecord,
   PublishKeyPackageInput,
+  StoreJoinRequestInput,
   SubscribeGroupMessagesInput,
   SubscribeManyGroupMessagesInput,
   StoreWelcomeInput,
@@ -27,10 +29,12 @@ const groupIdDecoder = new TextDecoder();
 export interface CoordinatorOptions {
   storage?: CoordinatorStorage;
   now?: () => number;
-  /** TTL in ms for welcome cleanup. Read welcomes older than this are deleted. Default: 1h. */
+  /** TTL in ms for read welcome and join request cleanup. Read records whose readAt is older than this threshold are deleted. Default: 1h. */
   welcomeTtlMs?: number;
   /** Interval in ms between cleanup runs. Set to 0 to disable. Default: 1h. */
   welcomeCleanupIntervalMs?: number;
+  /** Max age in ms for unread welcome and join request records. Unread records created before (now - maxAge) are deleted. Set to 0 or negative to disable (keep unread forever). Default: 30 days (2_592_000_000). */
+  welcomeMaxAgeMs?: number;
 }
 
 function decodeOpaqueMessage(opaqueMessage: Uint8Array): MlsMessage {
@@ -209,8 +213,13 @@ export class Coordinator {
     const intervalMs = options.welcomeCleanupIntervalMs ?? 3_600_000;
     if (intervalMs > 0) {
       const ttlMs = options.welcomeTtlMs ?? 3_600_000;
+      const maxAgeMs = options.welcomeMaxAgeMs ?? 2_592_000_000; // 30 days
       this.cleanupTimer = setInterval(() => {
-        this.deleteExpiredWelcomes(this.now() - ttlMs);
+        const now = this.now();
+        const readThreshold = now - ttlMs;
+        const unreadThreshold = maxAgeMs > 0 ? now - maxAgeMs : 0;
+        this.deleteExpiredWelcomes(readThreshold, unreadThreshold);
+        this.deleteExpiredJoinRequests(readThreshold, unreadThreshold);
       }, intervalMs);
       // Allow the timer to not keep the process alive.
       if (this.cleanupTimer && "unref" in this.cleanupTimer) {
@@ -270,8 +279,37 @@ export class Coordinator {
     return this.storage.fetchPendingWelcomes(targetStablePubkey, this.now());
   }
 
-  deleteExpiredWelcomes(threshold: number): number {
-    return this.storage.deleteExpiredWelcomes(threshold);
+  deleteExpiredWelcomes(
+    readThreshold: number,
+    unreadThreshold: number,
+  ): number {
+    return this.storage.deleteExpiredWelcomes(readThreshold, unreadThreshold);
+  }
+
+  storeJoinRequest(input: StoreJoinRequestInput): JoinRequestRecord {
+    const record: JoinRequestRecord = {
+      groupId: input.groupId,
+      requesterStablePubkey: input.requesterStablePubkey,
+      keyPackageRef: input.keyPackageRef,
+      createdAt: this.now(),
+      readAt: null,
+    };
+
+    return this.storage.storeJoinRequest(record);
+  }
+
+  fetchPendingJoinRequests(groupId: string): JoinRequestRecord[] {
+    return this.storage.fetchPendingJoinRequests(groupId, this.now());
+  }
+
+  deleteExpiredJoinRequests(
+    readThreshold: number,
+    unreadThreshold: number,
+  ): number {
+    return this.storage.deleteExpiredJoinRequests(
+      readThreshold,
+      unreadThreshold,
+    );
   }
 
   close(): void {

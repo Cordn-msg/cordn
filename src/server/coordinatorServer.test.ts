@@ -408,6 +408,127 @@ describe("CoordinatorAdapter", () => {
     });
   });
 
+  test("round-trips join requests with validation and deduplication", async () => {
+    const coordinator = new Coordinator();
+    const alice = await createMemberArtifacts(createActor("alice-join-req"));
+    const bob = await createMemberArtifacts(createActor("bob-join-req"));
+    const aliceEvent = createPublicationEvent({
+      pubkey: alice.actor.stablePubkey,
+      secretKey: alice.actor.secretKey,
+      keyPackageBase64: encodeBase64(
+        encode(keyPackageEncoder, alice.keyPackage),
+      ),
+    });
+    const bobEvent = createPublicationEvent({
+      pubkey: bob.actor.stablePubkey,
+      secretKey: bob.actor.secretKey,
+      keyPackageBase64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
+    });
+    const adapter = new CoordinatorAdapter(coordinator, (requestEventId) => {
+      if (requestEventId === aliceEvent.id) return aliceEvent;
+      if (requestEventId === bobEvent.id) return bobEvent;
+      return null;
+    });
+
+    // Publish key packages for alice and bob.
+    await adapter.publishKeyPackage(
+      {
+        kp_ref: "kp-ref-alice-join",
+        kp_64: encodeBase64(encode(keyPackageEncoder, alice.keyPackage)),
+      },
+      createExtra(alice.actor.stablePubkey, aliceEvent.id),
+    );
+    await adapter.publishKeyPackage(
+      {
+        kp_ref: "kp-ref-bob-join",
+        kp_64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
+      },
+      createExtra(bob.actor.stablePubkey, bobEvent.id),
+    );
+
+    // Seed a group via the coordinator so getGroupRouting finds it.
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: alice.actor.stablePubkey,
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-join-req",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    const gid = "group-join-req";
+
+    // Reject: group not found.
+    expect(() =>
+      adapter.storeJoinRequest(
+        { gid: "nonexistent-group", kp_ref: "kp-ref-alice-join" },
+        createExtra(alice.actor.stablePubkey),
+      ),
+    ).toThrow("Group not found");
+
+    // Reject: unknown key package ref.
+    expect(() =>
+      adapter.storeJoinRequest(
+        { gid, kp_ref: "kp-ref-unknown" },
+        createExtra(alice.actor.stablePubkey),
+      ),
+    ).toThrow("Unknown key package ref");
+
+    // Reject: unauthorized key package ref (bob's KP, alice calling).
+    expect(() =>
+      adapter.storeJoinRequest(
+        { gid, kp_ref: "kp-ref-bob-join" },
+        createExtra(alice.actor.stablePubkey),
+      ),
+    ).toThrow("Unauthorized key package ref");
+
+    // Reject: missing client pubkey.
+    expect(() =>
+      adapter.storeJoinRequest(
+        { gid, kp_ref: "kp-ref-alice-join" },
+        createExtra(),
+      ),
+    ).toThrow("Missing injected client pubkey");
+
+    // Success: alice stores a join request for her own KP.
+    const stored = adapter.storeJoinRequest(
+      { gid, kp_ref: "kp-ref-alice-join" },
+      createExtra(alice.actor.stablePubkey),
+    );
+    expect(stored.content).toEqual([]);
+    expect(stored.structuredContent.at).toBeTypeOf("number");
+
+    // Dedup: storing again returns the same record.
+    const storedAgain = adapter.storeJoinRequest(
+      { gid, kp_ref: "kp-ref-alice-join" },
+      createExtra(alice.actor.stablePubkey),
+    );
+    expect(storedAgain.structuredContent.at).toBe(stored.structuredContent.at);
+
+    // Bob stores his own join request.
+    adapter.storeJoinRequest(
+      { gid, kp_ref: "kp-ref-bob-join" },
+      createExtra(bob.actor.stablePubkey),
+    );
+
+    // Fetch returns both requests.
+    const fetched = adapter.fetchPendingJoinRequests({ gid });
+    expect(fetched.content).toEqual([]);
+    expect(fetched.structuredContent.requests).toHaveLength(2);
+    expect(fetched.structuredContent.requests[0]?.pk).toBe(
+      alice.actor.stablePubkey,
+    );
+    expect(fetched.structuredContent.requests[0]?.kp_ref).toBe(
+      "kp-ref-alice-join",
+    );
+    expect(fetched.structuredContent.requests[1]?.pk).toBe(
+      bob.actor.stablePubkey,
+    );
+    expect(fetched.structuredContent.requests[1]?.kp_ref).toBe(
+      "kp-ref-bob-join",
+    );
+  });
+
   test("streams backlog and live group messages as JSON chunks", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);

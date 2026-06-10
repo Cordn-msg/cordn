@@ -27,6 +27,7 @@ import {
 } from "../contracts/index.ts";
 import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";
+import type { FetchPendingJoinRequestsOutput } from "../contracts/index.ts";
 import { runGroupWatch } from "./groupWatch.ts";
 import {
   acceptStoredWelcome,
@@ -530,6 +531,32 @@ export class CliSession {
     }));
   }
 
+  async storeJoinRequest(
+    groupId: string,
+    keyPackageAlias: string,
+    coordinatorKey?: string,
+  ): Promise<{ keyPackageRef: string; at: number }> {
+    const keyPackage = this.requireKeyPackage(keyPackageAlias);
+    await this.publishKeyPackage(keyPackageAlias, { coordinatorKey });
+    const result = await this.getCoordinatorClient(
+      coordinatorKey,
+    ).StoreJoinRequest({
+      gid: groupId,
+      kp_ref: keyPackage.keyPackageRef,
+    });
+    return { keyPackageRef: keyPackage.keyPackageRef, at: result.at };
+  }
+
+  async fetchPendingJoinRequests(
+    groupAlias: string,
+  ): Promise<FetchPendingJoinRequestsOutput> {
+    const group = this.getGroup(groupAlias);
+    const groupId = this.deriveGroupId(group.state);
+    return this.getGroupClient(group).FetchPendingJoinRequests({
+      gid: groupId,
+    });
+  }
+
   async acceptWelcome(
     keyPackageReference: string,
     groupAlias?: string,
@@ -795,7 +822,7 @@ export class CliSession {
     }
   }
 
-  private deriveGroupId(state: ClientState): string {
+  deriveGroupId(state: ClientState): string {
     return this.groupIdDecoder.decode(state.groupContext.groupId);
   }
 

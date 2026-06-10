@@ -50,6 +50,8 @@ export const knownCommands = new Set([
   "watch-all",
   "messages",
   "issues",
+  "fetch-join-requests",
+  "request-join",
   "exit",
   "quit",
 ]);
@@ -495,6 +497,47 @@ export async function executeReplCommand(
     case "welcomes": {
       output.write(
         `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeKeyPackageReference(welcome.kp_ref)} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)}`))}\n`,
+      );
+      break;
+    }
+    case "fetch-join-requests": {
+      if (!args[0] && !selectedGroupAlias) {
+        throw new CliUsageError("Usage: fetch-join-requests <groupAlias>");
+      }
+      const alias = args[0] ?? selectedGroupAlias!;
+      const result = await session.fetchPendingJoinRequests(alias);
+      if (result.requests.length === 0) {
+        output.write(
+          `${colorize("no pending join requests", ansi.yellow)} for ${colorize(alias, ansi.cyan)}\n`,
+        );
+      } else {
+        output.write(
+          `${formatList(result.requests.map((req) => `pk=${formatFullCredentialLabel(req.pk)} kp_ref=${formatKeyPackageRef(req.kp_ref)} at=${colorize(String(req.at), ansi.dim)}`))}\n`,
+        );
+      }
+      break;
+    }
+    case "request-join": {
+      if (!args[0]) {
+        throw new CliUsageError(
+          "Usage: request-join <gid> [keyPackageAlias] [--coordinator <pubkey>]",
+        );
+      }
+      const gid = args[0];
+      const keyPackageAlias =
+        args[1] ?? session.listKeyPackageSummaries()[0]?.alias;
+      if (!keyPackageAlias) {
+        throw new CliUsageError(
+          "No key package available and none specified. Generate one with gen-kp first.",
+        );
+      }
+      const result = await session.storeJoinRequest(
+        gid,
+        keyPackageAlias,
+        parseCoordinatorOption(args),
+      );
+      output.write(
+        `${colorize("stored join request", ansi.green)} gid=${colorize(gid, ansi.cyan)} kp_ref=${formatKeyPackageRef(result.keyPackageRef)} at=${colorize(String(result.at), ansi.dim)}\n`,
       );
       break;
     }

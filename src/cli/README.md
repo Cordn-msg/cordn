@@ -40,6 +40,8 @@ Useful commands:
 - `unwatch <groupAlias>` — stop one background subscription
 - `add-member <groupAlias> <stablePubkeyOrKeyPackageRef>`
 - `fetch-welcomes`
+- `fetch-join-requests <groupAlias>` — list pending join requests for a group
+- `request-join <gid> [keyPackageAlias] [--coordinator <pubkey>]` — send a join request for a group
 - `send <message...>`
 - `sync [groupAlias]`
 

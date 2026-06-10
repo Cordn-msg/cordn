@@ -17,18 +17,22 @@ import {
   type FetchGroupMessagesInput,
   fetchManyGroupMessagesOutputSchema,
   fetchGroupMessagesOutputSchema,
+  fetchPendingJoinRequestsOutputSchema,
   fetchPendingWelcomesOutputSchema,
   listAvailableKeyPackagesOutputSchema,
   type PostGroupMessageInput,
   postGroupMessageOutputSchema,
   type PublishKeyPackageInput,
   publishKeyPackageOutputSchema,
+  storeJoinRequestOutputSchema,
   storeWelcomeOutputSchema,
   subscribeManyGroupMessagesOutputSchema,
   subscribeGroupMessagesOutputSchema,
   type ConsumeKeyPackageOutput,
   type FetchGroupMessagesOutput,
   type FetchManyGroupMessagesOutput,
+  type FetchPendingJoinRequestsInput,
+  type FetchPendingJoinRequestsOutput,
   type FetchPendingWelcomesInput,
   type FetchPendingWelcomesOutput,
   type GroupMessage,
@@ -38,6 +42,8 @@ import {
   type PublishKeyPackageOutput,
   type RemoveKeyPackagesInput,
   type RemoveKeyPackagesOutput,
+  type StoreJoinRequestInput,
+  type StoreJoinRequestOutput,
   type SubscribeGroupMessagesInput,
   type SubscribeGroupMessagesOutput,
   type SubscribeManyGroupMessagesInput,
@@ -65,6 +71,12 @@ export type coordinatorClient = {
     args: FetchPendingWelcomesInput,
   ) => Promise<FetchPendingWelcomesOutput>;
   StoreWelcome: (input: StoreWelcomeInput) => Promise<StoreWelcomeOutput>;
+  StoreJoinRequest: (
+    input: StoreJoinRequestInput,
+  ) => Promise<StoreJoinRequestOutput>;
+  FetchPendingJoinRequests: (
+    input: FetchPendingJoinRequestsInput,
+  ) => Promise<FetchPendingJoinRequestsOutput>;
   PostGroupMessage: (
     input: PostGroupMessageInput,
   ) => Promise<PostGroupMessageOutput>;
@@ -309,6 +321,39 @@ export class cordnClient implements coordinatorClient {
       COORDINATOR_METHODS.storeWelcome,
       input,
       storeWelcomeOutputSchema,
+    );
+  }
+
+  /**
+   * Store a join request for a group, keyed by the requester's injected caller identity.
+   * @param {string} gid The group id parameter
+   * @param {string} kp_ref The key package reference parameter
+   * @returns {Promise<StoreJoinRequestOutput>} The result of the join_request_store operation
+   */
+  async StoreJoinRequest(
+    input: StoreJoinRequestInput,
+  ): Promise<StoreJoinRequestOutput> {
+    return this.call(
+      "stable",
+      COORDINATOR_METHODS.storeJoinRequest,
+      input,
+      storeJoinRequestOutputSchema,
+    );
+  }
+
+  /**
+   * Fetch pending join requests for a group.
+   * @param {string} gid The group id parameter
+   * @returns {Promise<FetchPendingJoinRequestsOutput>} The result of the join_request_take operation
+   */
+  async FetchPendingJoinRequests(
+    input: FetchPendingJoinRequestsInput,
+  ): Promise<FetchPendingJoinRequestsOutput> {
+    return this.call(
+      "ephemeral",
+      COORDINATOR_METHODS.fetchPendingJoinRequests,
+      input,
+      fetchPendingJoinRequestsOutputSchema,
     );
   }
 

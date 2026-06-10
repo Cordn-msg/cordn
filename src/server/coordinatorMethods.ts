@@ -25,6 +25,8 @@ import {
   fetchManyGroupMessagesOutputSchema,
   fetchGroupMessagesInputSchema,
   fetchGroupMessagesOutputSchema,
+  fetchPendingJoinRequestsInputSchema,
+  fetchPendingJoinRequestsOutputSchema,
   fetchPendingWelcomesInputSchema,
   fetchPendingWelcomesOutputSchema,
   groupMessageSchema,
@@ -36,6 +38,8 @@ import {
   publishKeyPackageOutputSchema,
   removeKeyPackagesInputSchema,
   removeKeyPackagesOutputSchema,
+  storeJoinRequestInputSchema,
+  storeJoinRequestOutputSchema,
   storeWelcomeInputSchema,
   storeWelcomeOutputSchema,
   subscribeManyGroupMessagesInputSchema,
@@ -505,6 +509,62 @@ export class CoordinatorAdapter {
     };
   }
 
+  storeJoinRequest(
+    input: z.infer<typeof storeJoinRequestInputSchema>,
+    extra: ToolExtra,
+  ) {
+    const clientPubkey = requireClientPubkey(extra);
+
+    const groupRouting = this.coordinator.getGroupRouting(input.gid);
+    if (!groupRouting) {
+      throw new Error("Group not found");
+    }
+
+    const keyPackageRecord = this.coordinator.getKeyPackage(input.kp_ref);
+    if (!keyPackageRecord) {
+      throw new Error("Unknown key package ref");
+    }
+
+    if (keyPackageRecord.stablePubkey !== clientPubkey) {
+      throw new Error("Unauthorized key package ref");
+    }
+
+    const record = this.coordinator.storeJoinRequest({
+      groupId: input.gid,
+      requesterStablePubkey: clientPubkey,
+      keyPackageRef: input.kp_ref,
+    });
+
+    this.recordOperation("storeJoinRequest");
+
+    return {
+      content: [],
+      structuredContent: {
+        at: record.createdAt,
+      },
+    };
+  }
+
+  fetchPendingJoinRequests(
+    input: z.infer<typeof fetchPendingJoinRequestsInputSchema>,
+  ) {
+    // no extra available here; enforced in registration wrapper
+    const records = this.coordinator.fetchPendingJoinRequests(input.gid);
+
+    this.recordOperation("fetchPendingJoinRequests");
+
+    return {
+      content: [],
+      structuredContent: {
+        requests: records.map((record) => ({
+          pk: record.requesterStablePubkey,
+          kp_ref: record.keyPackageRef,
+          at: record.createdAt,
+        })),
+      },
+    };
+  }
+
   postGroupMessage(
     input: z.infer<typeof postGroupMessageInputSchema>,
     extra: ToolExtra,
@@ -903,6 +963,35 @@ export function registerCoordinatorMethods(
       void extra;
       return adapter.storeWelcome(input);
     }),
+  );
+
+  server.registerTool(
+    COORDINATOR_METHODS.storeJoinRequest,
+    {
+      description:
+        "Store a join request for a group from the injected caller identity.",
+      inputSchema: storeJoinRequestInputSchema,
+      outputSchema: storeJoinRequestOutputSchema,
+    },
+    withRateLimit(COORDINATOR_METHODS.storeJoinRequest, (input, extra) =>
+      adapter.storeJoinRequest(input, extra),
+    ),
+  );
+
+  server.registerTool(
+    COORDINATOR_METHODS.fetchPendingJoinRequests,
+    {
+      description: "Fetch pending join requests for a group.",
+      inputSchema: fetchPendingJoinRequestsInputSchema,
+      outputSchema: fetchPendingJoinRequestsOutputSchema,
+    },
+    withRateLimit(
+      COORDINATOR_METHODS.fetchPendingJoinRequests,
+      (input, extra) => {
+        void extra;
+        return adapter.fetchPendingJoinRequests(input);
+      },
+    ),
   );
 
   server.registerTool(

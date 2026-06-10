@@ -18,6 +18,14 @@ export interface WelcomeQueueRecord {
   readAt: number | null;
 }
 
+export interface JoinRequestRecord {
+  groupId: string;
+  requesterStablePubkey: string;
+  keyPackageRef: string;
+  createdAt: number;
+  readAt: number | null;
+}
+
 export interface GroupRoutingRecord {
   groupId: string;
   latestHandshakeEpoch: bigint;
@@ -44,6 +52,12 @@ export interface StoreWelcomeInput {
   targetStablePubkey: string;
   keyPackageReference: string;
   welcome: Welcome;
+}
+
+export interface StoreJoinRequestInput {
+  groupId: string;
+  requesterStablePubkey: string;
+  keyPackageRef: string;
 }
 
 export interface PostGroupMessageInput {

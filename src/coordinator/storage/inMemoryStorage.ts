@@ -3,6 +3,7 @@ import type {
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
+  JoinRequestRecord,
   PublishedKeyPackageRecord,
   WelcomeQueueRecord,
 } from "../types.ts";
@@ -36,6 +37,7 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
     PublishedKeyPackageRecord[]
   >();
   private readonly welcomesByIdentity = new Map<string, WelcomeQueueRecord[]>();
+  private readonly joinRequestsByGroup = new Map<string, JoinRequestRecord[]>();
   private readonly groups = new Map<string, GroupLog>();
 
   publishKeyPackage(
@@ -122,12 +124,17 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
     return records;
   }
 
-  deleteExpiredWelcomes(threshold: number): number {
+  deleteExpiredWelcomes(
+    readThreshold: number,
+    unreadThreshold: number,
+  ): number {
     let deleted = 0;
 
     for (const [targetStablePubkey, records] of this.welcomesByIdentity) {
       const kept = records.filter(
-        (record) => record.readAt === null || record.readAt >= threshold,
+        (record) =>
+          (record.readAt === null && record.createdAt >= unreadThreshold) ||
+          (record.readAt !== null && record.readAt >= readThreshold),
       );
       deleted += records.length - kept.length;
 
@@ -135,6 +142,58 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
         this.welcomesByIdentity.delete(targetStablePubkey);
       } else {
         this.welcomesByIdentity.set(targetStablePubkey, kept);
+      }
+    }
+
+    return deleted;
+  }
+
+  storeJoinRequest(record: JoinRequestRecord): JoinRequestRecord {
+    const existing = this.joinRequestsByGroup.get(record.groupId) ?? [];
+    const duplicate = existing.find(
+      (req) =>
+        req.requesterStablePubkey === record.requesterStablePubkey &&
+        req.readAt === null,
+    );
+    if (duplicate) {
+      return duplicate;
+    }
+
+    const stored: JoinRequestRecord = { ...record };
+    existing.push(stored);
+    this.joinRequestsByGroup.set(record.groupId, existing);
+
+    return stored;
+  }
+
+  fetchPendingJoinRequests(groupId: string, now: number): JoinRequestRecord[] {
+    const records = this.joinRequestsByGroup.get(groupId) ?? [];
+    for (const record of records) {
+      if (record.readAt === null) {
+        record.readAt = now;
+      }
+    }
+    return records;
+  }
+
+  deleteExpiredJoinRequests(
+    readThreshold: number,
+    unreadThreshold: number,
+  ): number {
+    let deleted = 0;
+
+    for (const [groupId, records] of this.joinRequestsByGroup) {
+      const kept = records.filter(
+        (record) =>
+          (record.readAt === null && record.createdAt >= unreadThreshold) ||
+          (record.readAt !== null && record.readAt >= readThreshold),
+      );
+      deleted += records.length - kept.length;
+
+      if (kept.length === 0) {
+        this.joinRequestsByGroup.delete(groupId);
+      } else {
+        this.joinRequestsByGroup.set(groupId, kept);
       }
     }
 

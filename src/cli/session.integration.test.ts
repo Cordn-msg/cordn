@@ -3200,4 +3200,84 @@ describe("CliSession", () => {
       await server.transport.close();
     }
   });
+
+  test("round-trips join requests through the full coordinator-session pipeline", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      // Alice creates a group and knows its coordinator-side group id.
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      await alice.sendMessage("demo", "group bootstrap");
+      const groupId = alice.deriveGroupId(alice.getGroup("demo").state);
+
+      // Bob publishes his key package so the coordinator knows about it.
+      await bob.publishKeyPackage("bob-main");
+
+      // Bob stores a join request for Alice's group.
+      const stored = await bob.storeJoinRequest(groupId, "bob-main");
+      expect(stored.keyPackageRef).toBe(
+        bob
+          .listKeyPackageSummaries()
+          .find((summary) => summary.alias === "bob-main")?.keyPackageRef,
+      );
+
+      // Alice fetches pending join requests and sees Bob's request.
+      const pending = await alice.fetchPendingJoinRequests("demo");
+      expect(pending.requests).toHaveLength(1);
+      expect(pending.requests[0]?.pk).toBe(bob.stablePubkey);
+      expect(pending.requests[0]?.kp_ref).toBe(stored.keyPackageRef);
+
+      // Non-destructive fetch: requests survive subsequent reads.
+      const pendingAgain = await alice.fetchPendingJoinRequests("demo");
+      expect(pendingAgain.requests).toHaveLength(1);
+
+      // Alice can add Bob using the key package ref from the join request.
+      const invitation = await alice.addMember(
+        "demo",
+        pending.requests[0]!.kp_ref,
+      );
+      await alice.syncGroup("demo");
+
+      // Bob accepts the welcome and joins the group.
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      // Alice sends a message and Bob receives it.
+      await alice.sendMessage("demo", "welcome via join request");
+      const synced = await bob.syncGroup("demo");
+
+      expect(synced).toHaveLength(1);
+      expect(synced[0]?.content).toBe("welcome via join request");
+      expect(synced[0]?.sender).toBe(alice.stablePubkey);
+
+      // Bob can send too.
+      await bob.sendMessage("demo", "thanks for the add");
+      const aliceSynced = await alice.syncGroup("demo");
+
+      expect(aliceSynced).toHaveLength(1);
+      expect(aliceSynced[0]?.content).toBe("thanks for the add");
+      expect(aliceSynced[0]?.sender).toBe(bob.stablePubkey);
+    } finally {
+      await server.transport.close();
+    }
+  });
 });

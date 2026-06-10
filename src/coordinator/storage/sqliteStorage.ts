@@ -11,6 +11,7 @@ import type {
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
+  JoinRequestRecord,
   PublishedKeyPackageRecord,
   WelcomeQueueRecord,
 } from "../types.ts";
@@ -40,6 +41,14 @@ interface WelcomeRow {
   target_stable_pubkey: string;
   key_package_reference: string;
   welcome_bytes: Buffer;
+  created_at: number;
+  read_at: number | null;
+}
+
+interface JoinRequestRow {
+  group_id: string;
+  requester_stable_pubkey: string;
+  key_package_ref: string;
   created_at: number;
   read_at: number | null;
 }
@@ -100,7 +109,26 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     [string],
     WelcomeRow & { id: number }
   >;
-  private readonly deleteExpiredWelcomesStatement: Database.Statement<[number]>;
+  private readonly deleteExpiredWelcomesStatement: Database.Statement<
+    [number, number]
+  >;
+  private readonly storeJoinRequestStatement: Database.Statement<
+    [string, string, string, number, number | null]
+  >;
+  private readonly findUnreadJoinRequestStatement: Database.Statement<
+    [string, string],
+    JoinRequestRow & { id: number }
+  >;
+  private readonly markJoinRequestsReadStatement: Database.Statement<
+    [number, string]
+  >;
+  private readonly fetchPendingJoinRequestsStatement: Database.Statement<
+    [string],
+    JoinRequestRow & { id: number }
+  >;
+  private readonly deleteExpiredJoinRequestsStatement: Database.Statement<
+    [number, number]
+  >;
   private readonly upsertGroupRoutingStatement: Database.Statement<
     [string, string, number]
   >;
@@ -145,6 +173,13 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     targetStablePubkey: string,
     now: number,
   ) => WelcomeRow[];
+  private readonly fetchPendingJoinRequestsTransaction: (
+    groupId: string,
+    now: number,
+  ) => JoinRequestRow[];
+  private readonly storeJoinRequestTransaction: (
+    record: JoinRequestRecord,
+  ) => JoinRequestRecord;
   private readonly appendGroupMessageTransaction: (
     params: AppendGroupMessageParams,
   ) => GroupMessageRecord;
@@ -186,6 +221,18 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
 
       CREATE INDEX IF NOT EXISTS idx_welcomes_target_order
       ON welcomes (target_stable_pubkey, id);
+
+      CREATE TABLE IF NOT EXISTS join_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        requester_stable_pubkey TEXT NOT NULL,
+        key_package_ref TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        read_at INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_join_requests_group_order
+      ON join_requests (group_id, id);
     `);
 
     // Migration: add read_at column for existing databases that predate
@@ -315,8 +362,51 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       WHERE target_stable_pubkey = ?
       ORDER BY id ASC
     `);
-    this.deleteExpiredWelcomesStatement = this.database.prepare<[number]>(
-      "DELETE FROM welcomes WHERE read_at IS NOT NULL AND read_at < ?",
+    this.deleteExpiredWelcomesStatement = this.database.prepare<
+      [number, number]
+    >(
+      "DELETE FROM welcomes WHERE (read_at IS NOT NULL AND read_at < ?) OR (read_at IS NULL AND created_at < ?)",
+    );
+    this.storeJoinRequestStatement = this.database.prepare<
+      [string, string, string, number, number | null]
+    >(`
+      INSERT INTO join_requests (
+        group_id,
+        requester_stable_pubkey,
+        key_package_ref,
+        created_at,
+        read_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `);
+    this.findUnreadJoinRequestStatement = this.database.prepare<
+      [string, string],
+      JoinRequestRow & { id: number }
+    >(`
+      SELECT id, group_id, requester_stable_pubkey, key_package_ref, created_at, read_at
+      FROM join_requests
+      WHERE group_id = ? AND requester_stable_pubkey = ? AND read_at IS NULL
+      LIMIT 1
+    `);
+    this.markJoinRequestsReadStatement = this.database.prepare<
+      [number, string]
+    >(`
+      UPDATE join_requests
+      SET read_at = ?
+      WHERE group_id = ? AND read_at IS NULL
+    `);
+    this.fetchPendingJoinRequestsStatement = this.database.prepare<
+      [string],
+      JoinRequestRow & { id: number }
+    >(`
+      SELECT id, group_id, requester_stable_pubkey, key_package_ref, created_at, read_at
+      FROM join_requests
+      WHERE group_id = ?
+      ORDER BY id ASC
+    `);
+    this.deleteExpiredJoinRequestsStatement = this.database.prepare<
+      [number, number]
+    >(
+      "DELETE FROM join_requests WHERE (read_at IS NOT NULL AND read_at < ?) OR (read_at IS NULL AND created_at < ?)",
     );
     this.upsertGroupRoutingStatement = this.database.prepare<
       [string, string, number]
@@ -434,6 +524,35 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       },
     );
 
+    this.fetchPendingJoinRequestsTransaction = this.database.transaction(
+      (groupId: string, now: number) => {
+        this.markJoinRequestsReadStatement.run(now, groupId);
+        const rows = this.fetchPendingJoinRequestsStatement.all(groupId);
+        return rows;
+      },
+    );
+
+    this.storeJoinRequestTransaction = this.database.transaction(
+      (record: JoinRequestRecord) => {
+        const existing = this.findUnreadJoinRequestStatement.get(
+          record.groupId,
+          record.requesterStablePubkey,
+        );
+        if (existing) {
+          return this.mapJoinRequestRow(existing);
+        }
+
+        this.storeJoinRequestStatement.run(
+          record.groupId,
+          record.requesterStablePubkey,
+          record.keyPackageRef,
+          record.createdAt,
+          record.readAt ?? null,
+        );
+        return record;
+      },
+    );
+
     this.appendGroupMessageTransaction = this.database.transaction(
       (params: AppendGroupMessageParams) => {
         const routingRow = this.selectGroupRoutingForCursorStatement.get(
@@ -544,8 +663,35 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     );
   }
 
-  deleteExpiredWelcomes(threshold: number): number {
-    const result = this.deleteExpiredWelcomesStatement.run(threshold);
+  deleteExpiredWelcomes(
+    readThreshold: number,
+    unreadThreshold: number,
+  ): number {
+    const result = this.deleteExpiredWelcomesStatement.run(
+      readThreshold,
+      unreadThreshold,
+    );
+    return result.changes;
+  }
+
+  storeJoinRequest(record: JoinRequestRecord): JoinRequestRecord {
+    return this.storeJoinRequestTransaction(record);
+  }
+
+  fetchPendingJoinRequests(groupId: string, now: number): JoinRequestRecord[] {
+    return this.fetchPendingJoinRequestsTransaction(groupId, now).map((row) =>
+      this.mapJoinRequestRow(row),
+    );
+  }
+
+  deleteExpiredJoinRequests(
+    readThreshold: number,
+    unreadThreshold: number,
+  ): number {
+    const result = this.deleteExpiredJoinRequestsStatement.run(
+      readThreshold,
+      unreadThreshold,
+    );
     return result.changes;
   }
 
@@ -671,6 +817,16 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       targetStablePubkey: row.target_stable_pubkey,
       keyPackageReference: row.key_package_reference,
       welcome: decodeWelcome(toUint8Array(row.welcome_bytes)),
+      createdAt: row.created_at,
+      readAt: row.read_at,
+    };
+  }
+
+  private mapJoinRequestRow(row: JoinRequestRow): JoinRequestRecord {
+    return {
+      groupId: row.group_id,
+      requesterStablePubkey: row.requester_stable_pubkey,
+      keyPackageRef: row.key_package_ref,
       createdAt: row.created_at,
       readAt: row.read_at,
     };
