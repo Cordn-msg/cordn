@@ -515,11 +515,6 @@ export class CoordinatorAdapter {
   ) {
     const clientPubkey = requireClientPubkey(extra);
 
-    const groupRouting = this.coordinator.getGroupRouting(input.gid);
-    if (!groupRouting) {
-      throw new Error("Group not found");
-    }
-
     const keyPackageRecord = this.coordinator.getKeyPackage(input.kp_ref);
     if (!keyPackageRecord) {
       throw new Error("Unknown key package ref");

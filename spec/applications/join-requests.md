@@ -75,9 +75,10 @@ Creates a join request record with `readAt: null`.
 
 Validation requirements:
 
-- The group MUST exist in coordinator storage (verified via `getGroupRouting(groupId) !== null`).
 - The KeyPackage MUST exist in coordinator storage (verified via `getKeyPackage(keyPackageRef) !== null`).
 - The caller MUST own the KeyPackage (verified via `getKeyPackage(keyPackageRef)?.stablePubkey === callerIdentity`).
+
+Group existence is intentionally NOT validated. The coordinator is a signaling service and does not require a group to have message history before accepting join requests. This allows freshly created groups with no messages to accept join requests immediately (the "bootstrap" scenario). Per-group caps on pending join requests and existing rate limiting bound storage abuse from non-existent group IDs.
 
 Deduplication behavior:
 
@@ -209,7 +210,6 @@ Server-side authorization enforces group existence and KeyPackage ownership.
 Authorization requirements:
 
 - The caller identity MUST be authenticated via transport context.
-- The group MUST exist: `getGroupRouting(gid) !== null`.
 - The KeyPackage MUST exist: `getKeyPackage(kp_ref) !== null`.
 - The caller MUST own the KeyPackage: `getKeyPackage(kp_ref)?.stablePubkey === callerIdentity`.
 
@@ -234,13 +234,13 @@ This allows any client to discover pending requests for a group, enabling flexib
 
 | Case | Behavior | Rationale |
 |---|---|---|
-| Group doesn't exist | Reject with `"Group not found"` | Prevents orphaned requests to non-existent groups |
 | `kp_ref` not found | Reject with `"Unknown key package ref"` | The KeyPackage was consumed or removed |
 | `kp_ref` exists but owner mismatch | Reject with `"Unauthorized key package ref"` | Prevents impersonation |
 | Duplicate unread request | Return existing record | Idempotent store semantics |
 | `kp_ref` is last-resort | Allow | Last-resort KPs remain available |
+| Per-group cap reached | Reject with `"Too many pending join requests for this group"` | Prevents unbounded accumulation per group |
 
-A group "exists" in the coordinator once at least one message has been posted to it (verified via `getGroupRouting`).
+Group existence is not validated. The coordinator does not require a group to have message history before accepting join requests. This is bounded by the per-group pending request cap (default: 100) and existing rate limiting.
 
 #### 8.2 At Member Processing Time (Client-Side)
 
@@ -274,7 +274,7 @@ The requester publishes a new KeyPackage and calls `storeJoinRequest` again with
 
 #### 9.4 Group Doesn't Exist
 
-The coordinator validates group existence at `storeJoinRequest` time via `getGroupRouting(gid) !== null`. This prevents orphaned requests to non-existent groups.
+The coordinator intentionally does NOT validate group existence at `storeJoinRequest` time. This allows freshly created groups with no messages to accept join requests immediately. Storage is bounded by the per-group pending request cap and TTL-based cleanup.
 
 #### 9.5 Request Spam
 
@@ -317,16 +317,17 @@ Implementations MUST agree on all of the following:
 - Dual-threshold expiration semantics
 - Contract method names and schema shapes
 
-Implementations MUST reject malformed requests, unauthorized KeyPackage references, and requests to non-existent groups.
+Implementations MUST reject malformed requests and unauthorized KeyPackage references.
 
 ### 13. Rationale
 
 This design keeps the coordinator minimal and uniform while enabling the shareable link use case.
 
 - The coordinator stays stateless about group membership, consistent with [`spec/00.md`](../spec/00.md).
+- Group existence is intentionally not validated for join requests, allowing freshly created groups to accept join requests before any messages are posted (the bootstrap scenario).
 - KeyPackage consumption races resolve naturally: one consumer wins, others get `null`.
 - TTL cleanup handles all orphaned state: no manual cancellation needed.
-- All validation happens at store time: the coordinator rejects bad requests early.
+- Per-group pending request caps (default: 100) prevent unbounded accumulation from fake group IDs while remaining generous enough for real groups.
 - Client-side failures are recoverable: members can retry, requesters can re-request.
 
 The join request mechanism is intentionally symmetric with Welcomes. This symmetry reduces cognitive load for implementers and ensures consistent coordinator behavior across both invitation directions.

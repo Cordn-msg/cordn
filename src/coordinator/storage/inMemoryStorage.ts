@@ -8,9 +8,10 @@ import type {
   WelcomeQueueRecord,
 } from "../types.ts";
 
-import type {
-  AppendGroupMessageParams,
-  CoordinatorStorage,
+import {
+  type AppendGroupMessageParams,
+  type CoordinatorStorage,
+  MAX_PENDING_JOIN_REQUESTS_PER_GROUP,
 } from "./storage.ts";
 
 interface GroupLog {
@@ -150,6 +151,12 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   storeJoinRequest(record: JoinRequestRecord): JoinRequestRecord {
     const existing = this.joinRequestsByGroup.get(record.groupId) ?? [];
+    // Cap unread pending join requests per group to prevent unbounded accumulation.
+    const unreadCount = existing.filter((req) => req.readAt === null).length;
+    if (unreadCount >= MAX_PENDING_JOIN_REQUESTS_PER_GROUP) {
+      throw new Error("Too many pending join requests for this group");
+    }
+
     const duplicate = existing.find(
       (req) =>
         req.requesterStablePubkey === record.requesterStablePubkey &&

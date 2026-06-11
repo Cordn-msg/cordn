@@ -4,7 +4,10 @@ import { createGroup, unsafeTestingAuthenticationService } from "ts-mls";
 import { Coordinator } from "../coordinator.ts";
 import { InMemoryCoordinatorStorage } from "./inMemoryStorage.ts";
 import { SqliteCoordinatorStorage } from "./sqliteStorage.ts";
-import type { CoordinatorStorage } from "./storage.ts";
+import {
+  type CoordinatorStorage,
+  MAX_PENDING_JOIN_REQUESTS_PER_GROUP,
+} from "./storage.ts";
 import {
   createActor,
   createBytes,
@@ -1368,5 +1371,53 @@ describe.each<StorageFixture>([
     expect(deletedRequests).toBe(1); // One read+expired request
 
     expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(0);
+  });
+
+  test("rejects join requests when cap is reached", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    // Fill the group with join requests up to the cap.
+    for (let i = 0; i < MAX_PENDING_JOIN_REQUESTS_PER_GROUP; i++) {
+      coordinator.storeJoinRequest({
+        groupId: "capped-group",
+        requesterStablePubkey: `requester-${i}`,
+        keyPackageRef: `kp-ref-${i}`,
+      });
+    }
+
+    // The cap is reached; the next store should throw.
+    expect(() =>
+      coordinator.storeJoinRequest({
+        groupId: "capped-group",
+        requesterStablePubkey: "one-too-many",
+        keyPackageRef: "kp-ref-overflow",
+      }),
+    ).toThrow("Too many pending join requests for this group");
+  });
+
+  test("allows join requests for groups with no messages (bootstrap)", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    // Store a join request for a group that has never had any messages posted.
+    const record = coordinator.storeJoinRequest({
+      groupId: "brand-new-group-no-messages",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    expect(record.groupId).toBe("brand-new-group-no-messages");
+    expect(record.requesterStablePubkey).toBe("alice-requester");
+    expect(record.readAt).toBeNull();
+
+    // The join request is fetchable even though the group has no routing entry.
+    const fetched = coordinator.fetchPendingJoinRequests(
+      "brand-new-group-no-messages",
+    );
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]?.keyPackageRef).toBe("kp-ref-alice-1");
   });
 });

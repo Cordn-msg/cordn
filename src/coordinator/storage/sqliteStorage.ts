@@ -15,9 +15,10 @@ import type {
   PublishedKeyPackageRecord,
   WelcomeQueueRecord,
 } from "../types.ts";
-import type {
-  AppendGroupMessageParams,
-  CoordinatorStorage,
+import {
+  type AppendGroupMessageParams,
+  type CoordinatorStorage,
+  MAX_PENDING_JOIN_REQUESTS_PER_GROUP,
 } from "./storage.ts";
 
 type SqliteDatabase = InstanceType<typeof Database>;
@@ -128,6 +129,10 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   >;
   private readonly deleteExpiredJoinRequestsStatement: Database.Statement<
     [number, number]
+  >;
+  private readonly countUnreadJoinRequestsStatement: Database.Statement<
+    [string],
+    { count: number }
   >;
   private readonly upsertGroupRoutingStatement: Database.Statement<
     [string, string, number]
@@ -408,6 +413,12 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     >(
       "DELETE FROM join_requests WHERE (read_at IS NOT NULL AND read_at < ?) OR (read_at IS NULL AND created_at < ?)",
     );
+    this.countUnreadJoinRequestsStatement = this.database.prepare<
+      [string],
+      { count: number }
+    >(
+      "SELECT COUNT(*) as count FROM join_requests WHERE group_id = ? AND read_at IS NULL",
+    );
     this.upsertGroupRoutingStatement = this.database.prepare<
       [string, string, number]
     >(`
@@ -534,6 +545,14 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
 
     this.storeJoinRequestTransaction = this.database.transaction(
       (record: JoinRequestRecord) => {
+        // Cap unread pending join requests per group to prevent unbounded accumulation.
+        const countRow = this.countUnreadJoinRequestsStatement.get(
+          record.groupId,
+        );
+        if (countRow && countRow.count >= MAX_PENDING_JOIN_REQUESTS_PER_GROUP) {
+          throw new Error("Too many pending join requests for this group");
+        }
+
         const existing = this.findUnreadJoinRequestStatement.get(
           record.groupId,
           record.requesterStablePubkey,

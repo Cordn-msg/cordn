@@ -458,13 +458,14 @@ describe("CoordinatorAdapter", () => {
     });
     const gid = "group-join-req";
 
-    // Reject: group not found.
-    expect(() =>
-      adapter.storeJoinRequest(
-        { gid: "nonexistent-group", kp_ref: "kp-ref-alice-join" },
-        createExtra(alice.actor.stablePubkey),
-      ),
-    ).toThrow("Group not found");
+    // Success: join request for a group with no messages (bootstrap scenario).
+    // The coordinator no longer requires group existence for join requests,
+    // allowing freshly created groups to accept join requests immediately.
+    const bootstrapStored = adapter.storeJoinRequest(
+      { gid: "brand-new-group", kp_ref: "kp-ref-alice-join" },
+      createExtra(alice.actor.stablePubkey),
+    );
+    expect(bootstrapStored.structuredContent.at).toBeTypeOf("number");
 
     // Reject: unknown key package ref.
     expect(() =>

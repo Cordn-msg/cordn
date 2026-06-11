@@ -9,6 +9,15 @@ import type {
 } from "../types.ts";
 
 /**
+ * Maximum number of pending (unread) join requests allowed per group.
+ * This cap applies uniformly to all groups regardless of whether the group
+ * has message history in the coordinator. It prevents unbounded accumulation
+ * while allowing the bootstrap scenario of a freshly created group with no
+ * messages to still accept join requests.
+ */
+export const MAX_PENDING_JOIN_REQUESTS_PER_GROUP = 100;
+
+/**
  * Storage instances are owned by a single coordinator instance.
  *
  * The contract is intentionally domain-shaped and assumes a single-writer
