@@ -565,7 +565,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         const statement = this.getFetchManyPendingJoinRequestsStatement(
           groupIds.length,
         );
-        const params = groupIds.map((groupId, index) => [index, groupId]).flat();
+        const params = groupIds
+          .map((groupId, index) => [index, groupId])
+          .flat();
         return statement.all(...params);
       },
     );
@@ -846,10 +848,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       return cached;
     }
 
-    const values = Array.from(
-      { length: groupCount },
-      () => "(?, ?)",
-    ).join(", ");
+    const values = Array.from({ length: groupCount }, () => "(?, ?)").join(
+      ", ",
+    );
     const statement = this.database.prepare<
       unknown[],
       JoinRequestRow & { id: number }
