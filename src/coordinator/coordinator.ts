@@ -1,5 +1,6 @@
 import type {
   FetchManyGroupMessagesInput,
+  FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -300,6 +301,12 @@ export class Coordinator {
 
   fetchPendingJoinRequests(groupId: string): JoinRequestRecord[] {
     return this.storage.fetchPendingJoinRequests(groupId, this.now());
+  }
+
+  fetchManyPendingJoinRequests(
+    input: FetchManyPendingJoinRequestsInput,
+  ): JoinRequestRecord[] {
+    return this.storage.fetchManyPendingJoinRequests(input, this.now());
   }
 
   deleteExpiredJoinRequests(

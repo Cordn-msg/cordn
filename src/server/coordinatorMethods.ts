@@ -23,6 +23,8 @@ import {
   COORDINATOR_METHODS,
   fetchManyGroupMessagesInputSchema,
   fetchManyGroupMessagesOutputSchema,
+  fetchManyPendingJoinRequestsInputSchema,
+  fetchManyPendingJoinRequestsOutputSchema,
   fetchGroupMessagesInputSchema,
   fetchGroupMessagesOutputSchema,
   fetchPendingJoinRequestsInputSchema,
@@ -560,6 +562,29 @@ export class CoordinatorAdapter {
     };
   }
 
+  fetchManyPendingJoinRequests(
+    input: z.infer<typeof fetchManyPendingJoinRequestsInputSchema>,
+  ) {
+    // no extra available here; enforced in registration wrapper
+    const records = this.coordinator.fetchManyPendingJoinRequests({
+      groups: input.groups.map((group) => ({ groupId: group.gid })),
+    });
+
+    this.recordOperation("fetchManyPendingJoinRequests");
+
+    return {
+      content: [],
+      structuredContent: {
+        requests: records.map((record) => ({
+          gid: record.groupId,
+          pk: record.requesterStablePubkey,
+          kp_ref: record.keyPackageRef,
+          at: record.createdAt,
+        })),
+      },
+    };
+  }
+
   postGroupMessage(
     input: z.infer<typeof postGroupMessageInputSchema>,
     extra: ToolExtra,
@@ -985,6 +1010,23 @@ export function registerCoordinatorMethods(
       (input, extra) => {
         void extra;
         return adapter.fetchPendingJoinRequests(input);
+      },
+    ),
+  );
+
+  server.registerTool(
+    COORDINATOR_METHODS.fetchManyPendingJoinRequests,
+    {
+      description:
+        "Fetch pending join requests for multiple groups in a single call.",
+      inputSchema: fetchManyPendingJoinRequestsInputSchema,
+      outputSchema: fetchManyPendingJoinRequestsOutputSchema,
+    },
+    withRateLimit(
+      COORDINATOR_METHODS.fetchManyPendingJoinRequests,
+      (input, extra) => {
+        void extra;
+        return adapter.fetchManyPendingJoinRequests(input);
       },
     ),
   );

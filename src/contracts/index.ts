@@ -19,6 +19,7 @@ export const COORDINATOR_METHODS = {
   storeWelcome: "welcome_store",
   storeJoinRequest: "join_request_store",
   fetchPendingJoinRequests: "join_request_take",
+  fetchManyPendingJoinRequests: "join_request_take_many",
   postGroupMessage: "msg_post",
   fetchGroupMessages: "msg_fetch",
   fetchManyGroupMessages: "msg_fetch_many",
@@ -121,6 +122,22 @@ export const fetchPendingJoinRequestsOutputSchema = z.object({
   requests: z.array(joinRequestSchema),
 });
 
+export const fetchManyPendingJoinRequestsGroupInputSchema = z.object({
+  gid: z.string().min(1),
+});
+
+export const fetchManyPendingJoinRequestsInputSchema = z.object({
+  groups: z.array(fetchManyPendingJoinRequestsGroupInputSchema).min(1),
+});
+
+export const joinRequestWithGroupSchema = joinRequestSchema.extend({
+  gid: z.string(),
+});
+
+export const fetchManyPendingJoinRequestsOutputSchema = z.object({
+  requests: z.array(joinRequestWithGroupSchema),
+});
+
 export const postGroupMessageInputSchema = z.object({
   msg_64: z.string().min(1),
 });
@@ -210,11 +227,18 @@ export type StoreJoinRequestOutput = z.infer<
   typeof storeJoinRequestOutputSchema
 >;
 export type JoinRequest = z.infer<typeof joinRequestSchema>;
+export type JoinRequestWithGroup = z.infer<typeof joinRequestWithGroupSchema>;
 export type FetchPendingJoinRequestsInput = z.infer<
   typeof fetchPendingJoinRequestsInputSchema
 >;
 export type FetchPendingJoinRequestsOutput = z.infer<
   typeof fetchPendingJoinRequestsOutputSchema
+>;
+export type FetchManyPendingJoinRequestsInput = z.infer<
+  typeof fetchManyPendingJoinRequestsInputSchema
+>;
+export type FetchManyPendingJoinRequestsOutput = z.infer<
+  typeof fetchManyPendingJoinRequestsOutputSchema
 >;
 export type PostGroupMessageInput = z.infer<typeof postGroupMessageInputSchema>;
 export type PostGroupMessageOutput = z.infer<

@@ -14,8 +14,10 @@ import {
   consumeKeyPackageOutputSchema,
   COORDINATOR_METHODS,
   type FetchManyGroupMessagesInput,
+  type FetchManyPendingJoinRequestsInput,
   type FetchGroupMessagesInput,
   fetchManyGroupMessagesOutputSchema,
+  fetchManyPendingJoinRequestsOutputSchema,
   fetchGroupMessagesOutputSchema,
   fetchPendingJoinRequestsOutputSchema,
   fetchPendingWelcomesOutputSchema,
@@ -31,6 +33,7 @@ import {
   type ConsumeKeyPackageOutput,
   type FetchGroupMessagesOutput,
   type FetchManyGroupMessagesOutput,
+  type FetchManyPendingJoinRequestsOutput,
   type FetchPendingJoinRequestsInput,
   type FetchPendingJoinRequestsOutput,
   type FetchPendingWelcomesInput,
@@ -77,6 +80,9 @@ export type coordinatorClient = {
   FetchPendingJoinRequests: (
     input: FetchPendingJoinRequestsInput,
   ) => Promise<FetchPendingJoinRequestsOutput>;
+  FetchManyPendingJoinRequests: (
+    input: FetchManyPendingJoinRequestsInput,
+  ) => Promise<FetchManyPendingJoinRequestsOutput>;
   PostGroupMessage: (
     input: PostGroupMessageInput,
   ) => Promise<PostGroupMessageOutput>;
@@ -354,6 +360,22 @@ export class cordnClient implements coordinatorClient {
       COORDINATOR_METHODS.fetchPendingJoinRequests,
       input,
       fetchPendingJoinRequestsOutputSchema,
+    );
+  }
+
+  /**
+   * Fetch pending join requests for multiple groups in a single call.
+   * @param groups The array of group input objects, each with a gid
+   * @returns {Promise<FetchManyPendingJoinRequestsOutput>} The result of the join_request_take_many operation
+   */
+  async FetchManyPendingJoinRequests(
+    input: FetchManyPendingJoinRequestsInput,
+  ): Promise<FetchManyPendingJoinRequestsOutput> {
+    return this.call(
+      "ephemeral",
+      COORDINATOR_METHODS.fetchManyPendingJoinRequests,
+      input,
+      fetchManyPendingJoinRequestsOutputSchema,
     );
   }
 

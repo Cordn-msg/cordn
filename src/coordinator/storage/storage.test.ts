@@ -1420,4 +1420,73 @@ describe.each<StorageFixture>([
     expect(fetched).toHaveLength(1);
     expect(fetched[0]?.keyPackageRef).toBe("kp-ref-alice-1");
   });
+
+  test("fetches many pending join requests across multiple groups with independent read-tracking", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "bob-requester",
+      keyPackageRef: "kp-ref-bob-1",
+    });
+    coordinator.storeJoinRequest({
+      groupId: "group-beta",
+      requesterStablePubkey: "carol-requester",
+      keyPackageRef: "kp-ref-carol-1",
+    });
+
+    const results = coordinator.fetchManyPendingJoinRequests({
+      groups: [{ groupId: "group-alpha" }, { groupId: "group-beta" }],
+    });
+
+    // Results ordered by input group order.
+    expect(results).toHaveLength(3);
+    expect(results[0]?.groupId).toBe("group-alpha");
+    expect(results[0]?.requesterStablePubkey).toBe("alice-requester");
+    expect(results[1]?.groupId).toBe("group-alpha");
+    expect(results[1]?.requesterStablePubkey).toBe("bob-requester");
+    expect(results[2]?.groupId).toBe("group-beta");
+    expect(results[2]?.requesterStablePubkey).toBe("carol-requester");
+
+    // All returned records must have readAt set.
+    for (const record of results) {
+      expect(record.readAt).not.toBeNull();
+    }
+
+    // Subsequent single-group fetches return the same records (non-destructive).
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(2);
+    expect(coordinator.fetchPendingJoinRequests("group-beta")).toHaveLength(1);
+  });
+
+  test("fetchManyPendingJoinRequests returns empty array for groups with no requests", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+
+    const results = coordinator.fetchManyPendingJoinRequests({
+      groups: [
+        { groupId: "group-alpha" },
+        { groupId: "group-empty" },
+        { groupId: "group-beta" },
+      ],
+    });
+
+    // Only group-alpha has a request.
+    expect(results).toHaveLength(1);
+    expect(results[0]?.groupId).toBe("group-alpha");
+    expect(results[0]?.requesterStablePubkey).toBe("alice-requester");
+  });
 });

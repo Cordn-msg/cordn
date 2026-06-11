@@ -66,6 +66,7 @@ Coordinators MUST implement the following join request methods.
 ```typescript
 storeJoinRequest(input: StoreJoinRequestInput): JoinRequestRecord;
 fetchPendingJoinRequests(groupId: string): JoinRequestRecord[];
+fetchManyPendingJoinRequests(input: { groups: { groupId: string }[] }): JoinRequestRecord[];
 deleteExpiredJoinRequests(readThreshold: number, unreadThreshold: number): number;
 ```
 
@@ -101,6 +102,25 @@ Read-tracking behavior:
 
 The method returns requests in storage order. Clients are responsible for filtering, sorting, or paginating as needed.
 
+#### 4.2b `fetchManyPendingJoinRequests`
+
+Returns all join requests for multiple groups in a single call.
+
+Input schema:
+
+```typescript
+{ groups: { groupId: string }[] }
+```
+
+Read-tracking behavior:
+
+- The coordinator MUST set `readAt = now` for all unread requests across all requested groups atomically before returning results.
+- This mirror the read-tracking behavior of [`fetchPendingJoinRequests()`](#42-fetchpendingjoinrequests) but applied across all requested groups in a single transaction.
+
+The method returns requests ordered by input group order, then storage order within each group. Each returned record carries its `groupId` so clients can distinguish which group a request belongs to.
+
+Results from groups with no pending requests are simply omitted from the output; the method never errors for non-existent or empty groups.
+
 #### 4.3 `deleteExpiredJoinRequests`
 
 Deletes join requests that exceed expiration thresholds.
@@ -122,6 +142,7 @@ Storage backends MUST implement the following methods.
 ```typescript
 storeJoinRequest(record: JoinRequestRecord): JoinRequestRecord;
 fetchPendingJoinRequests(groupId: string, now: number): JoinRequestRecord[];
+fetchManyPendingJoinRequests(input: { groups: { groupId: string }[] }, now: number): JoinRequestRecord[];
 deleteExpiredJoinRequests(readThreshold: number, unreadThreshold: number): number;
 ```
 
@@ -133,6 +154,7 @@ In-memory implementations store join requests in a group-keyed map.
 
 - `storeJoinRequest` appends to the group's request list after deduplication.
 - `fetchPendingJoinRequests` returns all requests for the group and sets `readAt` for unread entries.
+- `fetchManyPendingJoinRequests` delegates to `fetchPendingJoinRequests` per group and flattens results. Ordering follows input group order.
 - `deleteExpiredJoinRequests` filters the global request set using both thresholds in a single pass.
 
 #### 5.2 SQLite Storage
@@ -145,20 +167,24 @@ CREATE TABLE IF NOT EXISTS join_requests (
   requester_stable_pubkey TEXT NOT NULL,
   key_package_ref TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  read_at INTEGER,
-  PRIMARY KEY (group_id, requester_stable_pubkey, created_at)
+  read_at INTEGER
 );
 ```
 
 Index requirements:
 
-- An index on `(group_id, read_at)` supports efficient pending-request queries.
-- An index on `(read_at, created_at)` supports efficient expiration queries.
+- An index on `(group_id, id)` supports efficient pending-request queries.
+- Indexes on `read_at` and `created_at` support efficient expiration queries.
 
 Deletion behavior:
 
 - `deleteExpiredJoinRequests` uses a single `DELETE` statement with an `OR` condition for both thresholds.
 - This ensures atomic cleanup in a single transaction.
+
+Additional SQLite implementation details for `fetchManyPendingJoinRequests`:
+
+- A single transaction atomically marks all unread requests as read across all requested groups, then fetches all records using a CTE-based query ordered by input group order.
+- The CTE uses a `VALUES` clause parameterized by group count to avoid dynamic SQL injection while handling dynamic group counts.
 
 ### 6. Contracts
 
@@ -169,10 +195,11 @@ export const COORDINATOR_METHODS = {
   // ... existing methods
   storeJoinRequest: "join_request_store",
   fetchPendingJoinRequests: "join_request_take",
+  fetchManyPendingJoinRequests: "join_request_take_many",
 } as const;
 ```
 
-Method naming follows the existing `welcome_store` / `welcome_take` convention.
+Method naming follows the existing `welcome_store` / `welcome_take` / `msg_fetch_many` conventions.
 
 Input and output schemas:
 
@@ -198,6 +225,18 @@ export const fetchPendingJoinRequestsInputSchema = z.object({
 
 export const fetchPendingJoinRequestsOutputSchema = z.object({
   requests: z.array(joinRequestSchema),
+});
+
+export const fetchManyPendingJoinRequestsInputSchema = z.object({
+  groups: z.array(z.object({ gid: z.string().min(1) })).min(1),
+});
+
+export const joinRequestWithGroupSchema = joinRequestSchema.extend({
+  gid: z.string(),
+});
+
+export const fetchManyPendingJoinRequestsOutputSchema = z.object({
+  requests: z.array(joinRequestWithGroupSchema),
 });
 ```
 
@@ -227,6 +266,15 @@ Authorization requirements:
 - The method MUST be rate-limited only.
 
 This allows any client to discover pending requests for a group, enabling flexible member-side review workflows.
+
+#### 7.2b `fetchManyPendingJoinRequests`
+
+Authorization requirements:
+
+- No identity check is required (mirrors [`fetchManyGroupMessages`](../src/server/coordinatorMethods.ts:622)).
+- The method MUST be rate-limited only.
+
+This allows any client to discover pending requests across multiple groups in a single call, reducing network round-trips for users who are members of many groups.
 
 ### 8. Validation Rules
 

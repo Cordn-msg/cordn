@@ -8,6 +8,7 @@ import {
 
 import type {
   FetchManyGroupMessagesInput,
+  FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -168,6 +169,10 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     number,
     Database.Statement<unknown[], GroupMessageRow>
   >();
+  private readonly fetchManyPendingJoinRequestsStatements = new Map<
+    number,
+    Database.Statement<unknown[], JoinRequestRow & { id: number }>
+  >();
   private readonly consumeKeyPackageByReferenceTransaction: (
     identifier: string,
   ) => KeyPackageRow | null;
@@ -180,6 +185,10 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   ) => WelcomeRow[];
   private readonly fetchPendingJoinRequestsTransaction: (
     groupId: string,
+    now: number,
+  ) => JoinRequestRow[];
+  private readonly fetchManyPendingJoinRequestsTransaction: (
+    groupIds: string[],
     now: number,
   ) => JoinRequestRow[];
   private readonly storeJoinRequestTransaction: (
@@ -543,6 +552,24 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       },
     );
 
+    this.fetchManyPendingJoinRequestsTransaction = this.database.transaction(
+      (groupIds: string[], now: number) => {
+        if (groupIds.length === 0) {
+          return [];
+        }
+        // Mark all unread requests as read for all requested groups atomically.
+        for (const groupId of groupIds) {
+          this.markJoinRequestsReadStatement.run(now, groupId);
+        }
+        // Fetch all requests using the CTE-based statement for ordering.
+        const statement = this.getFetchManyPendingJoinRequestsStatement(
+          groupIds.length,
+        );
+        const params = groupIds.map((groupId, index) => [index, groupId]).flat();
+        return statement.all(...params);
+      },
+    );
+
     this.storeJoinRequestTransaction = this.database.transaction(
       (record: JoinRequestRecord) => {
         // Cap unread pending join requests per group to prevent unbounded accumulation.
@@ -703,6 +730,16 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     );
   }
 
+  fetchManyPendingJoinRequests(
+    input: FetchManyPendingJoinRequestsInput,
+    now: number,
+  ): JoinRequestRecord[] {
+    const groupIds = input.groups.map((g) => g.groupId);
+    return this.fetchManyPendingJoinRequestsTransaction(groupIds, now).map(
+      (row) => this.mapJoinRequestRow(row),
+    );
+  }
+
   deleteExpiredJoinRequests(
     readThreshold: number,
     unreadThreshold: number,
@@ -798,6 +835,36 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       `);
 
     this.fetchManyGroupMessagesStatements.set(groupCount, statement);
+    return statement;
+  }
+
+  private getFetchManyPendingJoinRequestsStatement(
+    groupCount: number,
+  ): Database.Statement<unknown[], JoinRequestRow & { id: number }> {
+    const cached = this.fetchManyPendingJoinRequestsStatements.get(groupCount);
+    if (cached) {
+      return cached;
+    }
+
+    const values = Array.from(
+      { length: groupCount },
+      () => "(?, ?)",
+    ).join(", ");
+    const statement = this.database.prepare<
+      unknown[],
+      JoinRequestRow & { id: number }
+    >(`
+        WITH requested(group_order, group_id) AS (
+          VALUES ${values}
+        )
+        SELECT jr.id, jr.group_id, jr.requester_stable_pubkey, jr.key_package_ref, jr.created_at, jr.read_at
+        FROM requested r
+        JOIN join_requests jr
+          ON jr.group_id = r.group_id
+        ORDER BY r.group_order ASC, jr.id ASC
+      `);
+
+    this.fetchManyPendingJoinRequestsStatements.set(groupCount, statement);
     return statement;
   }
 

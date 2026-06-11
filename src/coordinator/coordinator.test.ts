@@ -659,6 +659,74 @@ describe("Coordinator join request flow", () => {
     // Unread request is young enough — still present.
     expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
   });
+
+  test("fetches many pending join requests across groups in a single call with non-destructive read-tracking", () => {
+    const coordinator = new Coordinator({ welcomeCleanupIntervalMs: 0 });
+
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-1",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "member-2",
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-beta",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [2],
+      }),
+    });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "bob-requester",
+      keyPackageRef: "kp-ref-bob-1",
+    });
+    coordinator.storeJoinRequest({
+      groupId: "group-beta",
+      requesterStablePubkey: "carol-requester",
+      keyPackageRef: "kp-ref-carol-1",
+    });
+
+    const results = coordinator.fetchManyPendingJoinRequests({
+      groups: [{ groupId: "group-alpha" }, { groupId: "group-beta" }],
+    });
+
+    // Ordered by input group order: alpha first, then beta.
+    expect(results).toHaveLength(3);
+    expect(results[0]?.groupId).toBe("group-alpha");
+    expect(results[0]?.requesterStablePubkey).toBe("alice-requester");
+    expect(results[0]?.keyPackageRef).toBe("kp-ref-alice-1");
+    expect(results[0]?.readAt).not.toBeNull();
+    expect(results[1]?.groupId).toBe("group-alpha");
+    expect(results[1]?.requesterStablePubkey).toBe("bob-requester");
+    expect(results[1]?.keyPackageRef).toBe("kp-ref-bob-1");
+    expect(results[1]?.readAt).not.toBeNull();
+    expect(results[2]?.groupId).toBe("group-beta");
+    expect(results[2]?.requesterStablePubkey).toBe("carol-requester");
+    expect(results[2]?.keyPackageRef).toBe("kp-ref-carol-1");
+    expect(results[2]?.readAt).not.toBeNull();
+
+    // Requests survive subsequent fetches (non-destructive).
+    const refetch = coordinator.fetchManyPendingJoinRequests({
+      groups: [{ groupId: "group-alpha" }, { groupId: "group-beta" }],
+    });
+    expect(refetch).toHaveLength(3);
+    // Already-read requests keep their original readAt.
+    expect(refetch[0]?.readAt).toBe(results[0]?.readAt);
+    expect(refetch[1]?.readAt).toBe(results[1]?.readAt);
+    expect(refetch[2]?.readAt).toBe(results[2]?.readAt);
+  });
 });
 
 describe("Coordinator group message flow", () => {

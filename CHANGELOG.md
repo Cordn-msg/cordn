@@ -1,5 +1,11 @@
 # cordn
 
+## 0.2.1
+
+### Patch Changes
+
+- feat: add fetchManyPendingJoinRequests batch method for join requests
+
 ## 0.2.0
 
 ### Minor Changes

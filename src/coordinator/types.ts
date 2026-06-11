@@ -78,3 +78,7 @@ export interface FetchManyGroupMessagesInput {
 }
 
 export type SubscribeManyGroupMessagesInput = FetchManyGroupMessagesInput;
+
+export interface FetchManyPendingJoinRequestsInput {
+  groups: { groupId: string }[];
+}

@@ -1,5 +1,6 @@
 import type {
   FetchManyGroupMessagesInput,
+  FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -93,6 +94,22 @@ export interface CoordinatorStorage {
    * {@link deleteExpiredJoinRequests}.
    */
   fetchPendingJoinRequests(groupId: string, now: number): JoinRequestRecord[];
+  /**
+   * Fetch all pending join requests for multiple groups and mark unread
+   * requests as read at the given timestamp.
+   *
+   * Requests whose `readAt` is already set are returned without updating
+   * their timestamp, preserving the original read time for TTL calculations.
+   * This method never deletes records; cleanup is handled separately via
+   * {@link deleteExpiredJoinRequests}.
+   *
+   * Results must be ordered by input group order, then storage order within
+   * each group.
+   */
+  fetchManyPendingJoinRequests(
+    input: FetchManyPendingJoinRequestsInput,
+    now: number,
+  ): JoinRequestRecord[];
   /**
    * Delete expired join requests.
    *

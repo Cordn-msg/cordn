@@ -1,5 +1,6 @@
 import type {
   FetchManyGroupMessagesInput,
+  FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
   GroupRoutingRecord,
@@ -181,6 +182,15 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
       }
     }
     return records;
+  }
+
+  fetchManyPendingJoinRequests(
+    input: FetchManyPendingJoinRequestsInput,
+    now: number,
+  ): JoinRequestRecord[] {
+    return input.groups.flatMap((group) =>
+      this.fetchPendingJoinRequests(group.groupId, now),
+    );
   }
 
   deleteExpiredJoinRequests(
