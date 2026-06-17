@@ -1,5 +1,11 @@
 # cordn
 
+## 0.2.2
+
+### Patch Changes
+
+- chore(deps): bump @contextvm/sdk from 0.11.14 to 0.12.2
+
 ## 0.2.1
 
 ### Patch Changes
