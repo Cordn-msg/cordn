@@ -1,5 +1,20 @@
 # cordn
 
+## 0.2.3
+
+### Patch Changes
+
+- test: add oversized catch-up integration tests and bump @contextvm/sdk
+
+  Add integration tests for CEP-22 oversized-transfer bounded catch-up
+  scenarios, covering both disabled and gift-wrap encryption modes. The
+  tests verify that aggregated oversized responses are chunked and
+  reassembled correctly, and reproduce a known failure with gift-wrap
+  encryption where chunk frames are not emitted.
+
+  Bump @contextvm/sdk to ^0.12.3 to pick up the necessary SDK changes
+  for oversized transfer handling.
+
 ## 0.2.2
 
 ### Patch Changes

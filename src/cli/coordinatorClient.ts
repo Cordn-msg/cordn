@@ -231,10 +231,22 @@ export class cordnClient implements coordinatorClient {
         : this.ephemeralConnected;
 
     await connected;
-    const result = await client.callTool({
-      name,
-      arguments: { ...args },
-    });
+    // Attach a progress callback so the request carries a progress token. This
+    // is required for CEP-22 oversized transfer to engage when a response (e.g.
+    // a large bounded catch-up payload) exceeds the ~48KB published-event
+    // threshold. `resetTimeoutOnProgress` keeps the request alive while chunked
+    // transfer frames are in flight.
+    const result = await client.callTool(
+      {
+        name,
+        arguments: { ...args },
+      },
+      undefined,
+      {
+        onprogress: () => undefined,
+        resetTimeoutOnProgress: true,
+      },
+    );
     return schema
       ? schema.parse(result.structuredContent)
       : (result.structuredContent as T);
