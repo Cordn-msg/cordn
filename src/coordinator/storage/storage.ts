@@ -36,11 +36,16 @@ export const MAX_PENDING_JOIN_REQUESTS_PER_GROUP = 100;
  */
 export interface AppendGroupMessageParams {
   groupId: string;
+  /** @deprecated Only meaningful for legacy (unencrypted) messages.
+   *  Encrypted messages pass 0n and the column is left at its default. */
   latestHandshakeEpoch: bigint;
+  /** @deprecated NULL for encrypted messages. Retained for legacy
+   *  clients that use server-side since_epoch filtering. */
   epoch: bigint;
   ephemeralSenderPubkey: string;
   opaqueMessage: Uint8Array;
   createdAt: number;
+  encrypted: boolean;
 }
 
 export interface CoordinatorStorage {

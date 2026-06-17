@@ -438,6 +438,48 @@ describe("Coordinator welcome flow", () => {
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(1);
   });
+
+  test("round-trips joinAfterCursor so invitees can skip pre-join messages", async () => {
+    const coordinator = new Coordinator({ welcomeCleanupIntervalMs: 0 });
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("welcome-join-after"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: fixture.keyPackageRefHex,
+      welcome: fixture.welcome,
+      joinAfterCursor: 42,
+    });
+
+    const fetched = coordinator.fetchPendingWelcomes(bob.actor.stablePubkey);
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]?.joinAfterCursor).toBe(42);
+
+    // Welcomes without joinAfterCursor return undefined (backward compat).
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: "no-cursor-ref",
+      welcome: fixture.welcome,
+    });
+    const secondFetch = coordinator.fetchPendingWelcomes(
+      bob.actor.stablePubkey,
+    );
+    const withoutCursor = secondFetch.find(
+      (w) => w.keyPackageReference === "no-cursor-ref",
+    );
+    expect(withoutCursor?.joinAfterCursor).toBeUndefined();
+  });
 });
 
 describe("Coordinator join request flow", () => {
@@ -1117,5 +1159,76 @@ describe("Coordinator group message flow", () => {
 
     subscription.unsubscribe();
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
+  test("routes encrypted messages by caller-supplied gid and skips MLS decoding", () => {
+    const coordinator = new Coordinator();
+
+    // Encrypted path: arbitrary opaque bytes, coordinator never decodes them.
+    const encryptedBytes = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
+
+    const posted = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice-ephemeral",
+      opaqueMessage: encryptedBytes,
+      groupId: "delivery-topic-encrypted",
+    });
+
+    expect(posted.groupId).toBe("delivery-topic-encrypted");
+    expect(posted.ephemeralSenderPubkey).toBe("alice-ephemeral");
+    expect(posted.cursor).toBe(1);
+    expect(posted.encrypted).toBe(true);
+    expect(posted.epoch).toBe(0n);
+    expect(posted.opaqueMessage).toEqual(encryptedBytes);
+
+    // Fetched messages preserve the encrypted flag.
+    const fetched = coordinator.fetchGroupMessages({
+      groupId: "delivery-topic-encrypted",
+    });
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]?.encrypted).toBe(true);
+    expect(fetched[0]?.epoch).toBe(0n);
+    expect(fetched[0]?.groupId).toBe("delivery-topic-encrypted");
+
+    // Messages from different delivery topics are isolated.
+    const otherEncrypted = Uint8Array.from([0xca, 0xfe]);
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "bob-ephemeral",
+      opaqueMessage: otherEncrypted,
+      groupId: "other-topic",
+    });
+    expect(
+      coordinator.fetchGroupMessages({ groupId: "delivery-topic-encrypted" }),
+    ).toHaveLength(1);
+    expect(
+      coordinator.fetchGroupMessages({ groupId: "other-topic" }),
+    ).toHaveLength(1);
+  });
+
+  test("streams live encrypted messages through subscriptions", async () => {
+    const coordinator = new Coordinator();
+
+    const subscription = coordinator.subscribeGroupMessages({
+      groupId: "encrypted-live",
+      afterCursor: 0,
+    });
+    const iterator = subscription.messages[Symbol.asyncIterator]();
+
+    const liveBytes = Uint8Array.from([0x11, 0x22, 0x33]);
+    const posted = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "live-sender",
+      opaqueMessage: liveBytes,
+      groupId: "encrypted-live",
+    });
+
+    const result = await iterator.next();
+    expect(result.done).toBe(false);
+    expect(result.value).toMatchObject({
+      cursor: posted.cursor,
+      groupId: "encrypted-live",
+      encrypted: true,
+      epoch: 0n,
+    });
+
+    subscription.unsubscribe();
   });
 });

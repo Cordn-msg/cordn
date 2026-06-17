@@ -408,6 +408,92 @@ describe("CoordinatorAdapter", () => {
     });
   });
 
+  test("round-trips encrypted flag and passes gid through postGroupMessage contract", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-enc"));
+
+    // Post with gid → coordinator uses encrypted path (skips MLS decoding).
+    const encryptedOpaque = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
+    const posted = adapter.postGroupMessage(
+      {
+        gid: "encrypted-topic",
+        msg_64: encodeBase64(encryptedOpaque),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
+
+    expect(posted.content).toEqual([]);
+    expect(posted.structuredContent.gid).toBe("encrypted-topic");
+    expect(posted.structuredContent.cursor).toBe(1);
+    expect(posted.structuredContent.at).toBeTypeOf("number");
+
+    // Fetch returns the encrypted flag.
+    const fetched = adapter.fetchGroupMessages({
+      gid: "encrypted-topic",
+    });
+    expect(fetched.structuredContent.messages).toHaveLength(1);
+    expect(fetched.structuredContent.messages[0]).toMatchObject({
+      gid: "encrypted-topic",
+      msg_64: encodeBase64(encryptedOpaque),
+      encrypted: true,
+    });
+  });
+
+  test("round-trips welcome after cursor hint through store/fetch contract", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(
+      createActor("alice-welcome-after"),
+    );
+    const bob = await createMemberArtifacts(createActor("bob-welcome-after"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-welcome-after"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    // Store with after cursor hint.
+    adapter.storeWelcome({
+      target_pk: bob.actor.stablePubkey,
+      kp_ref: fixture.keyPackageRefHex,
+      welcome_64: encodeWelcomeAsBase64(fixture.welcome),
+      after: 42,
+    });
+
+    // Fetch returns the after cursor.
+    const fetched = adapter.fetchPendingWelcomes(
+      {},
+      createExtra(bob.actor.stablePubkey),
+    );
+    expect(fetched.structuredContent.welcomes).toHaveLength(1);
+    expect(fetched.structuredContent.welcomes[0]).toMatchObject({
+      kp_ref: fixture.keyPackageRefHex,
+      after: 42,
+    });
+
+    // Old-style welcome without after returns undefined (backward compat).
+    adapter.storeWelcome({
+      target_pk: bob.actor.stablePubkey,
+      kp_ref: "no-after-ref",
+      welcome_64: encodeWelcomeAsBase64(fixture.welcome),
+    });
+    const secondFetch = adapter.fetchPendingWelcomes(
+      {},
+      createExtra(bob.actor.stablePubkey),
+    );
+    const withoutAfter = secondFetch.structuredContent.welcomes.find(
+      (w) => w.kp_ref === "no-after-ref",
+    );
+    expect(withoutAfter?.after).toBeUndefined();
+  });
+
   test("round-trips join requests with validation and deduplication", async () => {
     const coordinator = new Coordinator();
     const alice = await createMemberArtifacts(createActor("alice-join-req"));
@@ -757,6 +843,7 @@ describe("CoordinatorAdapter", () => {
       gid: posted.structuredContent.gid,
       msg_64: encodeBase64(messageBytes.encodedMessage),
       at: expect.any(Number),
+      encrypted: false,
     });
   });
 

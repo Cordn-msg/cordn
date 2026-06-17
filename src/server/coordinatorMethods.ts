@@ -97,6 +97,8 @@ function encodeWelcomeBase64(welcome: Welcome): string {
   return encodeBase64(encodeWelcome(welcome));
 }
 
+/** @deprecated Replaced by client-side payload encryption that naturally
+ *  filters messages from epochs the client has not joined. */
 function parseSinceEpoch(sinceEpoch: string | undefined): bigint | undefined {
   if (sinceEpoch === undefined) {
     return undefined;
@@ -203,7 +205,7 @@ function getOpenStreamWriter(extra: ToolExtra): OpenStreamWriter {
 function mapGroupMessage(
   record: Pick<
     GroupMessageRecord,
-    "cursor" | "groupId" | "opaqueMessage" | "createdAt"
+    "cursor" | "groupId" | "opaqueMessage" | "createdAt" | "encrypted"
   >,
 ): z.infer<typeof groupMessageSchema> {
   return {
@@ -211,6 +213,7 @@ function mapGroupMessage(
     gid: record.groupId,
     msg_64: encodeBase64(record.opaqueMessage),
     at: record.createdAt,
+    encrypted: record.encrypted,
   };
 }
 
@@ -488,6 +491,7 @@ export class CoordinatorAdapter {
           kp_ref: record.keyPackageReference,
           welcome_64: encodeWelcomeBase64(record.welcome),
           at: record.createdAt,
+          after: record.joinAfterCursor,
         })),
       },
     };
@@ -499,6 +503,7 @@ export class CoordinatorAdapter {
       targetStablePubkey: input.target_pk,
       keyPackageReference: input.kp_ref,
       welcome: decodeWelcomeBase64(input.welcome_64),
+      joinAfterCursor: input.after,
     });
 
     this.recordOperation("storeWelcome");
@@ -595,6 +600,7 @@ export class CoordinatorAdapter {
       const record = this.coordinator.postGroupMessage({
         ephemeralSenderPubkey: clientPubkey,
         opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
+        groupId: input.gid,
       });
 
       this.recordOperation("postGroupMessage");

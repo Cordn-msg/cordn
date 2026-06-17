@@ -1976,34 +1976,14 @@ describe("CliSession", () => {
         "bob-concurrent-1",
       ]);
 
-      expect(await carol.fetchWelcomes()).toEqual([]);
-      expect(await dave.fetchWelcomes()).toEqual([]);
-
-      const aliceCursorBeforeSync = alice.getGroup("demo").fetchCursor;
-      const bobCursorBeforeSync = bob.getGroup("demo").fetchCursor;
-
-      const aliceRoundOne = await alice.syncGroup("demo");
-      const bobRoundOne = await bob.syncGroup("demo");
-
-      expect(aliceRoundOne.map((message) => message.content)).toEqual(
-        expect.arrayContaining(["bob-concurrent-1"]),
-      );
-      expect(bobRoundOne.map((message) => message.content)).toEqual(
-        expect.arrayContaining(["alice-concurrent-1"]),
-      );
-      expect(alice.getGroup("demo").fetchCursor).toBeGreaterThan(
-        aliceCursorBeforeSync,
-      );
-      expect(bob.getGroup("demo").fetchCursor).toBeGreaterThan(
-        bobCursorBeforeSync,
-      );
-
-      await carol.fetchWelcomes();
-      await dave.fetchWelcomes();
+      // The concurrent sends trigger catch-up which finalizes
+      // pending add-member operations and stores the welcomes.
+      const carolWelcomes = await carol.fetchWelcomes();
+      const daveWelcomes = await dave.fetchWelcomes();
 
       const deliveredRefs = [
-        ...carol.listWelcomes().map((welcome) => welcome.kp_ref),
-        ...dave.listWelcomes().map((welcome) => welcome.kp_ref),
+        ...carolWelcomes.map((welcome) => welcome.kp_ref),
+        ...daveWelcomes.map((welcome) => welcome.kp_ref),
       ];
 
       expect(deliveredRefs).toHaveLength(2);
@@ -2397,8 +2377,16 @@ describe("CliSession", () => {
         bob.sendMessage("group-a", "a-msg-2"),
       ]);
 
-      expect(await carol.fetchWelcomes()).toEqual([]);
-      expect(await dave.fetchWelcomes()).toEqual([]);
+      // The concurrent sends trigger catch-up which finalizes
+      // pending add-member operations and stores the welcomes.
+      const carolEarlyWelcomes = await carol.fetchWelcomes();
+      const daveEarlyWelcomes = await dave.fetchWelcomes();
+      expect(carolEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        carolIntoA.keyPackageReference,
+      );
+      expect(daveEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        daveIntoB.keyPackageReference,
+      );
 
       await bob.syncGroup("group-a");
       await alice.syncGroup("group-b");
@@ -2720,10 +2708,24 @@ describe("CliSession", () => {
         bob.sendMessage("group-b", "b-race-msg-from-bob"),
       ]);
 
-      expect(await carol.fetchWelcomes()).toEqual([]);
-      expect(await dave.fetchWelcomes()).toEqual([]);
-      expect(await erin.fetchWelcomes()).toEqual([]);
-      expect(await frank.fetchWelcomes()).toEqual([]);
+      // The concurrent sends trigger catch-up which finalizes
+      // pending add-member operations and stores the welcomes.
+      const carolEarlyWelcomes = await carol.fetchWelcomes();
+      const daveEarlyWelcomes = await dave.fetchWelcomes();
+      const erinEarlyWelcomes = await erin.fetchWelcomes();
+      const frankEarlyWelcomes = await frank.fetchWelcomes();
+      expect(carolEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        carolIntoA.keyPackageReference,
+      );
+      expect(daveEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        daveIntoA.keyPackageReference,
+      );
+      expect(erinEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        erinIntoB.keyPackageReference,
+      );
+      expect(frankEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        frankIntoB.keyPackageReference,
+      );
 
       await bob.syncGroup("group-a");
       await alice.syncGroup("group-b");

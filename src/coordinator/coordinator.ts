@@ -38,6 +38,8 @@ export interface CoordinatorOptions {
   welcomeMaxAgeMs?: number;
 }
 
+/** @deprecated Encrypted messages skip MLS decoding entirely.
+ *  Retained for backward compatibility with legacy clients. */
 function decodeOpaqueMessage(opaqueMessage: Uint8Array): MlsMessage {
   const decoded = mlsMessageDecoder(opaqueMessage, 0);
   if (!decoded) {
@@ -47,6 +49,8 @@ function decodeOpaqueMessage(opaqueMessage: Uint8Array): MlsMessage {
   return decoded[0];
 }
 
+/** @deprecated Encrypted messages skip MLS metadata extraction.
+ *  Retained for backward compatibility with legacy clients. */
 function getMessageMetadata(message: MlsMessage): {
   groupId: string;
   epoch: bigint;
@@ -75,6 +79,8 @@ function getMessageMetadata(message: MlsMessage): {
   }
 }
 
+/** @deprecated Encrypted messages do not track handshake epochs.
+ *  Retained for backward compatibility with legacy clients. */
 function resolveLatestHandshakeEpoch(
   currentRouting: GroupRoutingRecord | null,
   epoch: bigint,
@@ -271,6 +277,7 @@ export class Coordinator {
       welcome: input.welcome,
       createdAt: this.now(),
       readAt: null,
+      joinAfterCursor: input.joinAfterCursor,
     };
 
     return this.storage.storeWelcome(record);
@@ -326,6 +333,25 @@ export class Coordinator {
   }
 
   postGroupMessage(input: PostGroupMessageInput): GroupMessageRecord {
+    // Encrypted path: caller supplies the outer delivery gid.
+    // Coordinator skips MLS decoding entirely — it cannot read
+    // epoch, wireformat, or inner MLS group_id from the payload.
+    if (input.groupId !== undefined) {
+      const record = this.storage.appendGroupMessage({
+        groupId: input.groupId,
+        latestHandshakeEpoch: 0n,
+        epoch: 0n,
+        ephemeralSenderPubkey: input.ephemeralSenderPubkey,
+        opaqueMessage: input.opaqueMessage,
+        createdAt: this.now(),
+        encrypted: true,
+      });
+
+      this.publishLiveGroupMessage(record);
+      return record;
+    }
+
+    // Legacy path (deprecated): MLS decoding for backward compatibility
     const decodedMessage = decodeOpaqueMessage(input.opaqueMessage);
     const { groupId, epoch, handshakeMessage } =
       getMessageMetadata(decodedMessage);
@@ -354,6 +380,7 @@ export class Coordinator {
       ephemeralSenderPubkey: input.ephemeralSenderPubkey,
       opaqueMessage: input.opaqueMessage,
       createdAt: this.now(),
+      encrypted: false,
     });
 
     this.publishLiveGroupMessage(record);

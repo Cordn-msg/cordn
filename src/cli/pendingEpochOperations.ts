@@ -10,6 +10,10 @@ export interface PendingEpochOperationBase {
   groupAlias: string;
   groupId: string;
   commitMessageBase64: string;
+  /** The encrypted wrapper that was posted to the coordinator.
+   *  Used to match self-echos before decryption so the creator
+   *  can confirm the operation even after adopting the new state. */
+  postedMsgBase64?: string;
   status: PendingEpochOperationStatus;
 }
 
@@ -25,6 +29,10 @@ export interface PendingAddMemberOperation extends PendingEpochOperationBase {
   keyPackageReference: string;
   targetStablePubkey: string;
   welcomeBase64: string;
+  /** Cursor at which the commit adding this member was posted.
+   *  Stored in the welcome so the invitee can initialize their
+   *  fetch cursor and skip pre-join messages. */
+  joinAfterCursor?: number;
 }
 
 export interface PendingRemoveMemberOperation extends PendingEpochOperationBase {
@@ -58,6 +66,7 @@ const pendingEpochOperationFinalizers: Record<
       target_pk: operation.targetStablePubkey,
       kp_ref: operation.keyPackageReference,
       welcome_64: operation.welcomeBase64,
+      after: operation.joinAfterCursor,
     });
   },
   // Remove commits require no coordinator-side finalization

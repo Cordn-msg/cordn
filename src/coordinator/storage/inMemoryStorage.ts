@@ -21,6 +21,8 @@ interface GroupLog {
   messages: GroupMessageRecord[];
 }
 
+/** @deprecated `epoch` parameter only used for legacy mode.
+ *  Encrypted groups pass 0n. */
 function createGroupLog(groupId: string, epoch: bigint): GroupLog {
   return {
     nextCursor: 1,
@@ -225,10 +227,11 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
     const record: GroupMessageRecord = {
       cursor: group.nextCursor,
       groupId: params.groupId,
-      epoch: params.epoch,
+      epoch: params.encrypted ? 0n : params.epoch,
       ephemeralSenderPubkey: params.ephemeralSenderPubkey,
       opaqueMessage: params.opaqueMessage,
       createdAt: params.createdAt,
+      encrypted: params.encrypted,
     };
     group.nextCursor += 1;
 
