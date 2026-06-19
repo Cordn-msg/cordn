@@ -1,5 +1,5 @@
-import { Client } from "@modelcontextprotocol/sdk/client";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@contextvm/mcp-sdk/client";
+import type { CallToolResult } from "@contextvm/mcp-sdk/types.js";
 import {
   callToolStream,
   NostrClientTransport,

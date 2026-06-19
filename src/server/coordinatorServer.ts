@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@contextvm/mcp-sdk/server/mcp";
 import {
   NostrServerTransport,
   type NostrServerTransportOptions,
