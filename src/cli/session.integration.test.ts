@@ -6,6 +6,9 @@ import {
   RemovedFromGroupError,
   UnauthorizedGroupAdminActionError,
 } from "./sessionErrors.ts";
+import { cordnClient } from "./coordinatorClient.ts";
+import { prepareAddMember } from "./membershipFlow.ts";
+import { updateGroupMetadataExtension } from "./utils/mlsGroupLifecycle.ts";
 import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
 import { PrivateKeySigner } from "@contextvm/sdk";
@@ -1013,6 +1016,264 @@ describe("CliSession", () => {
         }),
       ).rejects.toBeInstanceOf(UnauthorizedGroupAdminActionError);
     } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("honest members reject forged metadata commits authored by a non-admin member", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    const attackerClients: cordnClient[] = [];
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+
+      const originalMetadata = {
+        name: "Admins Only",
+        description: "locked",
+        adminPubkeys: [alice.stablePubkey],
+      };
+
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        metadata: originalMetadata,
+      });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+
+      const carolInvitation = await alice.addMember("demo", carol.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await carol.fetchWelcomes();
+      await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
+
+      // Converge every member to the same epoch before the attack.
+      await alice.syncGroup("demo");
+      await bob.syncGroup("demo");
+      await carol.syncGroup("demo");
+
+      expect(alice.listSyncIssues("demo")).toEqual([]);
+      expect(bob.listSyncIssues("demo")).toEqual([]);
+      expect(carol.listSyncIssues("demo")).toEqual([]);
+
+      // Simulate a buggy or malicious bob implementation that bypasses the
+      // outbound admin guard: build a group-context-extensions commit
+      // directly from bob's MLS state and publish it through a standalone
+      // coordinator client using bob's own identity. The coordinator is
+      // intentionally dumb and must deliver it; protection lives entirely
+      // in honest recipients' inbound authorization callback.
+      const forged = await updateGroupMetadataExtension({
+        state: bob.getGroup("demo").state,
+        metadata: {
+          name: "Bob takeover",
+          description: "should not apply",
+          adminPubkeys: [bob.stablePubkey],
+        },
+      });
+
+      const bobAttacker = new cordnClient({
+        privateKey: bob.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      attackerClients.push(bobAttacker);
+
+      await bobAttacker.PostGroupMessage({
+        msg_64: forged.commitMessageBase64,
+      });
+
+      // Every honest member, including bob's own honest CliSession, must
+      // reject the forged commit, record exactly one sync issue, and keep
+      // the original metadata with no state drift.
+      for (const session of [alice, bob, carol]) {
+        await session.syncGroup("demo");
+        const issues = session.listSyncIssues("demo");
+        expect(issues).toHaveLength(1);
+        expect(issues[0]?.detail).toBe(
+          "Rejected unauthorized admin action in group demo",
+        );
+        expect(session.getGroup("demo").metadata).toEqual(originalMetadata);
+      }
+
+      // The rejected forged commit must not corrupt the epoch: a legitimate
+      // admin metadata update afterwards still converges across all members.
+      const legitMetadata = {
+        name: "Admins Only",
+        description: "renamed by admin",
+        adminPubkeys: [alice.stablePubkey],
+      };
+      await alice.updateGroupMetadata("demo", legitMetadata);
+
+      for (const session of [alice, bob, carol]) {
+        await session.syncGroup("demo");
+        expect(session.listSyncIssues("demo")).toHaveLength(1);
+        expect(session.getGroup("demo").metadata).toEqual(legitMetadata);
+      }
+    } finally {
+      await Promise.allSettled(
+        attackerClients.map((client) => client.disconnect()),
+      );
+      await server.transport.close();
+    }
+  });
+
+  test("honest members reject forged add-member commits authored by a non-admin member", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    const attackerClients: cordnClient[] = [];
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const dave = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol, dave);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await carol.generateKeyPackage("carol-main");
+      // Two regular key packages for dave: the forged add consumes one and
+      // the legitimate add consumes the other.
+      await dave.generateKeyPackage("dave-forge");
+      await dave.generateKeyPackage("dave-legit");
+      await dave.publishKeyPackage("dave-forge");
+      await dave.publishKeyPackage("dave-legit");
+
+      const groupMetadata = {
+        name: "Admins Only",
+        adminPubkeys: [alice.stablePubkey],
+      };
+      await alice.createGroup("demo", {
+        keyPackageAlias: "alice-main",
+        metadata: groupMetadata,
+      });
+      const bobInvitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(bobInvitation.keyPackageReference, "demo");
+
+      const carolInvitation = await alice.addMember("demo", carol.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await carol.fetchWelcomes();
+      await carol.acceptWelcome(carolInvitation.keyPackageReference, "demo");
+
+      // Converge before the attack.
+      await alice.syncGroup("demo");
+      await bob.syncGroup("demo");
+      await carol.syncGroup("demo");
+
+      expect(await dave.fetchWelcomes()).toEqual([]);
+
+      // Bypass the outbound admin guard: build an add commit from bob's
+      // state (consuming one of dave's key packages) and publish it as bob
+      // through a standalone client. No welcome is ever stored, so dave
+      // cannot join even before recipient-side rejection is considered.
+      const bobAttacker = new cordnClient({
+        privateKey: bob.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      attackerClients.push(bobAttacker);
+
+      const forged = await prepareAddMember({
+        groupAlias: "demo",
+        group: bob.getGroup("demo"),
+        identifier: dave.stablePubkey,
+        consumeKeyPackage: async ({ identifier }) => {
+          const result = await bobAttacker.ConsumeKeyPackage({
+            id: identifier,
+          });
+          return {
+            keyPackage: result.keyPackage
+              ? {
+                  keyPackageRef: result.keyPackage.kp_ref,
+                  stablePubkey: result.keyPackage.pk,
+                  publicationEvent: result.keyPackage.event,
+                }
+              : null,
+          };
+        },
+        deriveGroupId: (state) => bob.deriveGroupId(state),
+      });
+
+      await bobAttacker.PostGroupMessage({
+        msg_64: forged.commitMessageBase64,
+      });
+
+      // Every honest member rejects the forged add and records one sync
+      // issue; dave receives no welcome.
+      for (const session of [alice, bob, carol]) {
+        await session.syncGroup("demo");
+        const issues = session.listSyncIssues("demo");
+        expect(issues).toHaveLength(1);
+        expect(issues[0]?.detail).toBe(
+          "Rejected unauthorized admin action in group demo",
+        );
+      }
+      expect(await dave.fetchWelcomes()).toEqual([]);
+
+      // The legitimate admin can still add dave afterwards, proving the
+      // forged add neither added dave nor corrupted the group: dave gets a
+      // welcome and existing members accumulate no further sync issues.
+      await alice.addMember("demo", dave.stablePubkey);
+      await alice.syncGroup("demo");
+
+      const daveWelcomes = await dave.fetchWelcomes();
+      expect(daveWelcomes).toHaveLength(1);
+
+      for (const session of [alice, bob, carol]) {
+        await session.syncGroup("demo");
+        expect(session.listSyncIssues("demo")).toHaveLength(1);
+      }
+    } finally {
+      await Promise.allSettled(
+        attackerClients.map((client) => client.disconnect()),
+      );
       await server.transport.close();
     }
   });
