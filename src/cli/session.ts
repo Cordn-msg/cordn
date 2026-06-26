@@ -124,6 +124,8 @@ export class CliSession {
 
   private readonly store = new CliSessionStore();
   private readonly coordinatorRegistry: CoordinatorClientRegistry;
+  /** Outbound payload encryption gate. See {@link CliSessionOptions.encryptOutbound}. */
+  private readonly encryptOutbound: boolean;
   private readonly groupIdDecoder = new TextDecoder();
   private readonly watchHandles = new Map<string, GroupWatchHandle>();
   private readonly groupEventListeners = new Set<(event: GroupEvent) => void>();
@@ -136,6 +138,7 @@ export class CliSession {
       privateKey: this.privateKey,
     });
     this.stablePubkey = deriveStablePubkey(this.privateKey);
+    this.encryptOutbound = options.encryptOutbound ?? false;
   }
 
   async disconnect(): Promise<void> {
@@ -407,7 +410,7 @@ export class CliSession {
       // wrapper is saved on the pending operation so the self-echo
       // can be matched before decryption when the session has already
       // advanced to the new epoch.
-      const posted = await this.postEncryptedGroupMessage(
+      const posted = await this.postOutboundGroupMessage(
         group,
         prepared.commitMessageBase64,
       );
@@ -450,7 +453,7 @@ export class CliSession {
         prepared.pendingOperation,
       );
 
-      const posted = await this.postEncryptedGroupMessage(
+      const posted = await this.postOutboundGroupMessage(
         group,
         prepared.commitMessageBase64,
       );
@@ -489,7 +492,7 @@ export class CliSession {
         status: "pending",
       });
 
-      const posted = await this.postEncryptedGroupMessage(
+      const posted = await this.postOutboundGroupMessage(
         group,
         prepared.commitMessageBase64,
       );
@@ -639,7 +642,7 @@ export class CliSession {
       });
 
       group.state = outbound.newState;
-      const posted = await this.postEncryptedGroupMessage(
+      const posted = await this.postOutboundGroupMessage(
         group,
         outbound.opaqueMessageBase64,
       );
@@ -782,7 +785,7 @@ export class CliSession {
     );
   }
 
-  private async postEncryptedGroupMessage(
+  private async postOutboundGroupMessage(
     group: GroupSessionState,
     mlsMessageBase64: string,
   ): Promise<{
@@ -791,21 +794,33 @@ export class CliSession {
     gid: string;
     postedMsgBase64: string;
   }> {
-    const gid = this.deriveGroupId(group.state);
-    const mlsBytes = decodeBase64(mlsMessageBase64);
-    const { encryptedBase64 } = await encryptGroupPayload({
-      state: group.state,
-      serializedMlsMessage: mlsBytes,
-    });
+    // When encryption is enabled, the serialized MLS message is sealed
+    // with a key derived from the current epoch's exporter secret: all
+    // group members can decrypt, the coordinator cannot. The wrapper we
+    // post is also what we match against the self-echo of a commit
+    // (sealed with the pre-commit secret) when reconciling pending
+    // operations after the session adopts the new state. When disabled,
+    // raw MLS bytes are posted so legacy clients can still read them.
+    const gid = this.encryptOutbound
+      ? this.deriveGroupId(group.state)
+      : undefined;
+    const msg_64 = this.encryptOutbound
+      ? (
+          await encryptGroupPayload({
+            state: group.state,
+            serializedMlsMessage: decodeBase64(mlsMessageBase64),
+          })
+        ).encryptedBase64
+      : mlsMessageBase64;
     const result = await this.getGroupClient(group).PostGroupMessage({
-      msg_64: encryptedBase64,
+      msg_64,
       gid,
     });
     return {
       cursor: result.cursor,
       at: result.at,
       gid: result.gid,
-      postedMsgBase64: encryptedBase64,
+      postedMsgBase64: msg_64,
     };
   }
 
@@ -946,11 +961,10 @@ export class CliSession {
    * new epoch state.
    */
   private findPendingOpByPostedMsg(
-    pendingEpochOperations: Map<string, PendingEpochOperation[]>,
     groupAlias: string,
     postedMsgBase64: string,
   ): PendingEpochOperation | undefined {
-    const pending = pendingEpochOperations.get(groupAlias);
+    const pending = this.store.pendingOperations.get(groupAlias);
     if (!pending || pending.length === 0) {
       return undefined;
     }
@@ -990,7 +1004,6 @@ export class CliSession {
         // the echo, so we match the posted encrypted wrapper against
         // pending operations instead.
         const pendingOp = this.findPendingOpByPostedMsg(
-          pendingOps,
           group.alias,
           message.msg_64,
         );

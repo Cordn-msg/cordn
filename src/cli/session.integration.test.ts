@@ -81,6 +81,109 @@ describe("CliSession", () => {
     }
   });
 
+  test("exchanges encrypted messages end-to-end when encryptOutbound is enabled", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      // Both clients opt into payload encryption. This exercises the
+      // encrypted post path, the encrypted self-echo reconciliation of the
+      // add-member commit (matched via postedMsgBase64), and the
+      // encrypted read path.
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        encryptOutbound: true,
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        encryptOutbound: true,
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await alice.sendMessage("demo", "hello bob");
+      const synced = await bob.syncGroup("demo");
+
+      expect(synced).toHaveLength(1);
+      expect(synced[0]?.content).toBe("hello bob");
+
+      await bob.sendMessage("demo", "hello alice");
+      const aliceSynced = await alice.syncGroup("demo");
+
+      expect(aliceSynced).toHaveLength(1);
+      expect(aliceSynced[0]?.content).toBe("hello alice");
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("mixed-version group interoperates: an encrypting client and a legacy client both read each other", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      // The staged-rollout invariant: the read path is symmetric regardless
+      // of the writer's gate. Alice encrypts; Bob posts legacy. Each must
+      // still read the other's messages because they share MLS group state.
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        encryptOutbound: true,
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        encryptOutbound: false,
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      // Alice (encrypting) -> Bob (legacy reader). Bob decrypts the
+      // encrypted payload using the shared exporter secret.
+      await alice.sendMessage("demo", "encrypted-hello");
+      const bobSynced = await bob.syncGroup("demo");
+      expect(bobSynced.map((m) => m.content)).toEqual(["encrypted-hello"]);
+
+      // Bob (legacy poster) -> Alice (encrypting reader). Alice reads the
+      // raw MLS bytes through the legacy read branch.
+      await bob.sendMessage("demo", "legacy-hello");
+      const aliceSynced = await alice.syncGroup("demo");
+      expect(aliceSynced.map((m) => m.content)).toEqual(["legacy-hello"]);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
   test("removes a member and prevents further sends from the removed session", async () => {
     const relayHub = new MockRelayHub();
     const serverSigner = new PrivateKeySigner();

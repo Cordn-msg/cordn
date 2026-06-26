@@ -245,6 +245,50 @@ describe.each<StorageFixture>([
     ).toHaveLength(1);
   });
 
+  test("round-trips welcome joinAfterCursor and defaults to undefined when absent", async () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("welcome-after"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: fixture.keyPackageRefHex,
+      welcome: fixture.welcome,
+      joinAfterCursor: 42,
+    });
+
+    const withCursor = coordinator.fetchPendingWelcomes(bob.actor.stablePubkey);
+    expect(withCursor).toHaveLength(1);
+    expect(withCursor[0]?.joinAfterCursor).toBe(42);
+
+    // Old-style welcome without a cursor hint stays undefined (back-compat).
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: "no-cursor-ref",
+      welcome: fixture.welcome,
+    });
+    const withoutCursor = coordinator.fetchPendingWelcomes(
+      bob.actor.stablePubkey,
+    );
+    expect(
+      withoutCursor.find((w) => w.keyPackageReference === "no-cursor-ref")
+        ?.joinAfterCursor,
+    ).toBeUndefined();
+  });
+
   test("deletes read welcomes that exceed TTL", async () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
@@ -530,6 +574,79 @@ describe.each<StorageFixture>([
         }),
       }),
     ).toThrow("Rejected stale handshake message");
+  });
+
+  test("stores encrypted messages opaquely with encrypted flag and zero epoch", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    // Arbitrary opaque bytes — the coordinator must never decode these.
+    const encryptedBytes = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
+
+    const posted = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice-ephemeral",
+      opaqueMessage: encryptedBytes,
+      groupId: "encrypted-topic",
+    });
+
+    expect(posted).toEqual(
+      expect.objectContaining({
+        groupId: "encrypted-topic",
+        encrypted: true,
+        epoch: 0n,
+        opaqueMessage: encryptedBytes,
+        cursor: 1,
+      }),
+    );
+
+    const fetched = coordinator.fetchGroupMessages({
+      groupId: "encrypted-topic",
+    });
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]).toEqual(
+      expect.objectContaining({
+        encrypted: true,
+        epoch: 0n,
+        groupId: "encrypted-topic",
+        opaqueMessage: encryptedBytes,
+      }),
+    );
+  });
+
+  test("interleaves legacy and encrypted messages on a shared per-group cursor sequence", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    // Legacy message: coordinator decodes MLS and derives gid from the payload.
+    const legacy = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice-ephemeral",
+      opaqueMessage: createPrivateMessage({
+        epoch: 5n,
+        contentType: 3,
+        bytes: [1, 2, 3],
+      }),
+    });
+    // Encrypted message: same group, caller-supplied gid, opaque bytes.
+    const encrypted = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice-ephemeral",
+      opaqueMessage: Uint8Array.from([0xc0, 0xff, 0xee]),
+      groupId: "group-local",
+    });
+
+    // Both share one monotonic cursor sequence for the group.
+    expect(legacy.cursor).toBe(1);
+    expect(encrypted.cursor).toBe(2);
+
+    const fetched = coordinator.fetchGroupMessages({
+      groupId: "group-local",
+    });
+    expect(fetched.map((m) => m.cursor)).toEqual([1, 2]);
+    expect(fetched[0]?.encrypted).toBe(false);
+    expect(fetched[0]?.epoch).toBe(5n);
+    expect(fetched[1]?.encrypted).toBe(true);
+    expect(fetched[1]?.epoch).toBe(0n);
   });
 
   test("assigns monotonic cursors independently per group", () => {

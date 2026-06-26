@@ -18,9 +18,11 @@ import {
 import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
 import {
+  createActor,
   createApplicationMessageBytes,
   createCommitMessageBytes,
   createKeyPackageRef,
+  createMemberArtifacts,
   createProposalMessageBytes,
   createThreeActorGroupScenario,
   decodeMlsFramedMessage,
@@ -495,6 +497,168 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       ).toBe("ordered traffic");
     } finally {
       await server.transport.close();
+    }
+  });
+
+  // Regression probe for the reported "join request stored but admin never
+  // receives it" symptom. StoreJoinRequest rides the STABLE transport and
+  // FetchManyPendingJoinRequests rides the EPHEMERAL transport, so this test
+  // exercises the exact cross-transport split the web client uses. The gid is
+  // an opaque string the coordinator does not validate (spec §9.4), which
+  // mimics a freshly created group that has no posted messages yet.
+  //
+  // If this test PASSES, the server/routing/transport-split is exonerated for
+  // the healthy-relay case and the defect must live in the web application
+  // layer (e.g. coordinator-key mismatch between requester share link and
+  // admin group record) or in production relay health. If it FAILS, this is a
+  // deterministic reproduction of the bug.
+  test("delivers a join request stored via stable transport to a batch fetch via ephemeral transport", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const requester = await createMemberArtifacts(createActor("requester"));
+      const requesterKeyPackageRef = await createKeyPackageRef(
+        requester.keyPackage,
+      );
+      // Opaque MLS-style group id; coordinator does not validate existence.
+      const gid = "550e8400-e29b-41d4-a716-446655440000";
+
+      const requesterClient = await createClient({
+        privateKey: requester.actor.secretKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const adminClient = await createClient({
+        privateKey: createActor("admin").secretKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      clients.push(requesterClient, adminClient);
+
+      // Requester publishes a key package, then stores a join request.
+      // StoreJoinRequest requires the caller to own the key package and rides
+      // the STABLE transport, so the requester's stable pubkey is injected.
+      await requesterClient.PublishKeyPackage({
+        kp_ref: requesterKeyPackageRef,
+        kp_64: encodeBase64(encode(keyPackageEncoder, requester.keyPackage)),
+      });
+      await requesterClient.StoreJoinRequest({
+        gid,
+        kp_ref: requesterKeyPackageRef,
+      });
+
+      // An unrelated admin fetches pending join requests for the group via the
+      // batch method, which rides the EPHEMERAL transport.
+      const result = await adminClient.FetchManyPendingJoinRequests({
+        groups: [{ gid }],
+      });
+
+      expect(result.requests).toHaveLength(1);
+      expect(result.requests[0]?.gid).toBe(gid);
+      expect(result.requests[0]?.pk).toBe(requester.actor.stablePubkey);
+      expect(result.requests[0]?.kp_ref).toBe(requesterKeyPackageRef);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  // Probe for the leading hypothesis behind "join request stored but admin
+  // never receives it, even after polling/refresh": a COORDINATOR MISMATCH.
+  // The web requester resolves their target coordinator from the share link's
+  // `?c=` param with a silent fallback to DEFAULT when `c` is absent, while the
+  // admin always fetches from the coordinator recorded on their group record.
+  // If those two coordinators differ, the request is stored on server A but the
+  // admin polls server B forever — both calls succeed, no error is surfaced,
+  // and a page refresh cannot help because the request simply is not on B.
+  //
+  // This test stands up TWO independent coordinator servers on the shared mock
+  // relay and reproduces that exact split: requester stores to coordinator A
+  // (the DEFAULT fallback), the group actually lives on coordinator B. The
+  // admin's batch fetch against B returns empty, while the same request is
+  // sitting on A.
+  test("a join request stored on the wrong coordinator is invisible to the admin's fetch and survives a fresh client", async () => {
+    const relayHub = new MockRelayHub();
+
+    // Coordinator A: the coordinator the requester silently falls back to.
+    const serverASigner = new PrivateKeySigner();
+    const serverAPubkey = await serverASigner.getPublicKey();
+    const serverA = await connectServer({
+      signer: serverASigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+    // Coordinator B: the coordinator the group actually lives on (admin's record).
+    const serverBSigner = new PrivateKeySigner();
+    const serverBPubkey = await serverBSigner.getPublicKey();
+    const serverB = await connectServer({
+      signer: serverBSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const requester = await createMemberArtifacts(createActor("requester"));
+      const requesterKeyPackageRef = await createKeyPackageRef(
+        requester.keyPackage,
+      );
+      const gid = "550e8400-e29b-41d4-a716-446655440000";
+
+      // Requester resolves coordinatorKey = A (e.g. stripped share link → DEFAULT).
+      const requesterClient = await createClient({
+        privateKey: requester.actor.secretKey,
+        serverPubkey: serverAPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      clients.push(requesterClient);
+
+      await requesterClient.PublishKeyPackage({
+        kp_ref: requesterKeyPackageRef,
+        kp_64: encodeBase64(encode(keyPackageEncoder, requester.keyPackage)),
+      });
+      // Store succeeds on A — the requester sees "Join request sent".
+      await requesterClient.StoreJoinRequest({
+        gid,
+        kp_ref: requesterKeyPackageRef,
+      });
+
+      // Admin's group record says the group is on B, so the admin fetches from B.
+      const adminFetchFromGroupCoordinator = async (): Promise<
+        Awaited<ReturnType<cordnClient["FetchManyPendingJoinRequests"]>>
+      > => {
+        const adminClient = await createClient({
+          privateKey: createActor("admin").secretKey,
+          serverPubkey: serverBPubkey,
+          relayHandler: relayHub.createRelayHandler(),
+        });
+        clients.push(adminClient);
+        return adminClient.FetchManyPendingJoinRequests({ groups: [{ gid }] });
+      };
+
+      // First poll.
+      expect((await adminFetchFromGroupCoordinator()).requests).toEqual([]);
+      // "Page refresh": a brand-new client/coordinator session polling B again.
+      expect((await adminFetchFromGroupCoordinator()).requests).toEqual([]);
+
+      // The request was never lost — it is sitting on coordinator A, which the
+      // admin never queries. Fetching A surfaces it immediately.
+      const adminClientOnA = await createClient({
+        privateKey: createActor("admin").secretKey,
+        serverPubkey: serverAPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      clients.push(adminClientOnA);
+      const fromA = await adminClientOnA.FetchManyPendingJoinRequests({
+        groups: [{ gid }],
+      });
+      expect(fromA.requests).toHaveLength(1);
+      expect(fromA.requests[0]?.pk).toBe(requester.actor.stablePubkey);
+    } finally {
+      await serverA.transport.close();
+      await serverB.transport.close();
     }
   });
 });
