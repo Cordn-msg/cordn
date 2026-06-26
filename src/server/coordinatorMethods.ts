@@ -1,10 +1,10 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@contextvm/mcp-sdk/server/mcp";
 import type { OpenStreamWriter } from "@contextvm/sdk/transport";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { RequestHandlerExtra } from "@contextvm/mcp-sdk/shared/protocol";
 import type {
   ServerNotification,
   ServerRequest,
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@contextvm/mcp-sdk/types.js";
 import { verifyEvent, type NostrEvent } from "nostr-tools";
 import type { z } from "zod";
 import {
