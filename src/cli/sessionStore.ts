@@ -4,6 +4,10 @@ import type {
   StoredWelcome,
 } from "./sessionState.ts";
 import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
+import type {
+  ConsumedJoinRequestRef,
+  ConsumedWelcomeRef,
+} from "../coordinator/types.ts";
 import {
   DuplicateGroupAliasError,
   DuplicateKeyPackageAliasError,
@@ -13,6 +17,14 @@ import {
 } from "./sessionErrors.ts";
 
 const MAX_ACCEPTED_WELCOME_REFS = 1000;
+
+function welcomeAckKey(ref: ConsumedWelcomeRef): string {
+  return `${ref.keyPackageReference}@${ref.createdAt}`;
+}
+
+function joinAckKey(ref: ConsumedJoinRequestRef): string {
+  return `${ref.requesterStablePubkey}@${ref.createdAt}`;
+}
 
 /** A capped Set that evicts the oldest entry when the cap is exceeded. */
 class CappedRefSet {
@@ -51,6 +63,24 @@ export class CliSessionStore {
   private readonly acceptedWelcomeRefs = new CappedRefSet(
     MAX_ACCEPTED_WELCOME_REFS,
   );
+  /** Welcomes accepted locally (joined), awaiting the next fetch's
+   *  `consumed` ack to retire them on the coordinator. */
+  private readonly pendingConsumedWelcomes = new Map<
+    string,
+    ConsumedWelcomeRef
+  >();
+  /** Join requests seen via the last fetch, keyed by groupId then requester
+   *  pk, so addMember can resolve the `createdAt` to ack once handled. */
+  private readonly fetchedJoinRequestsByGroup = new Map<
+    string,
+    Map<string, ConsumedJoinRequestRef>
+  >();
+  /** Join requests handled locally (admin added/rejected), awaiting the next
+   *  fetch's `consumed` ack, keyed by groupId then ack key. */
+  private readonly pendingConsumedJoinRequests = new Map<
+    string,
+    Map<string, ConsumedJoinRequestRef>
+  >();
   private readonly groups = new Map<string, GroupSessionState>();
   private readonly pendingEpochOperations = new Map<
     string,
@@ -150,6 +180,13 @@ export class CliSessionStore {
   }
 
   deleteWelcome(keyPackageReference: string): void {
+    const welcome = this.welcomes.get(keyPackageReference);
+    if (welcome) {
+      this.queueConsumedWelcome({
+        keyPackageReference,
+        createdAt: welcome.at,
+      });
+    }
     this.welcomes.delete(keyPackageReference);
     this.acceptedWelcomeRefs.add(keyPackageReference);
   }
@@ -190,5 +227,70 @@ export class CliSessionStore {
 
   get pendingOperations(): Map<string, PendingEpochOperation[]> {
     return this.pendingEpochOperations;
+  }
+
+  queueConsumedWelcome(ref: ConsumedWelcomeRef): void {
+    this.pendingConsumedWelcomes.set(welcomeAckKey(ref), ref);
+  }
+
+  peekConsumedWelcomes(): ConsumedWelcomeRef[] {
+    return [...this.pendingConsumedWelcomes.values()];
+  }
+
+  clearConsumedWelcomes(refs: ConsumedWelcomeRef[]): void {
+    for (const ref of refs) {
+      this.pendingConsumedWelcomes.delete(welcomeAckKey(ref));
+    }
+  }
+
+  /** Replace the cached pending join requests for a group with the result of
+   *  the latest fetch. */
+  setFetchedJoinRequests(
+    groupId: string,
+    refs: ConsumedJoinRequestRef[],
+  ): void {
+    const byPk = new Map<string, ConsumedJoinRequestRef>();
+    for (const ref of refs) {
+      byPk.set(ref.requesterStablePubkey, ref);
+    }
+    this.fetchedJoinRequestsByGroup.set(groupId, byPk);
+  }
+
+  findFetchedJoinRequest(
+    groupId: string,
+    requesterStablePubkey: string,
+  ): ConsumedJoinRequestRef | undefined {
+    return this.fetchedJoinRequestsByGroup
+      .get(groupId)
+      ?.get(requesterStablePubkey);
+  }
+
+  queueConsumedJoinRequest(groupId: string, ref: ConsumedJoinRequestRef): void {
+    let bucket = this.pendingConsumedJoinRequests.get(groupId);
+    if (!bucket) {
+      bucket = new Map();
+      this.pendingConsumedJoinRequests.set(groupId, bucket);
+    }
+    bucket.set(joinAckKey(ref), ref);
+  }
+
+  peekConsumedJoinRequests(groupId: string): ConsumedJoinRequestRef[] {
+    return [...(this.pendingConsumedJoinRequests.get(groupId)?.values() ?? [])];
+  }
+
+  clearConsumedJoinRequests(
+    groupId: string,
+    refs: ConsumedJoinRequestRef[],
+  ): void {
+    const bucket = this.pendingConsumedJoinRequests.get(groupId);
+    if (!bucket) {
+      return;
+    }
+    for (const ref of refs) {
+      bucket.delete(joinAckKey(ref));
+    }
+    if (bucket.size === 0) {
+      this.pendingConsumedJoinRequests.delete(groupId);
+    }
   }
 }

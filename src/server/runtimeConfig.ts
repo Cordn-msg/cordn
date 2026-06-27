@@ -40,14 +40,9 @@ export interface ServerRuntimeConfig {
     };
     logRejections: boolean;
   };
-  welcomeTtl: {
-    /** TTL in ms before read welcomes are cleaned up. Default: 1h. */
-    ttlMs: number;
-    /** Interval in ms between cleanup runs. Default: 1h. */
-    cleanupIntervalMs: number;
-    /** Max age in ms for unread welcomes before they are cleaned up. 0 disables. Default: 30 days. */
-    maxAgeMs: number;
-  };
+  /** Max age in ms for welcome and join request records before cleanup.
+   *  0 disables (keep forever). Default: 30 days. */
+  maxAgeMs: number;
 }
 
 function parseEnvAssignment(line: string): [string, string] | null {
@@ -236,33 +231,20 @@ export function readServerRuntimeConfig(
       logRejections:
         readOptionalBooleanEnv(env, "CORDN_LOG_ABUSE_REJECTIONS") ?? true,
     },
-    welcomeTtl: {
-      ttlMs:
-        readPositiveIntegerEnv(env, "CORDN_WELCOME_TTL_HOURS", 24) * 3_600_000,
-      cleanupIntervalMs:
-        readPositiveIntegerEnv(
-          env,
-          "CORDN_WELCOME_CLEANUP_INTERVAL_MINUTES",
-          60,
-        ) * 60_000,
-      maxAgeMs:
-        readPositiveIntegerEnv(env, "CORDN_UNREAD_MAX_AGE_DAYS", 30) *
-        86_400_000,
-    },
+    maxAgeMs:
+      readPositiveIntegerEnv(env, "CORDN_MAX_AGE_DAYS", 30) * 86_400_000,
   };
 }
 
 export function createConfiguredCoordinator(
   config: StorageConfig,
-  welcomeTtl?: ServerRuntimeConfig["welcomeTtl"],
+  maxAgeMs?: number,
 ): Coordinator {
   const storage = createConfiguredStorage(config);
 
   return createCoordinator({
     storage,
-    welcomeTtlMs: welcomeTtl?.ttlMs,
-    welcomeCleanupIntervalMs: welcomeTtl?.cleanupIntervalMs,
-    welcomeMaxAgeMs: welcomeTtl?.maxAgeMs,
+    maxAgeMs,
   });
 }
 

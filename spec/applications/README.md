@@ -91,3 +91,4 @@ Do not write an application specification when:
 ## Current Application Specifications
 
 - [`join-requests.md`](join-requests.md) — Coordinator-mediated join request signaling for shareable group links
+- [`welcome-delivery.md`](welcome-delivery.md) — Coordinator-mediated Welcome delivery and the invitee membership-boundary cursor hint

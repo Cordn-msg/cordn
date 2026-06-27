@@ -1,4 +1,5 @@
 import { ApplesauceRelayPool } from "@contextvm/sdk";
+import { nip19 } from "nostr-tools";
 import pino from "pino";
 import { connectServer } from "./coordinatorServer.ts";
 import {
@@ -7,22 +8,61 @@ import {
   readServerRuntimeConfig,
 } from "./runtimeConfig.ts";
 
+const BANNER_RULE = "═".repeat(68);
+
+/** Human-readable startup banner: hex pubkey, nprofile (NIP-19 encoding of
+ *  pubkey + relay hints), and a cordn.net URL that auto-adds this
+ *  coordinator. Written to stdout rather than pino so the line breaks and
+ *  symbols render for operators instead of being JSON-escaped. Structured
+ *  `serverPubkey` is still emitted in the later "connected" log line. */
+function buildStartupBanner(params: {
+  serverPubkey: string;
+  relayUrls: string[];
+}): string {
+  const { serverPubkey, relayUrls } = params;
+  const nprofile = nip19.nprofileEncode({
+    pubkey: serverPubkey,
+    relays: relayUrls,
+  });
+  const coordinatorUrl = `https://cordn.net/chat/coordinators?c=${nprofile}`;
+  const relayLines =
+    relayUrls.length > 0
+      ? relayUrls.map((relay) => `     • ${relay}`).join("\n")
+      : "     (none configured)";
+  return [
+    "",
+    `  ${BANNER_RULE}`,
+    "   🔑  CORDN COORDINATOR — Server Public Key",
+    `  ${BANNER_RULE}`,
+    "",
+    `   pubkey    ${serverPubkey}`,
+    `   nprofile  ${nprofile}`,
+    "",
+    "   📡  relays",
+    relayLines,
+    "",
+    "   🌐  add in cordn.net",
+    `     ${coordinatorUrl}`,
+    "",
+    "",
+  ].join("\n");
+}
+
 async function main(): Promise<void> {
   loadRuntimeEnv();
   const runtime = readServerRuntimeConfig();
   const logger = pino({ name: "cordn-server" });
   const serverPubkey = await runtime.signer.getPublicKey();
 
-  logger.info(
-    { serverPubkey },
-    "🔑 THIS IS YOUR SERVER PUBLIC KEY — clients must target this Nostr pubkey to reach this server",
+  process.stdout.write(
+    buildStartupBanner({
+      serverPubkey,
+      relayUrls: runtime.relayUrls,
+    }),
   );
 
   const server = await connectServer({
-    coordinator: createConfiguredCoordinator(
-      runtime.storage,
-      runtime.welcomeTtl,
-    ),
+    coordinator: createConfiguredCoordinator(runtime.storage, runtime.maxAgeMs),
     abuseProtection: runtime.abuseProtection,
     logger,
     signer: runtime.signer,

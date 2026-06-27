@@ -8,8 +8,11 @@ import {
 import { createUnsignedCordnMessageEvent } from "./messageEnvelope.ts";
 import {
   createApplicationMessageBase64,
+  decryptGroupPayload,
   encodeAuthenticatedSender,
+  encryptGroupPayload,
 } from "./utils/mlsMessages.ts";
+import { decodeBase64, encodeBase64 } from "./utils/mlsBase.ts";
 import {
   createPrivateKeyHex,
   deriveStablePubkey,
@@ -53,6 +56,7 @@ import {
   getPendingEpochOperation,
   markPendingEpochOperationsConfirmed,
   rejectPendingEpochOperations,
+  type PendingEpochOperation,
 } from "./pendingEpochOperations.ts";
 import {
   MissingLocalKeyPackageForWelcomeError,
@@ -120,6 +124,8 @@ export class CliSession {
 
   private readonly store = new CliSessionStore();
   private readonly coordinatorRegistry: CoordinatorClientRegistry;
+  /** Outbound payload encryption gate. See {@link CliSessionOptions.encryptOutbound}. */
+  private readonly encryptOutbound: boolean;
   private readonly groupIdDecoder = new TextDecoder();
   private readonly watchHandles = new Map<string, GroupWatchHandle>();
   private readonly groupEventListeners = new Set<(event: GroupEvent) => void>();
@@ -132,6 +138,7 @@ export class CliSession {
       privateKey: this.privateKey,
     });
     this.stablePubkey = deriveStablePubkey(this.privateKey);
+    this.encryptOutbound = options.encryptOutbound ?? false;
   }
 
   async disconnect(): Promise<void> {
@@ -398,11 +405,33 @@ export class CliSession {
         prepared.pendingOperation,
       );
 
-      await client.PostGroupMessage({
-        msg_64: prepared.commitMessageBase64,
-      });
+      // Encrypt with the *current* (pre-commit) state so that all
+      // existing group members can decrypt the commit.  The posted
+      // wrapper is saved on the pending operation so the self-echo
+      // can be matched before decryption when the session has already
+      // advanced to the new epoch.
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        prepared.commitMessageBase64,
+      );
+      prepared.pendingOperation.joinAfterCursor = posted.cursor;
+      prepared.pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
       this.adoptGroupState(group, prepared.newState);
+
+      // If this add resolved a pending join request the admin had fetched,
+      // queue it for retirement on the next fetchPendingJoinRequests. The
+      // request's pk is the added member's stable pubkey.
+      const handledRequest = this.store.findFetchedJoinRequest(
+        this.deriveGroupId(group.state),
+        prepared.pendingOperation.targetStablePubkey,
+      );
+      if (handledRequest) {
+        this.store.queueConsumedJoinRequest(
+          this.deriveGroupId(group.state),
+          handledRequest,
+        );
+      }
 
       return { keyPackageReference: prepared.keyPackageReference };
     });
@@ -426,7 +455,6 @@ export class CliSession {
         throw new SelfRemovalNotSupportedError(groupAlias);
       }
 
-      const client = this.getGroupClient(group);
       const prepared = await prepareRemoveMember({
         groupAlias,
         group,
@@ -439,9 +467,11 @@ export class CliSession {
         prepared.pendingOperation,
       );
 
-      await client.PostGroupMessage({
-        msg_64: prepared.commitMessageBase64,
-      });
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        prepared.commitMessageBase64,
+      );
+      prepared.pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
       this.adoptGroupState(group, prepared.newState);
 
@@ -476,9 +506,16 @@ export class CliSession {
         status: "pending",
       });
 
-      await this.getGroupClient(group).PostGroupMessage({
-        msg_64: prepared.commitMessageBase64,
-      });
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        prepared.commitMessageBase64,
+      );
+      const pendingOp = this.store.pendingOperations
+        .get(groupAlias)
+        ?.find((op) => op.commitMessageBase64 === prepared.commitMessageBase64);
+      if (pendingOp) {
+        pendingOp.postedMsgBase64 = posted.postedMsgBase64;
+      }
 
       this.adoptGroupState(group, prepared.newState);
 
@@ -488,9 +525,22 @@ export class CliSession {
 
   async fetchWelcomes(coordinatorKey?: string): Promise<StoredWelcome[]> {
     const resolvedCoordinatorKey = this.resolveCoordinatorKey(coordinatorKey);
+    const toAck = this.store.peekConsumedWelcomes();
     const result = await this.getCoordinatorClient(
       resolvedCoordinatorKey,
-    ).FetchPendingWelcomes({});
+    ).FetchPendingWelcomes(
+      toAck.length > 0
+        ? {
+            consumed: toAck.map((ref) => ({
+              kp_ref: ref.keyPackageReference,
+              at: ref.createdAt,
+            })),
+          }
+        : {},
+    );
+    // Clear only after a successful fetch; a throw leaves the refs queued so
+    // the next fetch retries. The ack is idempotent, so re-sends are safe.
+    this.store.clearConsumedWelcomes(toAck);
 
     for (const welcome of result.welcomes) {
       // Skip welcomes that were already accepted (their kp_ref was deleted
@@ -551,10 +601,29 @@ export class CliSession {
     groupAlias: string,
   ): Promise<FetchPendingJoinRequestsOutput> {
     const group = this.getGroup(groupAlias);
+    const client = this.getGroupClient(group);
     const groupId = this.deriveGroupId(group.state);
-    return this.getGroupClient(group).FetchPendingJoinRequests({
-      gid: groupId,
-    });
+    const toAck = this.store.peekConsumedJoinRequests(groupId);
+    const result = await client.FetchPendingJoinRequests(
+      toAck.length > 0
+        ? {
+            gid: groupId,
+            consumed: toAck.map((ref) => ({
+              pk: ref.requesterStablePubkey,
+              at: ref.createdAt,
+            })),
+          }
+        : { gid: groupId },
+    );
+    this.store.clearConsumedJoinRequests(groupId, toAck);
+    this.store.setFetchedJoinRequests(
+      groupId,
+      result.requests.map((req) => ({
+        requesterStablePubkey: req.pk,
+        createdAt: req.at,
+      })),
+    );
+    return result;
   }
 
   async acceptWelcome(
@@ -585,6 +654,14 @@ export class CliSession {
         ),
     });
 
+    // Use the welcome cursor hint for efficient post-join sync.
+    // If the inviter stored the commit cursor, skip messages sent
+    // before the new member was added.
+    if (welcome.after !== undefined && welcome.after > 0) {
+      group.fetchCursor = welcome.after;
+      group.lastCursor = welcome.after;
+    }
+
     this.store.addGroup(group);
     await this.establishPostWelcomeBaseline(group, welcome.at);
     this.store.deleteWelcome(keyPackageReference);
@@ -611,9 +688,10 @@ export class CliSession {
       });
 
       group.state = outbound.newState;
-      const posted = await this.getGroupClient(group).PostGroupMessage({
-        msg_64: outbound.opaqueMessageBase64,
-      });
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        outbound.opaqueMessageBase64,
+      );
 
       const stored: StoredMessage = {
         cursor: posted.cursor,
@@ -753,6 +831,45 @@ export class CliSession {
     );
   }
 
+  private async postOutboundGroupMessage(
+    group: GroupSessionState,
+    mlsMessageBase64: string,
+  ): Promise<{
+    cursor: number;
+    at: number;
+    gid: string;
+    postedMsgBase64: string;
+  }> {
+    // When encryption is enabled, the serialized MLS message is sealed
+    // with a key derived from the current epoch's exporter secret: all
+    // group members can decrypt, the coordinator cannot. The wrapper we
+    // post is also what we match against the self-echo of a commit
+    // (sealed with the pre-commit secret) when reconciling pending
+    // operations after the session adopts the new state. When disabled,
+    // raw MLS bytes are posted so legacy clients can still read them.
+    const gid = this.encryptOutbound
+      ? this.deriveGroupId(group.state)
+      : undefined;
+    const msg_64 = this.encryptOutbound
+      ? (
+          await encryptGroupPayload({
+            state: group.state,
+            serializedMlsMessage: decodeBase64(mlsMessageBase64),
+          })
+        ).encryptedBase64
+      : mlsMessageBase64;
+    const result = await this.getGroupClient(group).PostGroupMessage({
+      msg_64,
+      gid,
+    });
+    return {
+      cursor: result.cursor,
+      at: result.at,
+      gid: result.gid,
+      postedMsgBase64: msg_64,
+    };
+  }
+
   private async fetchRawGroupMessages(
     groupId: string,
     afterCursor: number,
@@ -880,9 +997,24 @@ export class CliSession {
       this.deriveGroupId(group.state),
       group.fetchCursor,
     );
-    await this.applyIncomingMessages(group, result.messages, {
-      finalizePendingOperations: false,
-    });
+    await this.applyIncomingMessages(group, result.messages);
+  }
+
+  /**
+   * Find a pending epoch operation whose posted encrypted wrapper matches
+   * the raw msg_64.  Used to detect self-echos of commits that were sealed
+   * with the pre-commit exporter secret before the session adopted the
+   * new epoch state.
+   */
+  private findPendingOpByPostedMsg(
+    groupAlias: string,
+    postedMsgBase64: string,
+  ): PendingEpochOperation | undefined {
+    const pending = this.store.pendingOperations.get(groupAlias);
+    if (!pending || pending.length === 0) {
+      return undefined;
+    }
+    return pending.find((op) => op.postedMsgBase64 === postedMsgBase64);
   }
 
   private async applyIncomingMessages(
@@ -897,73 +1029,131 @@ export class CliSession {
     received: StoredMessage[];
     issues: SyncIssue[];
   }> {
+    // Process messages one-at-a-time so that state-advancing commits
+    // update the exporter secret before subsequent messages from the
+    // new epoch are decrypted.
     const previousMessageCount = group.messages.length;
-    const sync = await ingestGroupMessages({
-      group,
-      messages: messages.map((message) => ({
-        cursor: message.cursor,
-        createdAt: message.at,
-        opaqueMessageBase64: message.msg_64,
-      })),
-      getPendingEpochOperation: (opaqueMessageBase64: string) =>
-        getPendingEpochOperation(
-          this.store.pendingOperations,
-          group.alias,
-          opaqueMessageBase64,
-        ),
-      localStablePubkey: this.stablePubkey,
-    });
+    const allReceived: StoredMessage[] = [];
+    const allIssues: SyncIssue[] = [];
+    const allAppliedPending = new Set<string>();
+    const allRejectedPending = new Set<string>();
 
-    const received =
-      options.recordReceivedMessages === false ? [] : sync.received;
+    const pendingOps = this.store.pendingOperations;
+
+    for (const message of messages) {
+      let opaqueMessageBase64: string;
+
+      if (message.encrypted) {
+        // Self-echo detection: commits are encrypted with the pre-commit
+        // state so all members can decrypt them.  The creator adopts the
+        // new state immediately after posting and can no longer decrypt
+        // the echo, so we match the posted encrypted wrapper against
+        // pending operations instead.
+        const pendingOp = this.findPendingOpByPostedMsg(
+          group.alias,
+          message.msg_64,
+        );
+        if (pendingOp) {
+          opaqueMessageBase64 = pendingOp.commitMessageBase64;
+        } else {
+          try {
+            const { serializedMlsMessage } = await decryptGroupPayload({
+              state: group.state,
+              encryptedBase64: message.msg_64,
+            });
+            opaqueMessageBase64 = encodeBase64(serializedMlsMessage);
+          } catch {
+            // Skip messages from epochs we have not joined — decryption
+            // fails naturally because the exporter secret differs.
+            // Advance the cursor so we do not re-fetch the same
+            // undecryptable message on every sync (e.g. pre-join traffic
+            // when a Welcome lacks an `after` hint).
+            group.fetchCursor = Math.max(group.fetchCursor, message.cursor);
+            group.lastCursor = Math.max(group.lastCursor, message.cursor);
+            continue;
+          }
+        }
+      } else {
+        opaqueMessageBase64 = message.msg_64;
+      }
+
+      // Ingest this single message immediately so that epoch-advancing
+      // commits update group.state before the next message is decrypted.
+      const sync = await ingestGroupMessages({
+        group,
+        messages: [
+          {
+            cursor: message.cursor,
+            createdAt: message.at,
+            opaqueMessageBase64,
+          },
+        ],
+        getPendingEpochOperation: (opaque: string) =>
+          getPendingEpochOperation(pendingOps, group.alias, opaque),
+        localStablePubkey: this.stablePubkey,
+      });
+
+      if (options.recordReceivedMessages !== false) {
+        allReceived.push(...sync.received);
+      }
+      allIssues.push(...sync.issues);
+      for (const m of sync.appliedPendingCommitMessages) {
+        allAppliedPending.add(m);
+      }
+      for (const m of sync.rejectedPendingCommitMessages) {
+        allRejectedPending.add(m);
+      }
+
+      if (sync.removedLocalMember && this.isWatching(group.alias)) {
+        queueMicrotask(() => {
+          void this.unwatchGroup(group.alias).catch(() => undefined);
+        });
+      }
+    }
 
     if (options.recordReceivedMessages === false) {
       group.messages.splice(previousMessageCount);
     }
 
+    // Only mark (don't finalize) when the caller asks for deferred
+    // finalization (e.g. during catch-up before a group operation).
     if (options.finalizePendingOperations === false) {
-      markPendingEpochOperationsConfirmed(this.store.pendingOperations, {
-        groupAlias: group.alias,
-        opaqueMessageBase64s: [...sync.appliedPendingCommitMessages],
-      });
-    } else {
-      const confirmedBeforeFinalize = [...sync.appliedPendingCommitMessages];
-      await confirmPendingEpochOperations(
-        this.store.pendingOperations,
-        this.getGroupClient(group),
-        {
+      if (allAppliedPending.size > 0) {
+        markPendingEpochOperationsConfirmed(this.store.pendingOperations, {
           groupAlias: group.alias,
-          opaqueMessageBase64s: confirmedBeforeFinalize,
-        },
-      );
-
-      if (confirmedBeforeFinalize.length > 0) {
+          opaqueMessageBase64s: [...allAppliedPending],
+        });
+      }
+    } else {
+      if (allAppliedPending.size > 0) {
+        await confirmPendingEpochOperations(
+          this.store.pendingOperations,
+          this.getGroupClient(group),
+          {
+            groupAlias: group.alias,
+            opaqueMessageBase64s: [...allAppliedPending],
+          },
+        );
         await this.fetchWelcomes();
       }
 
-      if (sync.rejectedPendingCommitMessages.size > 0) {
+      if (allRejectedPending.size > 0) {
         await rejectPendingEpochOperations(this.store.pendingOperations, {
           groupAlias: group.alias,
-          opaqueMessageBase64s: [...sync.rejectedPendingCommitMessages],
+          opaqueMessageBase64s: [...allRejectedPending],
         });
       }
     }
 
-    if (sync.removedLocalMember && this.isWatching(group.alias)) {
-      queueMicrotask(() => {
-        void this.unwatchGroup(group.alias).catch(() => undefined);
-      });
-    }
-
     return {
-      received,
+      received: allReceived,
       issues: options.suppressIssue
         ? this.removeSuppressedIssues(
             group,
-            group.syncIssues.length - sync.issues.length,
+            group.syncIssues.length - allIssues.length,
             options.suppressIssue,
           )
-        : sync.issues,
+        : allIssues,
     };
   }
 

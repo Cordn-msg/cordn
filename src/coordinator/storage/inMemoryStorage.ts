@@ -1,4 +1,6 @@
 import type {
+  ConsumedJoinRequestRef,
+  ConsumedWelcomeRef,
   FetchManyGroupMessagesInput,
   FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
@@ -13,6 +15,7 @@ import {
   type AppendGroupMessageParams,
   type CoordinatorStorage,
   MAX_PENDING_JOIN_REQUESTS_PER_GROUP,
+  partitionConsumedJoinRequests,
 } from "./storage.ts";
 
 interface GroupLog {
@@ -21,6 +24,8 @@ interface GroupLog {
   messages: GroupMessageRecord[];
 }
 
+/** @deprecated `epoch` parameter only used for legacy mode.
+ *  Encrypted groups pass 0n. */
 function createGroupLog(groupId: string, epoch: bigint): GroupLog {
   return {
     nextCursor: 1,
@@ -115,28 +120,42 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   fetchPendingWelcomes(
     targetStablePubkey: string,
-    now: number,
+    consumed?: ConsumedWelcomeRef[],
   ): WelcomeQueueRecord[] {
     const records = this.welcomesByIdentity.get(targetStablePubkey) ?? [];
-    for (const record of records) {
-      if (record.readAt === null) {
-        record.readAt = now;
+    const remaining =
+      consumed && consumed.length > 0
+        ? records.filter(
+            (record) =>
+              !consumed.some(
+                (c) =>
+                  c.keyPackageReference === record.keyPackageReference &&
+                  c.createdAt === record.createdAt,
+              ),
+          )
+        : records;
+
+    if (remaining !== records) {
+      if (remaining.length === 0) {
+        this.welcomesByIdentity.delete(targetStablePubkey);
+      } else {
+        this.welcomesByIdentity.set(targetStablePubkey, remaining);
       }
     }
-    return records;
+
+    return remaining;
   }
 
-  deleteExpiredWelcomes(
-    readThreshold: number,
-    unreadThreshold: number,
-  ): number {
+  deleteExpiredWelcomes(maxAgeThreshold: number): number {
+    if (maxAgeThreshold <= 0) {
+      return 0;
+    }
+
     let deleted = 0;
 
     for (const [targetStablePubkey, records] of this.welcomesByIdentity) {
       const kept = records.filter(
-        (record) =>
-          (record.readAt === null && record.createdAt >= unreadThreshold) ||
-          (record.readAt !== null && record.readAt >= readThreshold),
+        (record) => record.createdAt >= maxAgeThreshold,
       );
       deleted += records.length - kept.length;
 
@@ -152,16 +171,13 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   storeJoinRequest(record: JoinRequestRecord): JoinRequestRecord {
     const existing = this.joinRequestsByGroup.get(record.groupId) ?? [];
-    // Cap unread pending join requests per group to prevent unbounded accumulation.
-    const unreadCount = existing.filter((req) => req.readAt === null).length;
-    if (unreadCount >= MAX_PENDING_JOIN_REQUESTS_PER_GROUP) {
+    // Cap pending join requests per group to prevent unbounded accumulation.
+    if (existing.length >= MAX_PENDING_JOIN_REQUESTS_PER_GROUP) {
       throw new Error("Too many pending join requests for this group");
     }
 
     const duplicate = existing.find(
-      (req) =>
-        req.requesterStablePubkey === record.requesterStablePubkey &&
-        req.readAt === null,
+      (req) => req.requesterStablePubkey === record.requesterStablePubkey,
     );
     if (duplicate) {
       return duplicate;
@@ -174,36 +190,56 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
     return stored;
   }
 
-  fetchPendingJoinRequests(groupId: string, now: number): JoinRequestRecord[] {
+  fetchPendingJoinRequests(
+    groupId: string,
+    consumed?: ConsumedJoinRequestRef[],
+  ): JoinRequestRecord[] {
     const records = this.joinRequestsByGroup.get(groupId) ?? [];
-    for (const record of records) {
-      if (record.readAt === null) {
-        record.readAt = now;
+    const remaining =
+      consumed && consumed.length > 0
+        ? records.filter(
+            (record) =>
+              !consumed.some(
+                (c) =>
+                  c.requesterStablePubkey === record.requesterStablePubkey &&
+                  c.createdAt === record.createdAt,
+              ),
+          )
+        : records;
+
+    if (remaining !== records) {
+      if (remaining.length === 0) {
+        this.joinRequestsByGroup.delete(groupId);
+      } else {
+        this.joinRequestsByGroup.set(groupId, remaining);
       }
     }
-    return records;
+
+    return remaining;
   }
 
   fetchManyPendingJoinRequests(
     input: FetchManyPendingJoinRequestsInput,
-    now: number,
   ): JoinRequestRecord[] {
+    const consumedByGroup = partitionConsumedJoinRequests(input.consumed);
     return input.groups.flatMap((group) =>
-      this.fetchPendingJoinRequests(group.groupId, now),
+      this.fetchPendingJoinRequests(
+        group.groupId,
+        consumedByGroup.get(group.groupId),
+      ),
     );
   }
 
-  deleteExpiredJoinRequests(
-    readThreshold: number,
-    unreadThreshold: number,
-  ): number {
+  deleteExpiredJoinRequests(maxAgeThreshold: number): number {
+    if (maxAgeThreshold <= 0) {
+      return 0;
+    }
+
     let deleted = 0;
 
     for (const [groupId, records] of this.joinRequestsByGroup) {
       const kept = records.filter(
-        (record) =>
-          (record.readAt === null && record.createdAt >= unreadThreshold) ||
-          (record.readAt !== null && record.readAt >= readThreshold),
+        (record) => record.createdAt >= maxAgeThreshold,
       );
       deleted += records.length - kept.length;
 
@@ -225,10 +261,11 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
     const record: GroupMessageRecord = {
       cursor: group.nextCursor,
       groupId: params.groupId,
-      epoch: params.epoch,
+      epoch: params.encrypted ? 0n : params.epoch,
       ephemeralSenderPubkey: params.ephemeralSenderPubkey,
       opaqueMessage: params.opaqueMessage,
       createdAt: params.createdAt,
+      encrypted: params.encrypted,
     };
     group.nextCursor += 1;
 

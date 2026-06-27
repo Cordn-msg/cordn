@@ -97,6 +97,8 @@ function encodeWelcomeBase64(welcome: Welcome): string {
   return encodeBase64(encodeWelcome(welcome));
 }
 
+/** @deprecated Replaced by client-side payload encryption that naturally
+ *  filters messages from epochs the client has not joined. */
 function parseSinceEpoch(sinceEpoch: string | undefined): bigint | undefined {
   if (sinceEpoch === undefined) {
     return undefined;
@@ -203,7 +205,7 @@ function getOpenStreamWriter(extra: ToolExtra): OpenStreamWriter {
 function mapGroupMessage(
   record: Pick<
     GroupMessageRecord,
-    "cursor" | "groupId" | "opaqueMessage" | "createdAt"
+    "cursor" | "groupId" | "opaqueMessage" | "createdAt" | "encrypted"
   >,
 ): z.infer<typeof groupMessageSchema> {
   return {
@@ -211,6 +213,7 @@ function mapGroupMessage(
     gid: record.groupId,
     msg_64: encodeBase64(record.opaqueMessage),
     at: record.createdAt,
+    encrypted: record.encrypted,
   };
 }
 
@@ -474,11 +477,15 @@ export class CoordinatorAdapter {
   }
 
   fetchPendingWelcomes(
-    _input: z.infer<typeof fetchPendingWelcomesInputSchema>,
+    input: z.infer<typeof fetchPendingWelcomesInputSchema>,
     extra: ToolExtra,
   ) {
     const records = this.coordinator.fetchPendingWelcomes(
       requireClientPubkey(extra),
+      input.consumed?.map((c) => ({
+        keyPackageReference: c.kp_ref,
+        createdAt: c.at,
+      })),
     );
 
     return {
@@ -488,6 +495,7 @@ export class CoordinatorAdapter {
           kp_ref: record.keyPackageReference,
           welcome_64: encodeWelcomeBase64(record.welcome),
           at: record.createdAt,
+          after: record.joinAfterCursor,
         })),
       },
     };
@@ -499,6 +507,7 @@ export class CoordinatorAdapter {
       targetStablePubkey: input.target_pk,
       keyPackageReference: input.kp_ref,
       welcome: decodeWelcomeBase64(input.welcome_64),
+      joinAfterCursor: input.after,
     });
 
     this.recordOperation("storeWelcome");
@@ -546,7 +555,13 @@ export class CoordinatorAdapter {
     input: z.infer<typeof fetchPendingJoinRequestsInputSchema>,
   ) {
     // no extra available here; enforced in registration wrapper
-    const records = this.coordinator.fetchPendingJoinRequests(input.gid);
+    const records = this.coordinator.fetchPendingJoinRequests(
+      input.gid,
+      input.consumed?.map((c) => ({
+        requesterStablePubkey: c.pk,
+        createdAt: c.at,
+      })),
+    );
 
     this.recordOperation("fetchPendingJoinRequests");
 
@@ -568,6 +583,11 @@ export class CoordinatorAdapter {
     // no extra available here; enforced in registration wrapper
     const records = this.coordinator.fetchManyPendingJoinRequests({
       groups: input.groups.map((group) => ({ groupId: group.gid })),
+      consumed: input.consumed?.map((c) => ({
+        groupId: c.gid,
+        requesterStablePubkey: c.pk,
+        createdAt: c.at,
+      })),
     });
 
     this.recordOperation("fetchManyPendingJoinRequests");
@@ -595,6 +615,7 @@ export class CoordinatorAdapter {
       const record = this.coordinator.postGroupMessage({
         ephemeralSenderPubkey: clientPubkey,
         opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
+        groupId: input.gid,
       });
 
       this.recordOperation("postGroupMessage");

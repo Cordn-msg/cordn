@@ -201,7 +201,7 @@ describe("Coordinator key package flow", () => {
 
 describe("Coordinator welcome flow", () => {
   test("stores and returns queued welcomes per target identity without draining", async () => {
-    const coordinator = new Coordinator({ welcomeCleanupIntervalMs: 0 });
+    const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const bob = await createMemberArtifacts(createActor("bob-unit"));
     const carol = await createMemberArtifacts(createActor("carol-unit"));
@@ -243,12 +243,10 @@ describe("Coordinator welcome flow", () => {
     expect(fetchedBob[0]?.keyPackageReference).toBe(
       firstFixture.keyPackageRefHex,
     );
-    expect(fetchedBob[0]?.readAt).not.toBeNull();
     expect(fetchedCarol).toHaveLength(1);
     expect(fetchedCarol[0]?.keyPackageReference).toBe(
       secondFixture.keyPackageRefHex,
     );
-    expect(fetchedCarol[0]?.readAt).not.toBeNull();
 
     // Welcomes survive subsequent fetches (non-destructive).
     expect(
@@ -259,14 +257,16 @@ describe("Coordinator welcome flow", () => {
     ).toHaveLength(1);
   });
 
-  test("deletes expired welcomes via TTL cleanup", async () => {
+  test("observation never deletes; maxAge is the only cleanup clock", async () => {
     let tick = 1_700_000_000_000;
+    const maxAgeMs = 7_200_000; // 2h ceiling
     const coordinator = new Coordinator({
       now: () => {
         tick += 1;
         return tick;
       },
-      welcomeCleanupIntervalMs: 0,
+      cleanupIntervalMs: 0,
+      maxAgeMs: maxAgeMs,
     });
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const bob = await createMemberArtifacts(createActor("bob-unit"));
@@ -288,27 +288,81 @@ describe("Coordinator welcome flow", () => {
       welcome: fixture.welcome,
     });
 
+    // Observe the welcome — this used to start a short read-TTL deletion timer.
     expect(
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(1);
 
-    // Advance time past the 1h default TTL and run cleanup.
+    // Advance past the old 1h read-TTL window, but still within maxAge.
+    // Observation must NOT delete; the welcome survives.
     tick += 3_700_000; // ~1h 2min
-    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000, 0); // 1h TTL, unread preserved
-    expect(deleted).toBe(1);
+    expect(coordinator.deleteExpiredWelcomes(tick - maxAgeMs)).toBe(0);
+    expect(
+      coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
+    ).toHaveLength(1);
+
+    // Only crossing the maxAge ceiling removes it.
+    tick += maxAgeMs;
+    expect(coordinator.deleteExpiredWelcomes(tick - maxAgeMs)).toBe(1);
     expect(
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(0);
   });
 
-  test("does not delete unread welcomes regardless of age when maxAgeMs is disabled (0)", async () => {
+  test("consumed ack retires a welcome atomically on fetch", async () => {
+    const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("welcome-consume"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: fixture.keyPackageRefHex,
+      welcome: fixture.welcome,
+    });
+
+    const observed = coordinator.fetchPendingWelcomes(
+      bob.actor.stablePubkey,
+    )[0]!;
+
+    // Ack the observed welcome; it is retired and not echoed back.
+    const after = coordinator.fetchPendingWelcomes(bob.actor.stablePubkey, [
+      {
+        keyPackageReference: observed.keyPackageReference,
+        createdAt: observed.createdAt,
+      },
+    ]);
+    expect(after).toHaveLength(0);
+
+    // Re-acking an unknown ref is a no-op (idempotent).
+    expect(
+      coordinator.fetchPendingWelcomes(bob.actor.stablePubkey, [
+        {
+          keyPackageReference: observed.keyPackageReference,
+          createdAt: observed.createdAt,
+        },
+      ]),
+    ).toHaveLength(0);
+  });
+
+  test("does not delete welcomes regardless of age when maxAgeMs is disabled (0)", async () => {
     let tick = 1_700_000_000_000;
     const coordinator = new Coordinator({
       now: () => {
         tick += 1;
         return tick;
       },
-      welcomeCleanupIntervalMs: 0,
+      cleanupIntervalMs: 0,
     });
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const bob = await createMemberArtifacts(createActor("bob-unit"));
@@ -330,11 +384,11 @@ describe("Coordinator welcome flow", () => {
       welcome: fixture.welcome,
     });
 
-    // Never fetch, so readAt remains null.
+    // Never fetched; only the maxAge ceiling can reap it.
 
     // Advance time well past any reasonable TTL.
     tick += 90_000_000; // 25 hours
-    const deleted = coordinator.deleteExpiredWelcomes(tick - 3_600_000, 0);
+    const deleted = coordinator.deleteExpiredWelcomes(0);
     expect(deleted).toBe(0);
 
     // Unread welcome is still present.
@@ -343,16 +397,16 @@ describe("Coordinator welcome flow", () => {
     ).toHaveLength(1);
   });
 
-  test("deletes unread welcomes older than welcomeMaxAgeMs", async () => {
+  test("deletes welcomes older than maxAgeMs", async () => {
     let tick = 1_700_000_000_000;
-    const maxAgeMs = 3_600_000; // 1h max age for unread
+    const maxAgeMs = 3_600_000; // 1h max age for
     const coordinator = new Coordinator({
       now: () => {
         tick += 1;
         return tick;
       },
-      welcomeCleanupIntervalMs: 0,
-      welcomeMaxAgeMs: maxAgeMs,
+      cleanupIntervalMs: 0,
+      maxAgeMs: maxAgeMs,
     });
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const bob = await createMemberArtifacts(createActor("bob-unit"));
@@ -374,15 +428,10 @@ describe("Coordinator welcome flow", () => {
       welcome: fixture.welcome,
     });
 
-    // Never fetch, so readAt remains null.
-    // Advance time past the unread maxAge threshold.
+    // Never fetched; only the maxAge ceiling can reap it.
+    // Advance time past the maxAge threshold.
     tick += maxAgeMs + 60_000; // 1h 1min
-    const readThreshold = tick - 3_600_000; // 1h read TTL
-    const unreadThreshold = tick - maxAgeMs;
-    const deleted = coordinator.deleteExpiredWelcomes(
-      readThreshold,
-      unreadThreshold,
-    );
+    const deleted = coordinator.deleteExpiredWelcomes(tick - maxAgeMs);
     expect(deleted).toBe(1);
 
     // Unread welcome too old — deleted.
@@ -391,16 +440,16 @@ describe("Coordinator welcome flow", () => {
     ).toHaveLength(0);
   });
 
-  test("keeps unread welcomes younger than welcomeMaxAgeMs", async () => {
+  test("keeps welcomes younger than maxAgeMs", async () => {
     let tick = 1_700_000_000_000;
-    const maxAgeMs = 3_600_000; // 1h max age for unread
+    const maxAgeMs = 3_600_000; // 1h max age for
     const coordinator = new Coordinator({
       now: () => {
         tick += 1;
         return tick;
       },
-      welcomeCleanupIntervalMs: 0,
-      welcomeMaxAgeMs: maxAgeMs,
+      cleanupIntervalMs: 0,
+      maxAgeMs: maxAgeMs,
     });
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const bob = await createMemberArtifacts(createActor("bob-unit"));
@@ -422,15 +471,10 @@ describe("Coordinator welcome flow", () => {
       welcome: fixture.welcome,
     });
 
-    // Never fetch, so readAt remains null.
-    // Advance time to just before the unread maxAge threshold.
+    // Never fetched; only the maxAge ceiling can reap it.
+    // Advance time to just before the maxAge threshold.
     tick += maxAgeMs - 60_000; // 59min — still within maxAge
-    const readThreshold = tick - 3_600_000;
-    const unreadThreshold = tick - maxAgeMs;
-    const deleted = coordinator.deleteExpiredWelcomes(
-      readThreshold,
-      unreadThreshold,
-    );
+    const deleted = coordinator.deleteExpiredWelcomes(tick - maxAgeMs);
     expect(deleted).toBe(0);
 
     // Unread welcome is young enough — still present.
@@ -438,11 +482,53 @@ describe("Coordinator welcome flow", () => {
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey),
     ).toHaveLength(1);
   });
+
+  test("round-trips joinAfterCursor so invitees can skip pre-join messages", async () => {
+    const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("welcome-join-after"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: fixture.keyPackageRefHex,
+      welcome: fixture.welcome,
+      joinAfterCursor: 42,
+    });
+
+    const fetched = coordinator.fetchPendingWelcomes(bob.actor.stablePubkey);
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]?.joinAfterCursor).toBe(42);
+
+    // Welcomes without joinAfterCursor return undefined (backward compat).
+    coordinator.storeWelcome({
+      targetStablePubkey: bob.actor.stablePubkey,
+      keyPackageReference: "no-cursor-ref",
+      welcome: fixture.welcome,
+    });
+    const secondFetch = coordinator.fetchPendingWelcomes(
+      bob.actor.stablePubkey,
+    );
+    const withoutCursor = secondFetch.find(
+      (w) => w.keyPackageReference === "no-cursor-ref",
+    );
+    expect(withoutCursor?.joinAfterCursor).toBeUndefined();
+  });
 });
 
 describe("Coordinator join request flow", () => {
   test("stores and returns pending join requests per group without draining", () => {
-    const coordinator = new Coordinator({ welcomeCleanupIntervalMs: 0 });
+    const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
 
     coordinator.postGroupMessage({
       ephemeralSenderPubkey: "member-1",
@@ -487,29 +573,28 @@ describe("Coordinator join request flow", () => {
     expect(fetchedAlpha).toHaveLength(2);
     expect(fetchedAlpha[0]?.requesterStablePubkey).toBe("alice-requester");
     expect(fetchedAlpha[0]?.keyPackageRef).toBe("kp-ref-alice-1");
-    expect(fetchedAlpha[0]?.readAt).not.toBeNull();
     expect(fetchedAlpha[1]?.requesterStablePubkey).toBe("bob-requester");
     expect(fetchedAlpha[1]?.keyPackageRef).toBe("kp-ref-bob-1");
-    expect(fetchedAlpha[1]?.readAt).not.toBeNull();
 
     expect(fetchedBeta).toHaveLength(1);
     expect(fetchedBeta[0]?.requesterStablePubkey).toBe("carol-requester");
     expect(fetchedBeta[0]?.keyPackageRef).toBe("kp-ref-carol-1");
-    expect(fetchedBeta[0]?.readAt).not.toBeNull();
 
     // Requests survive subsequent fetches (non-destructive).
     expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(2);
     expect(coordinator.fetchPendingJoinRequests("group-beta")).toHaveLength(1);
   });
 
-  test("deletes expired join requests via TTL cleanup", () => {
+  test("observation never deletes join requests; maxAge is the only cleanup clock", () => {
     let tick = 1_700_000_000_000;
+    const maxAgeMs = 7_200_000; // 2h ceiling
     const coordinator = new Coordinator({
       now: () => {
         tick += 1;
         return tick;
       },
-      welcomeCleanupIntervalMs: 0,
+      cleanupIntervalMs: 0,
+      maxAgeMs: maxAgeMs,
     });
 
     coordinator.postGroupMessage({
@@ -528,23 +613,28 @@ describe("Coordinator join request flow", () => {
       keyPackageRef: "kp-ref-alice-1",
     });
 
+    // Observe — this used to start a short read-TTL deletion timer.
     expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
 
-    // Advance time past the 1h default TTL and run cleanup.
+    // Advance past the old 1h read-TTL window, still within maxAge. Survives.
     tick += 3_700_000; // ~1h 2min
-    const deleted = coordinator.deleteExpiredJoinRequests(tick - 3_600_000, 0); // 1h TTL, unread preserved
-    expect(deleted).toBe(1);
+    expect(coordinator.deleteExpiredJoinRequests(tick - maxAgeMs)).toBe(0);
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
+
+    // Only crossing the maxAge ceiling removes it.
+    tick += maxAgeMs;
+    expect(coordinator.deleteExpiredJoinRequests(tick - maxAgeMs)).toBe(1);
     expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(0);
   });
 
-  test("does not delete unread join requests regardless of age when maxAgeMs is disabled (0)", () => {
+  test("does not delete join requests regardless of age when maxAgeMs is disabled (0)", () => {
     let tick = 1_700_000_000_000;
     const coordinator = new Coordinator({
       now: () => {
         tick += 1;
         return tick;
       },
-      welcomeCleanupIntervalMs: 0,
+      cleanupIntervalMs: 0,
     });
 
     coordinator.postGroupMessage({
@@ -563,27 +653,27 @@ describe("Coordinator join request flow", () => {
       keyPackageRef: "kp-ref-alice-1",
     });
 
-    // Never fetch, so readAt remains null.
+    // Never fetched; only the maxAge ceiling can reap it.
 
     // Advance time well past any reasonable TTL.
     tick += 90_000_000; // 25 hours
-    const deleted = coordinator.deleteExpiredJoinRequests(tick - 3_600_000, 0);
+    const deleted = coordinator.deleteExpiredJoinRequests(0);
     expect(deleted).toBe(0);
 
     // Unread request is still present.
     expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
   });
 
-  test("deletes unread join requests older than welcomeMaxAgeMs", () => {
+  test("deletes join requests older than maxAgeMs", () => {
     let tick = 1_700_000_000_000;
-    const maxAgeMs = 3_600_000; // 1h max age for unread
+    const maxAgeMs = 3_600_000; // 1h max age for
     const coordinator = new Coordinator({
       now: () => {
         tick += 1;
         return tick;
       },
-      welcomeCleanupIntervalMs: 0,
-      welcomeMaxAgeMs: maxAgeMs,
+      cleanupIntervalMs: 0,
+      maxAgeMs: maxAgeMs,
     });
 
     coordinator.postGroupMessage({
@@ -602,31 +692,26 @@ describe("Coordinator join request flow", () => {
       keyPackageRef: "kp-ref-alice-1",
     });
 
-    // Never fetch, so readAt remains null.
-    // Advance time past the unread maxAge threshold.
+    // Never fetched; only the maxAge ceiling can reap it.
+    // Advance time past the maxAge threshold.
     tick += maxAgeMs + 60_000; // 1h 1min
-    const readThreshold = tick - 3_600_000; // 1h read TTL
-    const unreadThreshold = tick - maxAgeMs;
-    const deleted = coordinator.deleteExpiredJoinRequests(
-      readThreshold,
-      unreadThreshold,
-    );
+    const deleted = coordinator.deleteExpiredJoinRequests(tick - maxAgeMs);
     expect(deleted).toBe(1);
 
     // Unread request too old — deleted.
     expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(0);
   });
 
-  test("keeps unread join requests younger than welcomeMaxAgeMs", () => {
+  test("keeps join requests younger than maxAgeMs", () => {
     let tick = 1_700_000_000_000;
-    const maxAgeMs = 3_600_000; // 1h max age for unread
+    const maxAgeMs = 3_600_000; // 1h max age for
     const coordinator = new Coordinator({
       now: () => {
         tick += 1;
         return tick;
       },
-      welcomeCleanupIntervalMs: 0,
-      welcomeMaxAgeMs: maxAgeMs,
+      cleanupIntervalMs: 0,
+      maxAgeMs: maxAgeMs,
     });
 
     coordinator.postGroupMessage({
@@ -645,23 +730,18 @@ describe("Coordinator join request flow", () => {
       keyPackageRef: "kp-ref-alice-1",
     });
 
-    // Never fetch, so readAt remains null.
-    // Advance time to just before the unread maxAge threshold.
+    // Never fetched; only the maxAge ceiling can reap it.
+    // Advance time to just before the maxAge threshold.
     tick += maxAgeMs - 60_000; // 59min — still within maxAge
-    const readThreshold = tick - 3_600_000;
-    const unreadThreshold = tick - maxAgeMs;
-    const deleted = coordinator.deleteExpiredJoinRequests(
-      readThreshold,
-      unreadThreshold,
-    );
+    const deleted = coordinator.deleteExpiredJoinRequests(tick - maxAgeMs);
     expect(deleted).toBe(0);
 
     // Unread request is young enough — still present.
     expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
   });
 
-  test("fetches many pending join requests across groups in a single call with non-destructive read-tracking", () => {
-    const coordinator = new Coordinator({ welcomeCleanupIntervalMs: 0 });
+  test("fetches many pending join requests across groups in a single call without draining", () => {
+    const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
 
     coordinator.postGroupMessage({
       ephemeralSenderPubkey: "member-1",
@@ -707,25 +787,81 @@ describe("Coordinator join request flow", () => {
     expect(results[0]?.groupId).toBe("group-alpha");
     expect(results[0]?.requesterStablePubkey).toBe("alice-requester");
     expect(results[0]?.keyPackageRef).toBe("kp-ref-alice-1");
-    expect(results[0]?.readAt).not.toBeNull();
     expect(results[1]?.groupId).toBe("group-alpha");
     expect(results[1]?.requesterStablePubkey).toBe("bob-requester");
     expect(results[1]?.keyPackageRef).toBe("kp-ref-bob-1");
-    expect(results[1]?.readAt).not.toBeNull();
     expect(results[2]?.groupId).toBe("group-beta");
     expect(results[2]?.requesterStablePubkey).toBe("carol-requester");
     expect(results[2]?.keyPackageRef).toBe("kp-ref-carol-1");
-    expect(results[2]?.readAt).not.toBeNull();
 
     // Requests survive subsequent fetches (non-destructive).
     const refetch = coordinator.fetchManyPendingJoinRequests({
       groups: [{ groupId: "group-alpha" }, { groupId: "group-beta" }],
     });
     expect(refetch).toHaveLength(3);
-    // Already-read requests keep their original readAt.
-    expect(refetch[0]?.readAt).toBe(results[0]?.readAt);
-    expect(refetch[1]?.readAt).toBe(results[1]?.readAt);
-    expect(refetch[2]?.readAt).toBe(results[2]?.readAt);
+  });
+
+  test("consumed ack retires single-group join requests atomically on fetch", () => {
+    const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "bob-requester",
+      keyPackageRef: "kp-ref-bob-1",
+    });
+
+    const observed = coordinator.fetchPendingJoinRequests("group-alpha");
+    expect(observed).toHaveLength(2);
+
+    // Ack only alice; bob remains and is returned.
+    const after = coordinator.fetchPendingJoinRequests("group-alpha", [
+      {
+        requesterStablePubkey: "alice-requester",
+        createdAt: observed[0]!.createdAt,
+      },
+    ]);
+    expect(after).toHaveLength(1);
+    expect(after[0]?.requesterStablePubkey).toBe("bob-requester");
+  });
+
+  test("consumed ack retires join requests across groups via fetchMany", () => {
+    const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
+
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+    coordinator.storeJoinRequest({
+      groupId: "group-beta",
+      requesterStablePubkey: "carol-requester",
+      keyPackageRef: "kp-ref-carol-1",
+    });
+
+    const observed = coordinator.fetchManyPendingJoinRequests({
+      groups: [{ groupId: "group-alpha" }, { groupId: "group-beta" }],
+    });
+    expect(observed).toHaveLength(2);
+
+    // Ack carol in group-beta via fetchMany; only alpha remains.
+    const after = coordinator.fetchManyPendingJoinRequests({
+      groups: [{ groupId: "group-alpha" }, { groupId: "group-beta" }],
+      consumed: [
+        {
+          groupId: "group-beta",
+          requesterStablePubkey: "carol-requester",
+          createdAt: observed[1]!.createdAt,
+        },
+      ],
+    });
+    expect(after).toHaveLength(1);
+    expect(after[0]?.groupId).toBe("group-alpha");
+    expect(after[0]?.requesterStablePubkey).toBe("alice-requester");
   });
 });
 
@@ -1117,5 +1253,76 @@ describe("Coordinator group message flow", () => {
 
     subscription.unsubscribe();
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
+  test("routes encrypted messages by caller-supplied gid and skips MLS decoding", () => {
+    const coordinator = new Coordinator();
+
+    // Encrypted path: arbitrary opaque bytes, coordinator never decodes them.
+    const encryptedBytes = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
+
+    const posted = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "alice-ephemeral",
+      opaqueMessage: encryptedBytes,
+      groupId: "delivery-topic-encrypted",
+    });
+
+    expect(posted.groupId).toBe("delivery-topic-encrypted");
+    expect(posted.ephemeralSenderPubkey).toBe("alice-ephemeral");
+    expect(posted.cursor).toBe(1);
+    expect(posted.encrypted).toBe(true);
+    expect(posted.epoch).toBe(0n);
+    expect(posted.opaqueMessage).toEqual(encryptedBytes);
+
+    // Fetched messages preserve the encrypted flag.
+    const fetched = coordinator.fetchGroupMessages({
+      groupId: "delivery-topic-encrypted",
+    });
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]?.encrypted).toBe(true);
+    expect(fetched[0]?.epoch).toBe(0n);
+    expect(fetched[0]?.groupId).toBe("delivery-topic-encrypted");
+
+    // Messages from different delivery topics are isolated.
+    const otherEncrypted = Uint8Array.from([0xca, 0xfe]);
+    coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "bob-ephemeral",
+      opaqueMessage: otherEncrypted,
+      groupId: "other-topic",
+    });
+    expect(
+      coordinator.fetchGroupMessages({ groupId: "delivery-topic-encrypted" }),
+    ).toHaveLength(1);
+    expect(
+      coordinator.fetchGroupMessages({ groupId: "other-topic" }),
+    ).toHaveLength(1);
+  });
+
+  test("streams live encrypted messages through subscriptions", async () => {
+    const coordinator = new Coordinator();
+
+    const subscription = coordinator.subscribeGroupMessages({
+      groupId: "encrypted-live",
+      afterCursor: 0,
+    });
+    const iterator = subscription.messages[Symbol.asyncIterator]();
+
+    const liveBytes = Uint8Array.from([0x11, 0x22, 0x33]);
+    const posted = coordinator.postGroupMessage({
+      ephemeralSenderPubkey: "live-sender",
+      opaqueMessage: liveBytes,
+      groupId: "encrypted-live",
+    });
+
+    const result = await iterator.next();
+    expect(result.done).toBe(false);
+    expect(result.value).toMatchObject({
+      cursor: posted.cursor,
+      groupId: "encrypted-live",
+      encrypted: true,
+      epoch: 0n,
+    });
+
+    subscription.unsubscribe();
   });
 });

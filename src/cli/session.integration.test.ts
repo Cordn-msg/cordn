@@ -84,6 +84,109 @@ describe("CliSession", () => {
     }
   });
 
+  test("exchanges encrypted messages end-to-end when encryptOutbound is enabled", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      // Both clients opt into payload encryption. This exercises the
+      // encrypted post path, the encrypted self-echo reconciliation of the
+      // add-member commit (matched via postedMsgBase64), and the
+      // encrypted read path.
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        encryptOutbound: true,
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        encryptOutbound: true,
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      await alice.sendMessage("demo", "hello bob");
+      const synced = await bob.syncGroup("demo");
+
+      expect(synced).toHaveLength(1);
+      expect(synced[0]?.content).toBe("hello bob");
+
+      await bob.sendMessage("demo", "hello alice");
+      const aliceSynced = await alice.syncGroup("demo");
+
+      expect(aliceSynced).toHaveLength(1);
+      expect(aliceSynced[0]?.content).toBe("hello alice");
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("mixed-version group interoperates: an encrypting client and a legacy client both read each other", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      // The staged-rollout invariant: the read path is symmetric regardless
+      // of the writer's gate. Alice encrypts; Bob posts legacy. Each must
+      // still read the other's messages because they share MLS group state.
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        encryptOutbound: true,
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        encryptOutbound: false,
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      // Alice (encrypting) -> Bob (legacy reader). Bob decrypts the
+      // encrypted payload using the shared exporter secret.
+      await alice.sendMessage("demo", "encrypted-hello");
+      const bobSynced = await bob.syncGroup("demo");
+      expect(bobSynced.map((m) => m.content)).toEqual(["encrypted-hello"]);
+
+      // Bob (legacy poster) -> Alice (encrypting reader). Alice reads the
+      // raw MLS bytes through the legacy read branch.
+      await bob.sendMessage("demo", "legacy-hello");
+      const aliceSynced = await alice.syncGroup("demo");
+      expect(aliceSynced.map((m) => m.content)).toEqual(["legacy-hello"]);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
   test("removes a member and prevents further sends from the removed session", async () => {
     const relayHub = new MockRelayHub();
     const serverSigner = new PrivateKeySigner();
@@ -2237,34 +2340,14 @@ describe("CliSession", () => {
         "bob-concurrent-1",
       ]);
 
-      expect(await carol.fetchWelcomes()).toEqual([]);
-      expect(await dave.fetchWelcomes()).toEqual([]);
-
-      const aliceCursorBeforeSync = alice.getGroup("demo").fetchCursor;
-      const bobCursorBeforeSync = bob.getGroup("demo").fetchCursor;
-
-      const aliceRoundOne = await alice.syncGroup("demo");
-      const bobRoundOne = await bob.syncGroup("demo");
-
-      expect(aliceRoundOne.map((message) => message.content)).toEqual(
-        expect.arrayContaining(["bob-concurrent-1"]),
-      );
-      expect(bobRoundOne.map((message) => message.content)).toEqual(
-        expect.arrayContaining(["alice-concurrent-1"]),
-      );
-      expect(alice.getGroup("demo").fetchCursor).toBeGreaterThan(
-        aliceCursorBeforeSync,
-      );
-      expect(bob.getGroup("demo").fetchCursor).toBeGreaterThan(
-        bobCursorBeforeSync,
-      );
-
-      await carol.fetchWelcomes();
-      await dave.fetchWelcomes();
+      // The concurrent sends trigger catch-up which finalizes
+      // pending add-member operations and stores the welcomes.
+      const carolWelcomes = await carol.fetchWelcomes();
+      const daveWelcomes = await dave.fetchWelcomes();
 
       const deliveredRefs = [
-        ...carol.listWelcomes().map((welcome) => welcome.kp_ref),
-        ...dave.listWelcomes().map((welcome) => welcome.kp_ref),
+        ...carolWelcomes.map((welcome) => welcome.kp_ref),
+        ...daveWelcomes.map((welcome) => welcome.kp_ref),
       ];
 
       expect(deliveredRefs).toHaveLength(2);
@@ -2658,8 +2741,16 @@ describe("CliSession", () => {
         bob.sendMessage("group-a", "a-msg-2"),
       ]);
 
-      expect(await carol.fetchWelcomes()).toEqual([]);
-      expect(await dave.fetchWelcomes()).toEqual([]);
+      // The concurrent sends trigger catch-up which finalizes
+      // pending add-member operations and stores the welcomes.
+      const carolEarlyWelcomes = await carol.fetchWelcomes();
+      const daveEarlyWelcomes = await dave.fetchWelcomes();
+      expect(carolEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        carolIntoA.keyPackageReference,
+      );
+      expect(daveEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        daveIntoB.keyPackageReference,
+      );
 
       await bob.syncGroup("group-a");
       await alice.syncGroup("group-b");
@@ -2981,10 +3072,24 @@ describe("CliSession", () => {
         bob.sendMessage("group-b", "b-race-msg-from-bob"),
       ]);
 
-      expect(await carol.fetchWelcomes()).toEqual([]);
-      expect(await dave.fetchWelcomes()).toEqual([]);
-      expect(await erin.fetchWelcomes()).toEqual([]);
-      expect(await frank.fetchWelcomes()).toEqual([]);
+      // The concurrent sends trigger catch-up which finalizes
+      // pending add-member operations and stores the welcomes.
+      const carolEarlyWelcomes = await carol.fetchWelcomes();
+      const daveEarlyWelcomes = await dave.fetchWelcomes();
+      const erinEarlyWelcomes = await erin.fetchWelcomes();
+      const frankEarlyWelcomes = await frank.fetchWelcomes();
+      expect(carolEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        carolIntoA.keyPackageReference,
+      );
+      expect(daveEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        daveIntoA.keyPackageReference,
+      );
+      expect(erinEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        erinIntoB.keyPackageReference,
+      );
+      expect(frankEarlyWelcomes.map((w) => w.kp_ref)).toContain(
+        frankIntoB.keyPackageReference,
+      );
 
       await bob.syncGroup("group-a");
       await alice.syncGroup("group-b");
@@ -3537,6 +3642,106 @@ describe("CliSession", () => {
       expect(aliceSynced).toHaveLength(1);
       expect(aliceSynced[0]?.content).toBe("thanks for the add");
       expect(aliceSynced[0]?.sender).toBe(bob.stablePubkey);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("retires a welcome on the coordinator via the consumed ack after the invitee accepts locally", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      // Bob fetches then accepts the welcome. Acceptance queues the
+      // welcome for the consumed ack; it is NOT retired on the coordinator
+      // until the next fetch drains the queue.
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+      await bob.fetchWelcomes();
+
+      // A brand-new session for the same identity has no local dedup state,
+      // so an empty result here proves retirement happened on the
+      // coordinator (not just filtered client-side).
+      const bobFresh = new CliSession({
+        privateKey: bob.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(bobFresh);
+
+      const remaining = await bobFresh.fetchWelcomes();
+      expect(remaining).toHaveLength(0);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("retires a join request on the coordinator via the consumed ack after the admin adds the requester", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      await alice.sendMessage("demo", "group bootstrap");
+      const groupId = alice.deriveGroupId(alice.getGroup("demo").state);
+
+      await bob.publishKeyPackage("bob-main");
+      await bob.storeJoinRequest(groupId, "bob-main");
+
+      // Admin fetches → the request (with its createdAt) is cached so the
+      // later add can resolve the ack key.
+      const pending = await alice.fetchPendingJoinRequests("demo");
+      expect(pending.requests).toHaveLength(1);
+      expect(pending.requests[0]?.pk).toBe(bob.stablePubkey);
+
+      // Admin handles the request by adding the requester. addMember queues
+      // the consumed ack; the request is NOT retired until the next fetch.
+      await alice.addMember("demo", pending.requests[0]!.kp_ref);
+
+      // The next fetch drains the ack → the request is retired on the
+      // coordinator and no longer echoed back.
+      const after = await alice.fetchPendingJoinRequests("demo");
+      expect(after.requests).toHaveLength(0);
     } finally {
       await server.transport.close();
     }
