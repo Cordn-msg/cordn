@@ -1,5 +1,102 @@
 # cordn
 
+## 0.3.0
+
+### Minor Changes
+
+- 6cd46aa: feat(coordinator)!: replace read/unread TTLs with a max-age ceiling and explicit consumed acks
+
+  Welcomes and join requests are no longer retired by a read timer. Records are
+  deleted only when the caller explicitly acknowledges consumption, or when their
+  age exceeds a single max-age ceiling. Fetching never deletes; the owner
+  explicitly retires their own key packages and join requests.
+
+  ### Added
+  - Optional `consumed` parameter on `fetchPendingWelcomes` (keyed by `kp_ref` +
+    `at`), `fetchPendingJoinRequests` (keyed by `pk` + `at`), and
+    `fetchManyPendingJoinRequests` (keyed by `gid` + `pk` + `at`). Consumed
+    records are deleted atomically before the fetch, so they are never echoed
+    back. The ack is idempotent, so re-sends after a failed fetch are safe.
+
+  ### Removed / renamed (BREAKING)
+
+  Retention is now a single clock instead of three. Existing SQLite databases
+  keep their legacy `read_at` columns harmlessly ignored (INSERTs/SELECTs
+  enumerate columns explicitly); new databases omit them.
+
+  Environment variables:
+  - `CORDN_UNREAD_MAX_AGE_DAYS` → renamed to `CORDN_MAX_AGE_DAYS` (default 30,
+    unchanged).
+  - `CORDN_WELCOME_TTL_HOURS` → removed (the read TTL it drove no longer exists).
+  - `CORDN_WELCOME_CLEANUP_INTERVAL_MINUTES` → removed. With only the
+    multi-day max age left to reap, the cleanup cadence is no longer env-tunable;
+    the coordinator runs it on a fixed internal default of 6h (was 1h). Deployments
+    relying on the defaults need no action.
+
+  `CoordinatorOptions` (programmatic API):
+  - `welcomeMaxAgeMs` → renamed to `maxAgeMs`.
+  - `welcomeTtlMs` → removed.
+  - `welcomeCleanupIntervalMs` → renamed to `cleanupIntervalMs`, retained as a
+    programmatic/test knob (pass `0` to disable the timer in tests); no longer
+    env-exposed.
+
+  Server runtime config: the nested `retention: { cleanupIntervalMs, maxAgeMs }`
+  field is flattened to a top-level `maxAgeMs`. `createConfiguredCoordinator`
+  now takes `maxAgeMs?: number` directly instead of the retention object.
+
+  Records: the `readAt` field and read-based deletion are removed from welcome
+  and join-request records. Callers must pass `consumed` refs to retire records.
+
+  ### Upgrade notes
+  - Operators: rename `CORDN_UNREAD_MAX_AGE_DAYS` → `CORDN_MAX_AGE_DAYS` if set.
+    Remove `CORDN_WELCOME_TTL_HOURS` and `CORDN_WELCOME_CLEANUP_INTERVAL_MINUTES`
+    (ignored if present; defaults apply). Existing SQLite DBs need no migration.
+  - Programmatic consumers: rename `welcomeMaxAgeMs` → `maxAgeMs` and
+    `welcomeCleanupIntervalMs` → `cleanupIntervalMs`; drop `welcomeTtlMs`.
+  - The pending-join-request cap now counts ALL pending requests per group (was
+    unread-only). Groups with many legacy "read" requests may hit the cap sooner
+    on upgrade until those records age out (≤30d); benign convergence, not a crash.
+
+- 6cd46aa: feat(server): visual startup banner with nprofile and cordn.net setup URL
+
+  The coordinator server now prints a multi-line banner to stdout at startup
+  instead of a single JSON splash line, making it easier to visually identify a
+  running server and copy its connection details.
+  - Show the hex `pubkey` alongside an `nprofile` (NIP-19 encoding of the pubkey
+    plus the configured relays as hints), so clients can target the server by a
+    single self-contained identifier.
+  - Print a `https://cordn.net/chat/coordinators?c=<nprofile>` URL that adds
+    this coordinator automatically when opened, lowering the setup cost for new
+    users.
+  - The banner is written to `stdout` (not pino) so line breaks and symbols
+    render for operators instead of being JSON-escaped. The structured
+    `serverPubkey` is still emitted in the later "connected" JSON log line, so
+    machine consumers lose nothing.
+
+- 6cd46aa: feat(coordinator): deliver group messages as opaque sealed payloads
+
+  Coordinators now store and serve group message content as opaque bytes and no
+  longer parse, decode, or validate MLS message content. Payloads are sealed
+  end-to-end by clients with a per-epoch key derived from the MLS exporter
+  (`label: "cordn"`, `context: "group-payload"`, ChaCha20-Poly1305), so only
+  group members can read them. See `spec/03.md` for the full wire format and
+  interoperability requirements.
+  - Add an outer delivery group id (`gid`) to `postGroupMessage`; when supplied
+    the coordinator skips MLS decoding and routes by `gid` directly. `gid` names
+    the per-group delivery stream and cursor space, distinct from the MLS
+    `group_id`.
+  - Add an `encrypted` flag to group message records.
+  - The coordinator no longer tracks MLS metadata for encrypted messages; the
+    client-side encryption naturally filters out messages from epochs the client
+    has not joined.
+  - Deprecate `since_epoch` filtering, the message `epoch`, and
+    `ephemeralSenderPubkey`, retained for backward compatibility with legacy
+    (unencrypted) clients during the transition.
+
+### Patch Changes
+
+- 28640d8: chore(deps): adopt @contextvm/mcp-sdk, bump @contextvm/sdk to 0.12.4
+
 ## 0.2.3
 
 ### Patch Changes
