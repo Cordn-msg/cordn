@@ -1,4 +1,6 @@
 import type {
+  ConsumedJoinRequestRef,
+  ConsumedWelcomeRef,
   FetchManyGroupMessagesInput,
   FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
@@ -30,12 +32,17 @@ const groupIdDecoder = new TextDecoder();
 export interface CoordinatorOptions {
   storage?: CoordinatorStorage;
   now?: () => number;
-  /** TTL in ms for read welcome and join request cleanup. Read records whose readAt is older than this threshold are deleted. Default: 1h. */
-  welcomeTtlMs?: number;
-  /** Interval in ms between cleanup runs. Set to 0 to disable. Default: 1h. */
-  welcomeCleanupIntervalMs?: number;
-  /** Max age in ms for unread welcome and join request records. Unread records created before (now - maxAge) are deleted. Set to 0 or negative to disable (keep unread forever). Default: 30 days (2_592_000_000). */
-  welcomeMaxAgeMs?: number;
+  /** Interval in ms between cleanup runs. Set to 0 to disable. Default: 6h
+   *  (programmatic/test override; the production cadence is not env-tunable —
+   *  only the max-age policy is, via CORDN_MAX_AGE_DAYS). */
+  cleanupIntervalMs?: number;
+  /** Max age in ms for welcome and join request records. Records older than
+   *  this are deleted. Set to 0 or negative to disable (keep forever).
+   *  Default: 30 days (2_592_000_000).
+   *
+   *  Observation (fetch) never deletes; only explicit `consumed` acks or
+   *  this ceiling remove records. */
+  maxAgeMs?: number;
 }
 
 /** @deprecated Encrypted messages skip MLS decoding entirely.
@@ -217,16 +224,13 @@ export class Coordinator {
     this.storage = options.storage ?? new InMemoryCoordinatorStorage();
     this.now = options.now ?? Date.now;
 
-    const intervalMs = options.welcomeCleanupIntervalMs ?? 3_600_000;
+    const intervalMs = options.cleanupIntervalMs ?? 21_600_000; // 6 hours
     if (intervalMs > 0) {
-      const ttlMs = options.welcomeTtlMs ?? 3_600_000;
-      const maxAgeMs = options.welcomeMaxAgeMs ?? 2_592_000_000; // 30 days
+      const maxAgeMs = options.maxAgeMs ?? 2_592_000_000; // 30 days
       this.cleanupTimer = setInterval(() => {
-        const now = this.now();
-        const readThreshold = now - ttlMs;
-        const unreadThreshold = maxAgeMs > 0 ? now - maxAgeMs : 0;
-        this.deleteExpiredWelcomes(readThreshold, unreadThreshold);
-        this.deleteExpiredJoinRequests(readThreshold, unreadThreshold);
+        const threshold = maxAgeMs > 0 ? this.now() - maxAgeMs : 0;
+        this.deleteExpiredWelcomes(threshold);
+        this.deleteExpiredJoinRequests(threshold);
       }, intervalMs);
       // Allow the timer to not keep the process alive.
       if (this.cleanupTimer && "unref" in this.cleanupTimer) {
@@ -276,22 +280,21 @@ export class Coordinator {
       keyPackageReference: input.keyPackageReference,
       welcome: input.welcome,
       createdAt: this.now(),
-      readAt: null,
       joinAfterCursor: input.joinAfterCursor,
     };
 
     return this.storage.storeWelcome(record);
   }
 
-  fetchPendingWelcomes(targetStablePubkey: string): WelcomeQueueRecord[] {
-    return this.storage.fetchPendingWelcomes(targetStablePubkey, this.now());
+  fetchPendingWelcomes(
+    targetStablePubkey: string,
+    consumed?: ConsumedWelcomeRef[],
+  ): WelcomeQueueRecord[] {
+    return this.storage.fetchPendingWelcomes(targetStablePubkey, consumed);
   }
 
-  deleteExpiredWelcomes(
-    readThreshold: number,
-    unreadThreshold: number,
-  ): number {
-    return this.storage.deleteExpiredWelcomes(readThreshold, unreadThreshold);
+  deleteExpiredWelcomes(maxAgeThreshold: number): number {
+    return this.storage.deleteExpiredWelcomes(maxAgeThreshold);
   }
 
   storeJoinRequest(input: StoreJoinRequestInput): JoinRequestRecord {
@@ -300,30 +303,26 @@ export class Coordinator {
       requesterStablePubkey: input.requesterStablePubkey,
       keyPackageRef: input.keyPackageRef,
       createdAt: this.now(),
-      readAt: null,
     };
 
     return this.storage.storeJoinRequest(record);
   }
 
-  fetchPendingJoinRequests(groupId: string): JoinRequestRecord[] {
-    return this.storage.fetchPendingJoinRequests(groupId, this.now());
+  fetchPendingJoinRequests(
+    groupId: string,
+    consumed?: ConsumedJoinRequestRef[],
+  ): JoinRequestRecord[] {
+    return this.storage.fetchPendingJoinRequests(groupId, consumed);
   }
 
   fetchManyPendingJoinRequests(
     input: FetchManyPendingJoinRequestsInput,
   ): JoinRequestRecord[] {
-    return this.storage.fetchManyPendingJoinRequests(input, this.now());
+    return this.storage.fetchManyPendingJoinRequests(input);
   }
 
-  deleteExpiredJoinRequests(
-    readThreshold: number,
-    unreadThreshold: number,
-  ): number {
-    return this.storage.deleteExpiredJoinRequests(
-      readThreshold,
-      unreadThreshold,
-    );
+  deleteExpiredJoinRequests(maxAgeThreshold: number): number {
+    return this.storage.deleteExpiredJoinRequests(maxAgeThreshold);
   }
 
   close(): void {

@@ -477,11 +477,15 @@ export class CoordinatorAdapter {
   }
 
   fetchPendingWelcomes(
-    _input: z.infer<typeof fetchPendingWelcomesInputSchema>,
+    input: z.infer<typeof fetchPendingWelcomesInputSchema>,
     extra: ToolExtra,
   ) {
     const records = this.coordinator.fetchPendingWelcomes(
       requireClientPubkey(extra),
+      input.consumed?.map((c) => ({
+        keyPackageReference: c.kp_ref,
+        createdAt: c.at,
+      })),
     );
 
     return {
@@ -551,7 +555,13 @@ export class CoordinatorAdapter {
     input: z.infer<typeof fetchPendingJoinRequestsInputSchema>,
   ) {
     // no extra available here; enforced in registration wrapper
-    const records = this.coordinator.fetchPendingJoinRequests(input.gid);
+    const records = this.coordinator.fetchPendingJoinRequests(
+      input.gid,
+      input.consumed?.map((c) => ({
+        requesterStablePubkey: c.pk,
+        createdAt: c.at,
+      })),
+    );
 
     this.recordOperation("fetchPendingJoinRequests");
 
@@ -573,6 +583,11 @@ export class CoordinatorAdapter {
     // no extra available here; enforced in registration wrapper
     const records = this.coordinator.fetchManyPendingJoinRequests({
       groups: input.groups.map((group) => ({ groupId: group.gid })),
+      consumed: input.consumed?.map((c) => ({
+        groupId: c.gid,
+        requesterStablePubkey: c.pk,
+        createdAt: c.at,
+      })),
     });
 
     this.recordOperation("fetchManyPendingJoinRequests");

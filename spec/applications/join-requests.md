@@ -34,9 +34,9 @@ Join requests are the inverse of Welcomes.
 | **Store** | `storeWelcome()` | `storeJoinRequest()` |
 | **Fetch** | `fetchPendingWelcomes()` | `fetchPendingJoinRequests()` |
 | **Cleanup** | `deleteExpiredWelcomes()` | `deleteExpiredJoinRequests()` |
-| **Lifecycle** | `readAt` set on fetch, TTL-deleted after read | `readAt` set on fetch, TTL-deleted after read |
+| **Lifecycle** | lives until `consumed` ack or `maxAge` ceiling; observation never deletes | lives until `consumed` ack or `maxAge` ceiling; observation never deletes |
 
-This symmetry ensures consistent coordinator behavior and simplifies implementation.
+This symmetry ensures consistent coordinator behavior and simplifies implementation. A join request is the **admin's** inbox item, retired when the admin handles it; a Welcome is the **invitee's** inbox item, retired when the invitee consumes it. Each owner retires their own record via an optional `consumed` ack on the corresponding fetch call. The coordinator never pairs the two, which keeps it stateless about the approval-to-invitation link.
 
 ### 3. Types
 
@@ -48,7 +48,6 @@ export interface JoinRequestRecord {
   requesterStablePubkey: string;
   keyPackageRef: string;
   createdAt: number;
-  readAt: number | null;
 }
 
 export interface StoreJoinRequestInput {
@@ -65,14 +64,24 @@ Coordinators MUST implement the following join request methods.
 
 ```typescript
 storeJoinRequest(input: StoreJoinRequestInput): JoinRequestRecord;
-fetchPendingJoinRequests(groupId: string): JoinRequestRecord[];
-fetchManyPendingJoinRequests(input: { groups: { groupId: string }[] }): JoinRequestRecord[];
-deleteExpiredJoinRequests(readThreshold: number, unreadThreshold: number): number;
+fetchPendingJoinRequests(
+  groupId: string,
+  consumed?: ConsumedJoinRequestRef[],
+): JoinRequestRecord[];
+fetchManyPendingJoinRequests(input: FetchManyPendingJoinRequestsInput): JoinRequestRecord[];
+deleteExpiredJoinRequests(maxAgeThreshold: number): number;
+```
+
+```typescript
+export interface ConsumedJoinRequestRef {
+  requesterStablePubkey: string;
+  createdAt: number;
+}
 ```
 
 #### 4.1 `storeJoinRequest`
 
-Creates a join request record with `readAt: null`.
+Creates a join request record.
 
 Validation requirements:
 
@@ -83,8 +92,8 @@ Group existence is intentionally NOT validated. The coordinator is a signaling s
 
 Deduplication behavior:
 
-- If an unread request already exists for the same `(groupId, requesterStablePubkey)`, the coordinator MUST return the existing record without error.
-- This provides idempotent store semantics for unread requests.
+- If a pending request already exists for the same `(groupId, requesterStablePubkey)`, the coordinator MUST return the existing record without error.
+- This provides idempotent store semantics. A requester can hold exactly one pending request per group at a time; the slot is freed only when the existing request is consumed (acked on a later fetch) or crosses the `maxAge` ceiling. Observation alone does not free it.
 
 Last-resort KeyPackages:
 
@@ -95,10 +104,13 @@ Last-resort KeyPackages:
 
 Returns all join requests for the specified group.
 
-Read-tracking behavior:
+Observation never deletes. Records are retired only by an explicit `consumed` ack or by the `maxAge` ceiling (see `deleteExpiredJoinRequests`).
 
-- The coordinator MUST set `readAt = now` for all unread requests in the returned set.
-- This mirrors the read-tracking behavior of [`fetchPendingWelcomes()`](../src/coordinator/coordinator.ts:266).
+Consumed ack (optional):
+
+- When the caller passes `consumed`, the coordinator MUST delete each referenced record (scoped to `groupId`, keyed by `requesterStablePubkey` + `createdAt`) atomically before the fetch, so retired records are never echoed back.
+- The ack is idempotent: a `consumed` ref that matches no record is a no-op.
+- Keys for `consumed` are values the coordinator itself returned in a prior fetch, so the caller echoes its own inbox state back. No new identifier field is introduced.
 
 The method returns requests in storage order. Clients are responsible for filtering, sorting, or paginating as needed.
 
@@ -109,13 +121,16 @@ Returns all join requests for multiple groups in a single call.
 Input schema:
 
 ```typescript
-{ groups: { groupId: string }[] }
+{
+  groups: { groupId: string }[];
+  consumed?: { groupId: string; requesterStablePubkey: string; createdAt: number }[];
+}
 ```
 
-Read-tracking behavior:
+Consumed semantics:
 
-- The coordinator MUST set `readAt = now` for all unread requests across all requested groups atomically before returning results.
-- This mirror the read-tracking behavior of [`fetchPendingJoinRequests()`](#42-fetchpendingjoinrequests) but applied across all requested groups in a single transaction.
+- When `consumed` is provided, each item carries its own `groupId` (since consumed items may span the requested groups); the coordinator retires them with the same atomic delete-before-fetch semantics as the single-group call.
+- This mirrors the behavior of [`fetchPendingJoinRequests()`](#42-fetchpendingjoinrequests) but applied across all requested groups in a single transaction.
 
 The method returns requests ordered by input group order, then storage order within each group. Each returned record carries its `groupId` so clients can distinguish which group a request belongs to.
 
@@ -123,17 +138,16 @@ Results from groups with no pending requests are simply omitted from the output;
 
 #### 4.3 `deleteExpiredJoinRequests`
 
-Deletes join requests that exceed expiration thresholds.
+Deletes join requests older than the max-age ceiling.
 
-Expiration rules:
+Expiration rule:
 
-- Requests with `readAt !== null` are deleted when `readAt < readThreshold`.
-- Requests with `readAt === null` are deleted when `createdAt < unreadThreshold` and `unreadThreshold > 0`.
-- When `unreadThreshold === 0`, unread requests are never deleted by age.
+- Records whose `createdAt < maxAgeThreshold` are deleted, regardless of read state.
+- When `maxAgeThreshold <= 0`, no records are deleted (retention disabled).
 
-This dual-threshold model allows operators to configure aggressive cleanup for read requests while preserving unread requests for longer periods.
+A single clock governs cleanup. Observation (fetch) never deletes a record; only an explicit `consumed` ack or crossing this `maxAge` ceiling removes one. This replaces the previous dual-threshold model, which deleted records on a short timer triggered by observation and could orphan slow-acting admins or invitees mid-flow.
 
-The method returns the count of deleted requests.
+The method returns the count of deleted records.
 
 ### 5. Storage Interface
 
@@ -141,9 +155,14 @@ Storage backends MUST implement the following methods.
 
 ```typescript
 storeJoinRequest(record: JoinRequestRecord): JoinRequestRecord;
-fetchPendingJoinRequests(groupId: string, now: number): JoinRequestRecord[];
-fetchManyPendingJoinRequests(input: { groups: { groupId: string }[] }, now: number): JoinRequestRecord[];
-deleteExpiredJoinRequests(readThreshold: number, unreadThreshold: number): number;
+fetchPendingJoinRequests(
+  groupId: string,
+  consumed?: ConsumedJoinRequestRef[],
+): JoinRequestRecord[];
+fetchManyPendingJoinRequests(
+  input: FetchManyPendingJoinRequestsInput,
+): JoinRequestRecord[];
+deleteExpiredJoinRequests(maxAgeThreshold: number): number;
 ```
 
 Both in-memory and SQLite storage backends MUST provide parity coverage for these methods.
@@ -153,9 +172,9 @@ Both in-memory and SQLite storage backends MUST provide parity coverage for thes
 In-memory implementations store join requests in a group-keyed map.
 
 - `storeJoinRequest` appends to the group's request list after deduplication.
-- `fetchPendingJoinRequests` returns all requests for the group and sets `readAt` for unread entries.
-- `fetchManyPendingJoinRequests` delegates to `fetchPendingJoinRequests` per group and flattens results. Ordering follows input group order.
-- `deleteExpiredJoinRequests` filters the global request set using both thresholds in a single pass.
+- `fetchPendingJoinRequests` retires `consumed` refs first (filtering the list), then returns the remainder.
+- `fetchManyPendingJoinRequests` partitions `consumed` by `groupId`, delegates to `fetchPendingJoinRequests` per group, and flattens results. Ordering follows input group order.
+- `deleteExpiredJoinRequests` filters the global request set by `createdAt >= maxAgeThreshold` in a single pass.
 
 #### 5.2 SQLite Storage
 
@@ -166,24 +185,22 @@ CREATE TABLE IF NOT EXISTS join_requests (
   group_id TEXT NOT NULL,
   requester_stable_pubkey TEXT NOT NULL,
   key_package_ref TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  read_at INTEGER
+  created_at INTEGER NOT NULL
 );
 ```
 
 Index requirements:
 
 - An index on `(group_id, id)` supports efficient pending-request queries.
-- Indexes on `read_at` and `created_at` support efficient expiration queries.
 
 Deletion behavior:
 
-- `deleteExpiredJoinRequests` uses a single `DELETE` statement with an `OR` condition for both thresholds.
-- This ensures atomic cleanup in a single transaction.
+- `deleteExpiredJoinRequests` uses a single `DELETE ... WHERE created_at < ?` statement.
+- Consumed retirement uses a parameterized `DELETE ... WHERE group_id = ? AND requester_stable_pubkey = ? AND created_at = ?`, run inside the fetch transaction before the select.
 
 Additional SQLite implementation details for `fetchManyPendingJoinRequests`:
 
-- A single transaction atomically marks all unread requests as read across all requested groups, then fetches all records using a CTE-based query ordered by input group order.
+- A single transaction retires consumed refs per group, then fetches all records using a CTE-based query ordered by input group order.
 - The CTE uses a `VALUES` clause parameterized by group count to avoid dynamic SQL injection while handling dynamic group counts.
 
 ### 6. Contracts
@@ -221,6 +238,10 @@ export const joinRequestSchema = z.object({
 
 export const fetchPendingJoinRequestsInputSchema = z.object({
   gid: z.string().min(1),
+  consumed: z.array(z.object({
+    pk: z.string().min(1),
+    at: z.number().int(),
+  })).optional(),
 });
 
 export const fetchPendingJoinRequestsOutputSchema = z.object({
@@ -229,6 +250,11 @@ export const fetchPendingJoinRequestsOutputSchema = z.object({
 
 export const fetchManyPendingJoinRequestsInputSchema = z.object({
   groups: z.array(z.object({ gid: z.string().min(1) })).min(1),
+  consumed: z.array(z.object({
+    gid: z.string().min(1),
+    pk: z.string().min(1),
+    at: z.number().int(),
+  })).optional(),
 });
 
 export const joinRequestWithGroupSchema = joinRequestSchema.extend({
@@ -284,7 +310,7 @@ This allows any client to discover pending requests across multiple groups in a 
 |---|---|---|
 | `kp_ref` not found | Reject with `"Unknown key package ref"` | The KeyPackage was consumed or removed |
 | `kp_ref` exists but owner mismatch | Reject with `"Unauthorized key package ref"` | Prevents impersonation |
-| Duplicate unread request | Return existing record | Idempotent store semantics |
+| Duplicate pending request | Return existing record | Idempotent store semantics |
 | `kp_ref` is last-resort | Allow | Last-resort KPs remain available |
 | Per-group cap reached | Reject with `"Too many pending join requests for this group"` | Prevents unbounded accumulation per group |
 
@@ -298,7 +324,7 @@ These cases are not coordinator errors. They describe client-side handling when 
 |---|---|
 | `consumeKeyPackage({ id: kp_ref })` returns `null` | KeyPackage was consumed by another operation. Member skips this request. |
 | Two members both fetch and try to consume the same KeyPackage | Only one `consumeKeyPackage` succeeds; the other gets `null` and skips. Natural race resolution. |
-| Member creates Add+Commit but `postGroupMessage` fails | Member retries posting. The join request is already marked `readAt`, so it won't reappear. Member tracks this as a pending epoch operation. |
+| Member creates Add+Commit but `postGroupMessage` fails | Member retries posting. The join request remains in the coordinator's inbox until the admin acks it via `consumed` on a later fetch; the coordinator is non-destructive on observation. Member tracks this as a pending epoch operation. |
 | Requester was already added by another member | The Add+Commit fails MLS validation on other members' devices (duplicate leaf). MLS-level conflict, not a coordinator concern. |
 
 ### 9. Edge Cases
@@ -309,27 +335,27 @@ The requester's KeyPackage could be consumed by someone adding them to a differe
 
 This is acceptable because KeyPackages are inherently one-time-use resources.
 
-#### 9.2 Request TTL Expires Before Processing
+#### 9.2 Request Outlives an Admin's Attention Span
 
-The cleanup timer deletes the request (same as Welcomes). The requester submits a new request. No coordinator complexity.
+A slow admin may poll pending requests, see a notification, and not act on it for hours or days. Observation (`fetchPendingJoinRequests`) never deletes. The request survives until the admin explicitly acks it via `consumed` (on a later fetch) or until the `maxAge` ceiling (default 30 days) is crossed. This replaces a previous short read-TTL that could orphan requests mid-review. The requester never needs to re-submit because of cleanup timing.
 
 #### 9.3 Requester Wants to Update KeyPackage on Pending Request
 
 The requester publishes a new KeyPackage and calls `storeJoinRequest` again with the new `kp_ref`.
 
-- If the old request is already read (has `readAt` set), the dedup check only applies to unread requests. The new request replaces the old one naturally.
-- If the old request is still unread, the dedup returns the existing record. The requester must wait for it to be read or expire.
+- While the previous request is still pending, the dedup check returns the existing record. The requester cannot replace it by re-storing.
+- The requester must wait for the admin to handle (consume) the old request, or for it to cross the `maxAge` ceiling, before a new request with the updated `kp_ref` can be stored.
 
 #### 9.4 Group Doesn't Exist
 
-The coordinator intentionally does NOT validate group existence at `storeJoinRequest` time. This allows freshly created groups with no messages to accept join requests immediately. Storage is bounded by the per-group pending request cap and TTL-based cleanup.
+The coordinator intentionally does NOT validate group existence at `storeJoinRequest` time. This allows freshly created groups with no messages to accept join requests immediately. Storage is bounded by the per-group pending request cap and the `maxAge` cleanup ceiling.
 
 #### 9.5 Request Spam
 
 A malicious user could flood a group with join requests. Mitigations:
 
 - Existing rate limiting limits call frequency.
-- Deduplication prevents the same user from creating multiple unread requests.
+- Deduplication prevents the same user from holding more than one pending request per group at a time.
 - Per-identity quota (similar to KeyPackage quota) could limit total pending requests per requester.
 
 ### 10. Processing Flow
@@ -347,13 +373,13 @@ The join request flow proceeds as follows:
 8. New user calls: fetchPendingWelcomes() and joins via the Welcome
 ```
 
-The join request is automatically cleaned up after being read (TTL), exactly like Welcomes.
+The admin retires the join request by passing it in `consumed` on a subsequent `fetchPendingJoinRequests` call, once the request has been handled (approved or rejected). If the admin never acks, the request falls to the `maxAge` ceiling (default 30 days). This mirrors Welcomes, which the invitee retires via `consumed` on `fetchPendingWelcomes` once they join locally.
 
 ### 11. Cleanup Timer Extension
 
-The existing cleanup timer in [`Coordinator`](../src/coordinator/coordinator.ts:209) extends to also call `deleteExpiredJoinRequests()` with the same thresholds and interval.
+The existing cleanup timer in [`Coordinator`](../src/coordinator/coordinator.ts:209) extends to also call `deleteExpiredJoinRequests()` with the same `maxAgeThreshold` and interval used for Welcomes.
 
-No new timer is needed. Both Welcomes and join requests share the same cleanup cadence.
+No new timer is needed. Both Welcomes and join requests share the same cleanup cadence and the same single max-age clock. Observation and per-call `consumed` acks are independent of the timer.
 
 ### 12. Interoperability Requirements
 
@@ -361,9 +387,8 @@ Implementations MUST agree on all of the following:
 
 - Join request record structure and field semantics
 - Store-time validation rules for group existence and KeyPackage ownership
-- Read-tracking behavior on fetch
-- Dual-threshold expiration semantics
-- Contract method names and schema shapes
+- Single max-age expiration semantics: a record lives until `consumed` or until `createdAt < maxAgeThreshold`
+- The `consumed` ack contract: optional, idempotent, keyed by fields the coordinator already returns
 
 Implementations MUST reject malformed requests and unauthorized KeyPackage references.
 
@@ -374,7 +399,7 @@ This design keeps the coordinator minimal and uniform while enabling the shareab
 - The coordinator stays stateless about group membership, consistent with [`spec/00.md`](../spec/00.md).
 - Group existence is intentionally not validated for join requests, allowing freshly created groups to accept join requests before any messages are posted (the bootstrap scenario).
 - KeyPackage consumption races resolve naturally: one consumer wins, others get `null`.
-- TTL cleanup handles all orphaned state: no manual cancellation needed.
+- Retention is bounded without manual cancellation: a single `maxAge` ceiling (default 30 days) reaps abandoned records, and explicit `consumed` acks retire records promptly once an admin has handled them. Observation never deletes, so slow reviewers never orphan a request mid-flow.
 - Per-group pending request caps (default: 100) prevent unbounded accumulation from fake group IDs while remaining generous enough for real groups.
 - Client-side failures are recoverable: members can retry, requesters can re-request.
 

@@ -3646,4 +3646,104 @@ describe("CliSession", () => {
       await server.transport.close();
     }
   });
+
+  test("retires a welcome on the coordinator via the consumed ack after the invitee accepts locally", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      // Bob fetches then accepts the welcome. Acceptance queues the
+      // welcome for the consumed ack; it is NOT retired on the coordinator
+      // until the next fetch drains the queue.
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+      await bob.fetchWelcomes();
+
+      // A brand-new session for the same identity has no local dedup state,
+      // so an empty result here proves retirement happened on the
+      // coordinator (not just filtered client-side).
+      const bobFresh = new CliSession({
+        privateKey: bob.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(bobFresh);
+
+      const remaining = await bobFresh.fetchWelcomes();
+      expect(remaining).toHaveLength(0);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("retires a join request on the coordinator via the consumed ack after the admin adds the requester", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      await alice.sendMessage("demo", "group bootstrap");
+      const groupId = alice.deriveGroupId(alice.getGroup("demo").state);
+
+      await bob.publishKeyPackage("bob-main");
+      await bob.storeJoinRequest(groupId, "bob-main");
+
+      // Admin fetches → the request (with its createdAt) is cached so the
+      // later add can resolve the ack key.
+      const pending = await alice.fetchPendingJoinRequests("demo");
+      expect(pending.requests).toHaveLength(1);
+      expect(pending.requests[0]?.pk).toBe(bob.stablePubkey);
+
+      // Admin handles the request by adding the requester. addMember queues
+      // the consumed ack; the request is NOT retired until the next fetch.
+      await alice.addMember("demo", pending.requests[0]!.kp_ref);
+
+      // The next fetch drains the ack → the request is retired on the
+      // coordinator and no longer echoed back.
+      const after = await alice.fetchPendingJoinRequests("demo");
+      expect(after.requests).toHaveLength(0);
+    } finally {
+      await server.transport.close();
+    }
+  });
 });

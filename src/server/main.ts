@@ -19,10 +19,7 @@ async function main(): Promise<void> {
   );
 
   const server = await connectServer({
-    coordinator: createConfiguredCoordinator(
-      runtime.storage,
-      runtime.welcomeTtl,
-    ),
+    coordinator: createConfiguredCoordinator(runtime.storage, runtime.maxAgeMs),
     abuseProtection: runtime.abuseProtection,
     logger,
     signer: runtime.signer,

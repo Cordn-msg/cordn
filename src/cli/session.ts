@@ -419,6 +419,20 @@ export class CliSession {
 
       this.adoptGroupState(group, prepared.newState);
 
+      // If this add resolved a pending join request the admin had fetched,
+      // queue it for retirement on the next fetchPendingJoinRequests. The
+      // request's pk is the added member's stable pubkey.
+      const handledRequest = this.store.findFetchedJoinRequest(
+        this.deriveGroupId(group.state),
+        prepared.pendingOperation.targetStablePubkey,
+      );
+      if (handledRequest) {
+        this.store.queueConsumedJoinRequest(
+          this.deriveGroupId(group.state),
+          handledRequest,
+        );
+      }
+
       return { keyPackageReference: prepared.keyPackageReference };
     });
   }
@@ -511,9 +525,22 @@ export class CliSession {
 
   async fetchWelcomes(coordinatorKey?: string): Promise<StoredWelcome[]> {
     const resolvedCoordinatorKey = this.resolveCoordinatorKey(coordinatorKey);
+    const toAck = this.store.peekConsumedWelcomes();
     const result = await this.getCoordinatorClient(
       resolvedCoordinatorKey,
-    ).FetchPendingWelcomes({});
+    ).FetchPendingWelcomes(
+      toAck.length > 0
+        ? {
+            consumed: toAck.map((ref) => ({
+              kp_ref: ref.keyPackageReference,
+              at: ref.createdAt,
+            })),
+          }
+        : {},
+    );
+    // Clear only after a successful fetch; a throw leaves the refs queued so
+    // the next fetch retries. The ack is idempotent, so re-sends are safe.
+    this.store.clearConsumedWelcomes(toAck);
 
     for (const welcome of result.welcomes) {
       // Skip welcomes that were already accepted (their kp_ref was deleted
@@ -574,10 +601,29 @@ export class CliSession {
     groupAlias: string,
   ): Promise<FetchPendingJoinRequestsOutput> {
     const group = this.getGroup(groupAlias);
+    const client = this.getGroupClient(group);
     const groupId = this.deriveGroupId(group.state);
-    return this.getGroupClient(group).FetchPendingJoinRequests({
-      gid: groupId,
-    });
+    const toAck = this.store.peekConsumedJoinRequests(groupId);
+    const result = await client.FetchPendingJoinRequests(
+      toAck.length > 0
+        ? {
+            gid: groupId,
+            consumed: toAck.map((ref) => ({
+              pk: ref.requesterStablePubkey,
+              at: ref.createdAt,
+            })),
+          }
+        : { gid: groupId },
+    );
+    this.store.clearConsumedJoinRequests(groupId, toAck);
+    this.store.setFetchedJoinRequests(
+      groupId,
+      result.requests.map((req) => ({
+        requesterStablePubkey: req.pk,
+        createdAt: req.at,
+      })),
+    );
+    return result;
   }
 
   async acceptWelcome(

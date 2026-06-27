@@ -494,6 +494,44 @@ describe("CoordinatorAdapter", () => {
     expect(withoutAfter?.after).toBeUndefined();
   });
 
+  test("retires a welcome via the consumed ack on fetchPendingWelcomes", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+    const alice = await createMemberArtifacts(createActor("alice-consume"));
+    const bob = await createMemberArtifacts(createActor("bob-consume"));
+    const cipherSuite = await getTestCiphersuite();
+    const aliceState = await createGroup({
+      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+      groupId: new TextEncoder().encode("group-consume"),
+      keyPackage: alice.keyPackage,
+      privateKeyPackage: alice.privateKeyPackage,
+    });
+    const fixture = await createWelcomeForNewMember({
+      senderState: aliceState,
+      member: bob,
+    });
+
+    adapter.storeWelcome({
+      target_pk: bob.actor.stablePubkey,
+      kp_ref: fixture.keyPackageRefHex,
+      welcome_64: encodeWelcomeAsBase64(fixture.welcome),
+    });
+
+    const observed = adapter.fetchPendingWelcomes(
+      {},
+      createExtra(bob.actor.stablePubkey),
+    );
+    expect(observed.structuredContent.welcomes).toHaveLength(1);
+    const welcome = observed.structuredContent.welcomes[0]!;
+
+    // Echo the consumed ref back; the welcome is retired and not returned.
+    const after = adapter.fetchPendingWelcomes(
+      { consumed: [{ kp_ref: welcome.kp_ref, at: welcome.at }] },
+      createExtra(bob.actor.stablePubkey),
+    );
+    expect(after.structuredContent.welcomes).toHaveLength(0);
+  });
+
   test("round-trips join requests with validation and deduplication", async () => {
     const coordinator = new Coordinator();
     const alice = await createMemberArtifacts(createActor("alice-join-req"));
@@ -613,6 +651,69 @@ describe("CoordinatorAdapter", () => {
     );
     expect(fetched.structuredContent.requests[1]?.kp_ref).toBe(
       "kp-ref-bob-join",
+    );
+  });
+
+  test("retires a join request via the consumed ack on fetchPendingJoinRequests", async () => {
+    const coordinator = new Coordinator();
+    const alice = await createMemberArtifacts(createActor("alice-join-ack"));
+    const bob = await createMemberArtifacts(createActor("bob-join-ack"));
+    const aliceEvent = createPublicationEvent({
+      pubkey: alice.actor.stablePubkey,
+      secretKey: alice.actor.secretKey,
+      keyPackageBase64: encodeBase64(
+        encode(keyPackageEncoder, alice.keyPackage),
+      ),
+    });
+    const bobEvent = createPublicationEvent({
+      pubkey: bob.actor.stablePubkey,
+      secretKey: bob.actor.secretKey,
+      keyPackageBase64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
+    });
+    const adapter = new CoordinatorAdapter(coordinator, (requestEventId) => {
+      if (requestEventId === aliceEvent.id) return aliceEvent;
+      if (requestEventId === bobEvent.id) return bobEvent;
+      return null;
+    });
+    await adapter.publishKeyPackage(
+      {
+        kp_ref: "kp-ref-alice-ack",
+        kp_64: encodeBase64(encode(keyPackageEncoder, alice.keyPackage)),
+      },
+      createExtra(alice.actor.stablePubkey, aliceEvent.id),
+    );
+    await adapter.publishKeyPackage(
+      {
+        kp_ref: "kp-ref-bob-ack",
+        kp_64: encodeBase64(encode(keyPackageEncoder, bob.keyPackage)),
+      },
+      createExtra(bob.actor.stablePubkey, bobEvent.id),
+    );
+
+    const gid = "group-join-ack";
+    adapter.storeJoinRequest(
+      { gid, kp_ref: "kp-ref-alice-ack" },
+      createExtra(alice.actor.stablePubkey),
+    );
+    adapter.storeJoinRequest(
+      { gid, kp_ref: "kp-ref-bob-ack" },
+      createExtra(bob.actor.stablePubkey),
+    );
+
+    const observed = adapter.fetchPendingJoinRequests({ gid });
+    expect(observed.structuredContent.requests).toHaveLength(2);
+    const aliceReq = observed.structuredContent.requests.find(
+      (r) => r.pk === alice.actor.stablePubkey,
+    )!;
+
+    // Ack alice's request; only bob's remains.
+    const after = adapter.fetchPendingJoinRequests({
+      gid,
+      consumed: [{ pk: aliceReq.pk, at: aliceReq.at }],
+    });
+    expect(after.structuredContent.requests).toHaveLength(1);
+    expect(after.structuredContent.requests[0]?.pk).toBe(
+      bob.actor.stablePubkey,
     );
   });
 
