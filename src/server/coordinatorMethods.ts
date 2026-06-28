@@ -605,15 +605,9 @@ export class CoordinatorAdapter {
     };
   }
 
-  postGroupMessage(
-    input: z.infer<typeof postGroupMessageInputSchema>,
-    extra: ToolExtra,
-  ) {
-    const clientPubkey = requireClientPubkey(extra);
-
+  postGroupMessage(input: z.infer<typeof postGroupMessageInputSchema>) {
     try {
       const record = this.coordinator.postGroupMessage({
-        ephemeralSenderPubkey: clientPubkey,
         opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
         groupId: input.gid,
       });
@@ -636,7 +630,6 @@ export class CoordinatorAdapter {
         this.logger.warn(
           {
             type: "stale_handshake",
-            clientPubkey: `${clientPubkey.slice(0, 12)}…`,
             error: error.message,
           },
           "stale handshake rejected",
@@ -1060,8 +1053,8 @@ export function registerCoordinatorMethods(
       inputSchema: postGroupMessageInputSchema,
       outputSchema: postGroupMessageOutputSchema,
     },
-    withRateLimit(COORDINATOR_METHODS.postGroupMessage, (input, extra) =>
-      adapter.postGroupMessage(input, extra),
+    withRateLimit(COORDINATOR_METHODS.postGroupMessage, (input) =>
+      adapter.postGroupMessage(input),
     ),
   );
 

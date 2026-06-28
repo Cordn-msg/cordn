@@ -61,9 +61,6 @@ export interface GroupMessageRecord {
   /** @deprecated NULL for encrypted messages. Retained for legacy
    *  clients that use server-side since_epoch filtering. */
   epoch: bigint;
-  /** @deprecated Only meaningful for legacy (unencrypted) messages.
-   *  Encrypted messages use the caller-supplied outer gid for routing. */
-  ephemeralSenderPubkey: string;
   opaqueMessage: Uint8Array;
   createdAt: number;
   encrypted: boolean;
@@ -90,7 +87,6 @@ export interface StoreJoinRequestInput {
 }
 
 export interface PostGroupMessageInput {
-  ephemeralSenderPubkey: string;
   opaqueMessage: Uint8Array;
   /** Outer delivery group id for encrypted messages. When provided the
    *  coordinator skips MLS decoding and routes by this gid directly. */

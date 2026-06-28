@@ -82,10 +82,6 @@ export function createActor(name: string): TestActor {
   };
 }
 
-export function createEphemeralPubkey(): string {
-  return getPublicKey(generateSecretKey());
-}
-
 export function createBytes(values: number[]): Uint8Array {
   return Uint8Array.from(values);
 }

@@ -1,5 +1,15 @@
 # cordn
 
+## 0.3.1
+
+### Patch Changes
+
+- refactor(coordinator): drop ephemeralSenderPubkey from postGroupMessage
+
+  The postGroupMessage method no longer requires an ephemeral public key from
+  callers; the coordinator now generates or manages it internally. Update all
+  test invocations to reflect the API change.
+
 ## 0.3.0
 
 ### Minor Changes

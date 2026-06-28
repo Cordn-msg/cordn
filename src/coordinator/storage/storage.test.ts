@@ -567,7 +567,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     const firstMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-ephemeral-1",
       opaqueMessage: createPrivateMessage({
         epoch: 5n,
         contentType: 3,
@@ -576,7 +575,6 @@ describe.each<StorageFixture>([
     });
 
     const secondMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "bob-ephemeral-1",
       opaqueMessage: createPrivateMessage({
         epoch: 5n,
         contentType: 1,
@@ -601,7 +599,6 @@ describe.each<StorageFixture>([
 
     expect(() =>
       coordinator.postGroupMessage({
-        ephemeralSenderPubkey: "carol-ephemeral-1",
         opaqueMessage: createPrivateMessage({
           epoch: 4n,
           contentType: 2,
@@ -620,7 +617,6 @@ describe.each<StorageFixture>([
     const encryptedBytes = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
 
     const posted = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-ephemeral",
       opaqueMessage: encryptedBytes,
       groupId: "encrypted-topic",
     });
@@ -656,7 +652,6 @@ describe.each<StorageFixture>([
 
     // Legacy message: coordinator decodes MLS and derives gid from the payload.
     const legacy = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-ephemeral",
       opaqueMessage: createPrivateMessage({
         epoch: 5n,
         contentType: 3,
@@ -665,7 +660,6 @@ describe.each<StorageFixture>([
     });
     // Encrypted message: same group, caller-supplied gid, opaque bytes.
     const encrypted = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-ephemeral",
       opaqueMessage: Uint8Array.from([0xc0, 0xff, 0xee]),
       groupId: "group-local",
     });
@@ -690,7 +684,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     const firstGroupFirstMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-ephemeral-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -700,7 +693,6 @@ describe.each<StorageFixture>([
     });
 
     const secondGroupFirstMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "bob-ephemeral-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -710,7 +702,6 @@ describe.each<StorageFixture>([
     });
 
     const firstGroupSecondMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "carol-ephemeral-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -751,7 +742,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     const alphaFirst = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alpha-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -760,7 +750,6 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "beta-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -769,7 +758,6 @@ describe.each<StorageFixture>([
       }),
     });
     const alphaSecond = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alpha-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -800,7 +788,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alpha-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -809,7 +796,6 @@ describe.each<StorageFixture>([
       }),
     });
     const betaFirst = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "beta-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -818,7 +804,6 @@ describe.each<StorageFixture>([
       }),
     });
     const alphaSecond = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alpha-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -827,7 +812,6 @@ describe.each<StorageFixture>([
       }),
     });
     const betaSecond = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "beta-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -857,7 +841,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     const first = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 1n,
@@ -866,7 +849,6 @@ describe.each<StorageFixture>([
       }),
     });
     const second = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 3n,
@@ -875,7 +857,6 @@ describe.each<StorageFixture>([
       }),
     });
     const third = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 5n,
@@ -919,7 +900,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 1n,
@@ -928,7 +908,6 @@ describe.each<StorageFixture>([
       }),
     });
     const second = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 3n,
@@ -937,7 +916,6 @@ describe.each<StorageFixture>([
       }),
     });
     const third = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 5n,
@@ -960,7 +938,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     const alpha1 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "alpha",
         epoch: 1n,
@@ -969,7 +946,6 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "alpha",
         epoch: 5n,
@@ -978,7 +954,6 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "beta",
         epoch: 1n,
@@ -987,7 +962,6 @@ describe.each<StorageFixture>([
       }),
     });
     const beta2 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "beta",
         epoch: 5n,
@@ -1014,7 +988,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 1n,
@@ -1023,7 +996,6 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 3n,
@@ -1045,7 +1017,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 0n,
@@ -1054,7 +1025,6 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "g",
         epoch: 5n,
@@ -1085,7 +1055,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "alpha",
         epoch: 0n,
@@ -1094,7 +1063,6 @@ describe.each<StorageFixture>([
       }),
     });
     const alpha5 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "alpha",
         epoch: 5n,
@@ -1103,7 +1071,6 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "beta",
         epoch: 0n,
@@ -1112,7 +1079,6 @@ describe.each<StorageFixture>([
       }),
     });
     const beta5 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "sender",
       opaqueMessage: createPrivateMessage({
         groupId: "beta",
         epoch: 5n,
@@ -1139,7 +1105,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1148,7 +1113,6 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -1199,7 +1163,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1237,7 +1200,6 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1305,7 +1267,6 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1348,7 +1309,6 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1390,7 +1350,6 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1428,7 +1387,6 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1466,7 +1424,6 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1510,7 +1467,6 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,

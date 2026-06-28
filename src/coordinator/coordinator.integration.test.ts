@@ -11,7 +11,6 @@ import {
   createActor,
   createApplicationMessageBytes,
   createCommitMessageBytes,
-  createEphemeralPubkey,
   createMemberArtifacts,
   createSignedPublicationEvent,
   createProposalMessageBytes,
@@ -95,17 +94,14 @@ describe("Coordinator integration flow", () => {
     ).toHaveLength(1);
 
     const commitMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: scenario.commitMessageBytes,
     });
 
     const aliceApplicationMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: scenario.aliceApplicationBytes,
     });
 
     const bobApplicationMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: scenario.bobApplicationBytes,
     });
 
@@ -130,7 +126,6 @@ describe("Coordinator integration flow", () => {
 
     expect(() =>
       coordinator.postGroupMessage({
-        ephemeralSenderPubkey: createEphemeralPubkey(),
         opaqueMessage: scenario.commitMessageBytes.slice(
           0,
           scenario.commitMessageBytes.length - 1,
@@ -144,7 +139,6 @@ describe("Coordinator integration flow", () => {
     const scenario = await createThreeActorGroupScenario();
 
     const posted = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: scenario.aliceApplicationBytes,
     });
 
@@ -195,7 +189,6 @@ describe("Coordinator integration flow", () => {
     });
 
     const postedCommit = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: commit.encodedMessage,
     });
 
@@ -226,7 +219,6 @@ describe("Coordinator integration flow", () => {
     });
 
     const postedApplication = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: application.encodedMessage,
     });
 
@@ -302,11 +294,9 @@ describe("Coordinator integration flow", () => {
     });
 
     const postedAliceCommit = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: aliceCommit.encodedMessage,
     });
     const postedBobCommit = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: bobCommit.encodedMessage,
     });
 
@@ -357,7 +347,6 @@ describe("Coordinator integration flow", () => {
     });
 
     const postedProposal = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: proposal.encodedMessage,
     });
 
@@ -365,7 +354,6 @@ describe("Coordinator integration flow", () => {
       state: proposal.newState,
     });
     const postedCommit = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: commit.encodedMessage,
     });
 
@@ -374,7 +362,6 @@ describe("Coordinator integration flow", () => {
       plaintext: "ordered traffic",
     });
     const postedApplication = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: createEphemeralPubkey(),
       opaqueMessage: application.encodedMessage,
     });
 

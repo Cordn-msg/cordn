@@ -55,7 +55,6 @@ export interface AppendGroupMessageParams {
   /** @deprecated NULL for encrypted messages. Retained for legacy
    *  clients that use server-side since_epoch filtering. */
   epoch: bigint;
-  ephemeralSenderPubkey: string;
   opaqueMessage: Uint8Array;
   createdAt: number;
   encrypted: boolean;

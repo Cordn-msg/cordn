@@ -572,7 +572,6 @@ describe("CoordinatorAdapter", () => {
 
     // Seed a group via the coordinator so getGroupRouting finds it.
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "group-join-req",
         epoch: 1n,
@@ -965,7 +964,6 @@ describe("CoordinatorAdapter", () => {
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: firstMessage.encodedMessage,
     });
 
@@ -975,7 +973,6 @@ describe("CoordinatorAdapter", () => {
     coordinator.fetchGroupMessages = ((input) => {
       if (input.groupId === "group-race-free" && secondMessageBytes) {
         coordinator.postGroupMessage({
-          ephemeralSenderPubkey: alice.actor.stablePubkey,
           opaqueMessage: secondMessageBytes,
         });
         secondMessageBytes = null;
@@ -1158,7 +1155,6 @@ describe("CoordinatorAdapter", () => {
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: firstMessage.encodedMessage,
     });
 
@@ -1171,7 +1167,6 @@ describe("CoordinatorAdapter", () => {
         secondMessageBytes
       ) {
         coordinator.postGroupMessage({
-          ephemeralSenderPubkey: alice.actor.stablePubkey,
           opaqueMessage: secondMessageBytes,
         });
         secondMessageBytes = null;
@@ -1578,12 +1573,9 @@ describe("CoordinatorAdapter", () => {
   test("fetchGroupMessages filters by since_epoch through the adapter contract", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
-    const alice = await createMemberArtifacts(createActor("alice-since-epoch"));
-
     const gid = "group-since-epoch";
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 1n,
@@ -1592,7 +1584,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const epoch3Msg = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 3n,
@@ -1601,7 +1592,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const epoch5Msg = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 5n,
@@ -1642,12 +1632,8 @@ describe("CoordinatorAdapter", () => {
   test("fetchManyGroupMessages filters by per-group since_epoch through the adapter contract", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
-    const alice = await createMemberArtifacts(
-      createActor("alice-many-since-epoch"),
-    );
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "alpha-se",
         epoch: 1n,
@@ -1656,7 +1642,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const alphaEpoch5 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "alpha-se",
         epoch: 5n,
@@ -1665,7 +1650,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "beta-se",
         epoch: 1n,
@@ -1674,7 +1658,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const betaEpoch5 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "beta-se",
         epoch: 5n,
@@ -1701,12 +1684,10 @@ describe("CoordinatorAdapter", () => {
   test("subscribeGroupMessages filters backlog by since_epoch through the adapter contract", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
-    const alice = await createMemberArtifacts(createActor("alice-sub-epoch"));
 
     const gid = "group-sub-epoch";
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 1n,
@@ -1715,7 +1696,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const epoch3Msg = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 3n,
@@ -1724,7 +1704,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const epoch5Msg = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 5n,
@@ -1779,12 +1758,8 @@ describe("CoordinatorAdapter", () => {
   test("subscribeManyGroupMessages filters per-group backlog by since_epoch through the adapter contract", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
-    const alice = await createMemberArtifacts(
-      createActor("alice-many-sub-epoch"),
-    );
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "group-a-sub-se",
         epoch: 1n,
@@ -1793,7 +1768,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const aEpoch3 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "group-a-sub-se",
         epoch: 3n,
@@ -1802,7 +1776,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const aEpoch5 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "group-a-sub-se",
         epoch: 5n,
@@ -1812,7 +1785,6 @@ describe("CoordinatorAdapter", () => {
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "group-b-sub-se",
         epoch: 2n,
@@ -1821,7 +1793,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     const bEpoch4 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: "group-b-sub-se",
         epoch: 4n,
@@ -1878,14 +1849,10 @@ describe("CoordinatorAdapter", () => {
   test("subscribeGroupMessages with since_epoch that filters entire backlog still delivers live messages", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
-    const alice = await createMemberArtifacts(
-      createActor("alice-sub-empty-backlog"),
-    );
 
     const gid = "group-sub-empty";
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 1n,
@@ -1894,7 +1861,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 2n,
@@ -1934,7 +1900,6 @@ describe("CoordinatorAdapter", () => {
 
     // Post a live message at epoch 10
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 10n,
@@ -1969,13 +1934,9 @@ describe("CoordinatorAdapter", () => {
       undefined,
       logger,
     );
-    const alice = await createMemberArtifacts(
-      createActor("alice-abort-backlog"),
-    );
     const gid = "group-abort-backlog";
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 1n,
@@ -1984,7 +1945,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 1n,
@@ -2048,11 +2008,9 @@ describe("CoordinatorAdapter", () => {
 
   test("subscribe-before-backlog race: since_epoch filters backlog but race message arrives via live stream", async () => {
     const coordinator = new Coordinator();
-    const alice = await createMemberArtifacts(createActor("alice-race-epoch"));
     const gid = "group-race-epoch";
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 1n,
@@ -2061,7 +2019,6 @@ describe("CoordinatorAdapter", () => {
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: alice.actor.stablePubkey,
       opaqueMessage: createPrivateMessage({
         groupId: gid,
         epoch: 3n,
@@ -2075,7 +2032,6 @@ describe("CoordinatorAdapter", () => {
     coordinator.fetchGroupMessages = ((input) => {
       if (input.groupId === gid && raceMessageBytes) {
         coordinator.postGroupMessage({
-          ephemeralSenderPubkey: alice.actor.stablePubkey,
           opaqueMessage: raceMessageBytes,
         });
         raceMessageBytes = null;

@@ -531,7 +531,6 @@ describe("Coordinator join request flow", () => {
     const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -540,7 +539,6 @@ describe("Coordinator join request flow", () => {
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -598,7 +596,6 @@ describe("Coordinator join request flow", () => {
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -638,7 +635,6 @@ describe("Coordinator join request flow", () => {
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -677,7 +673,6 @@ describe("Coordinator join request flow", () => {
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -715,7 +710,6 @@ describe("Coordinator join request flow", () => {
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -744,7 +738,6 @@ describe("Coordinator join request flow", () => {
     const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -753,7 +746,6 @@ describe("Coordinator join request flow", () => {
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "member-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -870,7 +862,6 @@ describe("Coordinator group message flow", () => {
     const coordinator = new Coordinator();
 
     const firstMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-ephemeral-1",
       opaqueMessage: createPrivateMessage({
         epoch: 1n,
         contentType: 1,
@@ -879,7 +870,6 @@ describe("Coordinator group message flow", () => {
     });
 
     const secondMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "bob-ephemeral-1",
       opaqueMessage: createPrivateMessage({
         epoch: 1n,
         contentType: 1,
@@ -918,7 +908,6 @@ describe("Coordinator group message flow", () => {
     const coordinator = new Coordinator();
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-ephemeral-2",
       opaqueMessage: createPrivateMessage({
         epoch: 5n,
         contentType: 3,
@@ -927,7 +916,6 @@ describe("Coordinator group message flow", () => {
     });
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "bob-ephemeral-2",
       opaqueMessage: createPrivateMessage({
         epoch: 5n,
         contentType: 1,
@@ -943,7 +931,6 @@ describe("Coordinator group message flow", () => {
 
     expect(() =>
       coordinator.postGroupMessage({
-        ephemeralSenderPubkey: "carol-ephemeral-2",
         opaqueMessage: createPrivateMessage({
           epoch: 4n,
           contentType: 2,
@@ -959,7 +946,6 @@ describe("Coordinator group message flow", () => {
     const coordinator = new Coordinator();
 
     const alphaFirst = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-alpha-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -968,7 +954,6 @@ describe("Coordinator group message flow", () => {
       }),
     });
     const betaFirst = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "bob-beta-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -977,7 +962,6 @@ describe("Coordinator group message flow", () => {
       }),
     });
     const alphaSecond = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "carol-alpha-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1014,7 +998,6 @@ describe("Coordinator group message flow", () => {
     const coordinator = new Coordinator();
 
     const firstMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-live-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-live",
         epoch: 1n,
@@ -1031,7 +1014,6 @@ describe("Coordinator group message flow", () => {
     const iterator = subscription.messages[Symbol.asyncIterator]();
 
     const secondMessage = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "bob-live-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-live",
         epoch: 1n,
@@ -1066,7 +1048,6 @@ describe("Coordinator group message flow", () => {
     const coordinator = new Coordinator();
 
     const alphaBacklog = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alpha-live-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1075,7 +1056,6 @@ describe("Coordinator group message flow", () => {
       }),
     });
     const betaSkipped = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "beta-live-1",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -1084,7 +1064,6 @@ describe("Coordinator group message flow", () => {
       }),
     });
     const betaBacklog = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "beta-live-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -1111,7 +1090,6 @@ describe("Coordinator group message flow", () => {
     });
 
     const alphaLive = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alpha-live-2",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1155,7 +1133,6 @@ describe("Coordinator group message flow", () => {
     const coordinator = new Coordinator();
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice",
       opaqueMessage: createPrivateMessage({
         groupId: "group-sub-coord",
         epoch: 1n,
@@ -1164,7 +1141,6 @@ describe("Coordinator group message flow", () => {
       }),
     });
     const epoch3 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice",
       opaqueMessage: createPrivateMessage({
         groupId: "group-sub-coord",
         epoch: 3n,
@@ -1197,7 +1173,6 @@ describe("Coordinator group message flow", () => {
     const coordinator = new Coordinator();
 
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice",
       opaqueMessage: createPrivateMessage({
         groupId: "group-a-many-coord",
         epoch: 1n,
@@ -1206,7 +1181,6 @@ describe("Coordinator group message flow", () => {
       }),
     });
     const aEpoch3 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice",
       opaqueMessage: createPrivateMessage({
         groupId: "group-a-many-coord",
         epoch: 3n,
@@ -1215,7 +1189,6 @@ describe("Coordinator group message flow", () => {
       }),
     });
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice",
       opaqueMessage: createPrivateMessage({
         groupId: "group-b-many-coord",
         epoch: 2n,
@@ -1224,7 +1197,6 @@ describe("Coordinator group message flow", () => {
       }),
     });
     const bEpoch4 = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice",
       opaqueMessage: createPrivateMessage({
         groupId: "group-b-many-coord",
         epoch: 4n,
@@ -1262,13 +1234,11 @@ describe("Coordinator group message flow", () => {
     const encryptedBytes = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
 
     const posted = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "alice-ephemeral",
       opaqueMessage: encryptedBytes,
       groupId: "delivery-topic-encrypted",
     });
 
     expect(posted.groupId).toBe("delivery-topic-encrypted");
-    expect(posted.ephemeralSenderPubkey).toBe("alice-ephemeral");
     expect(posted.cursor).toBe(1);
     expect(posted.encrypted).toBe(true);
     expect(posted.epoch).toBe(0n);
@@ -1286,7 +1256,6 @@ describe("Coordinator group message flow", () => {
     // Messages from different delivery topics are isolated.
     const otherEncrypted = Uint8Array.from([0xca, 0xfe]);
     coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "bob-ephemeral",
       opaqueMessage: otherEncrypted,
       groupId: "other-topic",
     });
@@ -1309,7 +1278,6 @@ describe("Coordinator group message flow", () => {
 
     const liveBytes = Uint8Array.from([0x11, 0x22, 0x33]);
     const posted = coordinator.postGroupMessage({
-      ephemeralSenderPubkey: "live-sender",
       opaqueMessage: liveBytes,
       groupId: "encrypted-live",
     });

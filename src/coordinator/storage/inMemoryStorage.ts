@@ -262,7 +262,6 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
       cursor: group.nextCursor,
       groupId: params.groupId,
       epoch: params.encrypted ? 0n : params.epoch,
-      ephemeralSenderPubkey: params.ephemeralSenderPubkey,
       opaqueMessage: params.opaqueMessage,
       createdAt: params.createdAt,
       encrypted: params.encrypted,

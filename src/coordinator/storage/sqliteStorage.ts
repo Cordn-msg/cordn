@@ -61,7 +61,6 @@ interface GroupMessageRow {
   cursor: number;
   group_id: string;
   epoch: string | null;
-  ephemeral_sender_pubkey: string;
   opaque_message: Buffer;
   created_at: number;
   encrypted: number;
@@ -144,7 +143,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     GroupRoutingRow
   >;
   private readonly insertGroupMessageStatement: Database.Statement<
-    [number, string, string, string, Buffer, number, number]
+    [number, string, string, Buffer, number, number]
   >;
   private readonly selectGroupRoutingForCursorStatement: Database.Statement<
     [string],
@@ -275,7 +274,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cursor INTEGER NOT NULL,
         group_id TEXT NOT NULL,
-        ephemeral_sender_pubkey TEXT NOT NULL,
         opaque_message BLOB NOT NULL,
         created_at INTEGER NOT NULL,
         encrypted INTEGER NOT NULL DEFAULT 0
@@ -304,6 +302,16 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     if (!groupMessagesColumns.some((col) => col.name === "encrypted")) {
       this.database.exec(
         "ALTER TABLE group_messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+    // Migration: drop the ephemeral_sender_pubkey column. It was a
+    // session-scoped transport handle the coordinator never read (routing
+    // is by gid, rate-limiting uses the caller identity at call time).
+    if (
+      groupMessagesColumns.some((col) => col.name === "ephemeral_sender_pubkey")
+    ) {
+      this.database.exec(
+        "ALTER TABLE group_messages DROP COLUMN ephemeral_sender_pubkey",
       );
     }
 
@@ -457,17 +465,16 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       LIMIT 1
     `);
     this.insertGroupMessageStatement = this.database.prepare<
-      [number, string, string, string, Buffer, number, number]
+      [number, string, string, Buffer, number, number]
     >(`
       INSERT INTO group_messages (
         cursor,
         group_id,
         epoch,
-        ephemeral_sender_pubkey,
         opaque_message,
         created_at,
         encrypted
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?)
     `);
     this.selectGroupRoutingForCursorStatement = this.database.prepare<
       [string],
@@ -481,7 +488,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at, encrypted
+      SELECT cursor, group_id, epoch, opaque_message, created_at, encrypted
       FROM group_messages
       WHERE group_id = ?
       ORDER BY cursor ASC
@@ -490,7 +497,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string, number],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at, encrypted
+      SELECT cursor, group_id, epoch, opaque_message, created_at, encrypted
       FROM group_messages
       WHERE group_id = ? AND cursor > ?
       ORDER BY cursor ASC
@@ -501,7 +508,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string, string],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at, encrypted
+      SELECT cursor, group_id, epoch, opaque_message, created_at, encrypted
       FROM group_messages
       WHERE group_id = ?
         AND epoch IS NOT NULL
@@ -512,7 +519,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
      *  payload decryption. Retained for legacy clients. */
     this.fetchGroupMessagesSinceEpochAfterCursorStatement = this.database
       .prepare<[string, number, string], GroupMessageRow>(`
-      SELECT cursor, group_id, epoch, ephemeral_sender_pubkey, opaque_message, created_at, encrypted
+      SELECT cursor, group_id, epoch, opaque_message, created_at, encrypted
       FROM group_messages
       WHERE group_id = ? AND cursor > ?
         AND epoch IS NOT NULL
@@ -643,7 +650,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
           cursor,
           params.groupId,
           params.encrypted ? "0" : params.epoch.toString(),
-          params.ephemeralSenderPubkey,
           Buffer.from(params.opaqueMessage),
           params.createdAt,
           params.encrypted ? 1 : 0,
@@ -659,7 +665,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
           cursor,
           groupId: params.groupId,
           epoch: params.encrypted ? 0n : params.epoch,
-          ephemeralSenderPubkey: params.ephemeralSenderPubkey,
           opaqueMessage: params.opaqueMessage,
           createdAt: params.createdAt,
           encrypted: params.encrypted,
@@ -853,7 +858,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         WITH requested(group_order, group_id, after_cursor, since_epoch) AS (
           VALUES ${values}
         )
-        SELECT gm.cursor, gm.group_id, gm.epoch, gm.ephemeral_sender_pubkey, gm.opaque_message, gm.created_at, gm.encrypted
+        SELECT gm.cursor, gm.group_id, gm.epoch, gm.opaque_message, gm.created_at, gm.encrypted
         FROM requested r
         JOIN group_messages gm
           ON gm.group_id = r.group_id
@@ -952,7 +957,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       cursor: row.cursor,
       groupId: row.group_id,
       epoch: row.epoch !== null ? BigInt(row.epoch) : 0n,
-      ephemeralSenderPubkey: row.ephemeral_sender_pubkey,
       opaqueMessage: toUint8Array(row.opaque_message),
       createdAt: row.created_at,
       encrypted: row.encrypted === 1,
