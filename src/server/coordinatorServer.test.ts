@@ -326,12 +326,9 @@ describe("CoordinatorAdapter", () => {
     ).rejects.toThrow("Invalid kp_64");
 
     expect(() =>
-      adapter.postGroupMessage(
-        {
-          msg_64: encodeBase64(Uint8Array.from([1, 2, 3])),
-        },
-        createExtra(alice.actor.stablePubkey),
-      ),
+      adapter.postGroupMessage({
+        msg_64: encodeBase64(Uint8Array.from([1, 2, 3])),
+      }),
     ).toThrow("Unable to decode MLS message");
   });
 
@@ -376,12 +373,9 @@ describe("CoordinatorAdapter", () => {
       plaintext: "hello from alice",
     });
 
-    const posted = adapter.postGroupMessage(
-      {
-        msg_64: encodeBase64(messageBytes.encodedMessage),
-      },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const posted = adapter.postGroupMessage({
+      msg_64: encodeBase64(messageBytes.encodedMessage),
+    });
 
     expect(posted.content).toEqual([]);
 
@@ -411,17 +405,13 @@ describe("CoordinatorAdapter", () => {
   test("round-trips encrypted flag and passes gid through postGroupMessage contract", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
-    const alice = await createMemberArtifacts(createActor("alice-enc"));
 
     // Post with gid → coordinator uses encrypted path (skips MLS decoding).
     const encryptedOpaque = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
-    const posted = adapter.postGroupMessage(
-      {
-        gid: "encrypted-topic",
-        msg_64: encodeBase64(encryptedOpaque),
-      },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const posted = adapter.postGroupMessage({
+      gid: "encrypted-topic",
+      msg_64: encodeBase64(encryptedOpaque),
+    });
 
     expect(posted.content).toEqual([]);
     expect(posted.structuredContent.gid).toBe("encrypted-topic");
@@ -739,12 +729,9 @@ describe("CoordinatorAdapter", () => {
       plaintext: "backlog message",
     });
 
-    const backlogPosted = adapter.postGroupMessage(
-      {
-        msg_64: encodeBase64(backlogMessageBytes.encodedMessage),
-      },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const backlogPosted = adapter.postGroupMessage({
+      msg_64: encodeBase64(backlogMessageBytes.encodedMessage),
+    });
 
     const writtenChunks: string[] = [];
     let closed = false;
@@ -786,12 +773,9 @@ describe("CoordinatorAdapter", () => {
       plaintext: "live message",
     });
 
-    const livePosted = adapter.postGroupMessage(
-      {
-        msg_64: encodeBase64(liveMessageBytes.encodedMessage),
-      },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const livePosted = adapter.postGroupMessage({
+      msg_64: encodeBase64(liveMessageBytes.encodedMessage),
+    });
 
     await Promise.resolve();
     await Promise.resolve();
@@ -847,12 +831,9 @@ describe("CoordinatorAdapter", () => {
       plaintext: "seed",
     });
 
-    const posted = adapter.postGroupMessage(
-      {
-        msg_64: encodeBase64(messageBytes.encodedMessage),
-      },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const posted = adapter.postGroupMessage({
+      msg_64: encodeBase64(messageBytes.encodedMessage),
+    });
 
     let abortedReason: string | undefined;
     const stream = {
@@ -926,12 +907,9 @@ describe("CoordinatorAdapter", () => {
       plaintext: "shape-check",
     });
 
-    const posted = adapter.postGroupMessage(
-      {
-        msg_64: encodeBase64(messageBytes.encodedMessage),
-      },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const posted = adapter.postGroupMessage({
+      msg_64: encodeBase64(messageBytes.encodedMessage),
+    });
 
     const fetchedMessages = adapter.fetchGroupMessages({
       gid: posted.structuredContent.gid,
@@ -1057,18 +1035,15 @@ describe("CoordinatorAdapter", () => {
       plaintext: "second backlog",
     });
 
-    const firstPosted = adapter.postGroupMessage(
-      { msg_64: encodeBase64(firstBacklog.encodedMessage) },
-      createExtra(alice.actor.stablePubkey),
-    );
-    const secondSkippedPosted = adapter.postGroupMessage(
-      { msg_64: encodeBase64(secondSkipped.encodedMessage) },
-      createExtra(alice.actor.stablePubkey),
-    );
-    const secondPosted = adapter.postGroupMessage(
-      { msg_64: encodeBase64(secondBacklog.encodedMessage) },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const firstPosted = adapter.postGroupMessage({
+      msg_64: encodeBase64(firstBacklog.encodedMessage),
+    });
+    const secondSkippedPosted = adapter.postGroupMessage({
+      msg_64: encodeBase64(secondSkipped.encodedMessage),
+    });
+    const secondPosted = adapter.postGroupMessage({
+      msg_64: encodeBase64(secondBacklog.encodedMessage),
+    });
 
     const writtenChunks: string[] = [];
     const stream = {
@@ -1111,10 +1086,9 @@ describe("CoordinatorAdapter", () => {
       state: firstBacklog.newState,
       plaintext: "first live",
     });
-    const firstLivePosted = adapter.postGroupMessage(
-      { msg_64: encodeBase64(firstLive.encodedMessage) },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const firstLivePosted = adapter.postGroupMessage({
+      msg_64: encodeBase64(firstLive.encodedMessage),
+    });
 
     await Promise.resolve();
     await Promise.resolve();
@@ -1324,10 +1298,9 @@ describe("CoordinatorAdapter", () => {
       state: otherState,
       plaintext: "should not cross-talk",
     });
-    adapter.postGroupMessage(
-      { msg_64: encodeBase64(otherMessage.encodedMessage) },
-      createExtra(alice.actor.stablePubkey),
-    );
+    adapter.postGroupMessage({
+      msg_64: encodeBase64(otherMessage.encodedMessage),
+    });
 
     await Promise.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1337,10 +1310,9 @@ describe("CoordinatorAdapter", () => {
       state: subscribedState,
       plaintext: "subscribed live",
     });
-    const subscribedPosted = adapter.postGroupMessage(
-      { msg_64: encodeBase64(subscribedMessage.encodedMessage) },
-      createExtra(alice.actor.stablePubkey),
-    );
+    const subscribedPosted = adapter.postGroupMessage({
+      msg_64: encodeBase64(subscribedMessage.encodedMessage),
+    });
 
     await Promise.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
