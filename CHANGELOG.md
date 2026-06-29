@@ -1,5 +1,11 @@
 # cordn
 
+## 0.3.2
+
+### Patch Changes
+
+- 69862ae: chore(deps): bump @contextvm/sdk to ^0.13.2 and remove stale JSDoc
+
 ## 0.3.1
 
 ### Patch Changes
