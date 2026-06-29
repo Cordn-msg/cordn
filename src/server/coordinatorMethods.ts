@@ -906,11 +906,7 @@ export function registerCoordinatorMethods(
     handler: (input: TInput, extra: ToolExtra) => TOutput | Promise<TOutput>,
   ) => {
     return (input: TInput, extra: ToolExtra) => {
-      (
-        adapter as CoordinatorAdapter & {
-          assertWithinRateLimit(extra: ToolExtra, methodName: string): void;
-        }
-      ).assertWithinRateLimit(extra, methodName);
+      adapter.assertWithinRateLimit(extra, methodName);
       return handler(input, extra);
     };
   };

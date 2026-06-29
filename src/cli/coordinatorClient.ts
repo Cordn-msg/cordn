@@ -252,12 +252,6 @@ export class cordnClient implements coordinatorClient {
       : (result.structuredContent as T);
   }
 
-  /**
-   * Publish an MLS key package for the injected caller identity.
-   * @param {string} kp_ref The key package ref parameter
-   * @param {string} kp_64 The key package base64 parameter
-   * @returns {Promise<PublishKeyPackageOutput>} The result of the kp_publish operation
-   */
   async PublishKeyPackage(
     input: PublishKeyPackageInput,
   ): Promise<PublishKeyPackageOutput> {
@@ -269,11 +263,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * Consume the next published MLS key package by stable identity or exact key package ref.
-   * @param {string} id The stable pubkey or key package ref parameter
-   * @returns {Promise<ConsumeKeyPackageOutput>} The result of the kp_take operation
-   */
   async ConsumeKeyPackage(
     input: ConsumeKeyPackageInput,
   ): Promise<ConsumeKeyPackageOutput> {
@@ -296,10 +285,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * List currently available published MLS key packages discoverable on the coordinator.
-   * @returns {Promise<ListAvailableKeyPackagesOutput>} The result of the kp_list operation
-   */
   async ListAvailableKeyPackages(
     args: ListAvailableKeyPackagesInput = {},
   ): Promise<ListAvailableKeyPackagesOutput> {
@@ -311,10 +296,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * Fetch pending welcomes queued for the injected caller identity.
-   * @returns {Promise<FetchPendingWelcomesOutput>} The result of the fetchPendingWelcomes operation
-   */
   async FetchPendingWelcomes(
     args: FetchPendingWelcomesInput,
   ): Promise<FetchPendingWelcomesOutput> {
@@ -326,13 +307,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * Store an MLS welcome for a target stable identity.
-   * @param {string} target_pk The target stable pubkey parameter
-   * @param {string} kp_ref The key package reference parameter
-   * @param {string} welcome_64 The welcome base64 parameter
-   * @returns {Promise<StoreWelcomeOutput>} The result of the welcome_store operation
-   */
   async StoreWelcome(input: StoreWelcomeInput): Promise<StoreWelcomeOutput> {
     return this.call(
       "ephemeral",
@@ -342,12 +316,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * Store a join request for a group, keyed by the requester's injected caller identity.
-   * @param {string} gid The group id parameter
-   * @param {string} kp_ref The key package reference parameter
-   * @returns {Promise<StoreJoinRequestOutput>} The result of the join_request_store operation
-   */
   async StoreJoinRequest(
     input: StoreJoinRequestInput,
   ): Promise<StoreJoinRequestOutput> {
@@ -359,11 +327,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * Fetch pending join requests for a group.
-   * @param {string} gid The group id parameter
-   * @returns {Promise<FetchPendingJoinRequestsOutput>} The result of the join_request_take operation
-   */
   async FetchPendingJoinRequests(
     input: FetchPendingJoinRequestsInput,
   ): Promise<FetchPendingJoinRequestsOutput> {
@@ -375,11 +338,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * Fetch pending join requests for multiple groups in a single call.
-   * @param groups The array of group input objects, each with a gid
-   * @returns {Promise<FetchManyPendingJoinRequestsOutput>} The result of the join_request_take_many operation
-   */
   async FetchManyPendingJoinRequests(
     input: FetchManyPendingJoinRequestsInput,
   ): Promise<FetchManyPendingJoinRequestsOutput> {
@@ -391,11 +349,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * Queue an MLS opaque group message for the injected caller identity.
-   * @param {string} msg_64 The opaque message base64 parameter
-   * @returns {Promise<PostGroupMessageOutput>} The result of the msg_post operation
-   */
   async PostGroupMessage(
     input: PostGroupMessageInput,
   ): Promise<PostGroupMessageOutput> {
@@ -407,12 +360,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  /**
-   * Fetch queued MLS opaque group messages by group and optional cursor.
-   * @param {string} gid The group id parameter
-   * @param {number} after [optional] The after cursor parameter
-   * @returns {Promise<FetchGroupMessagesOutput>} The result of the msg_fetch operation
-   */
   async FetchGroupMessages(
     input: FetchGroupMessagesInput,
   ): Promise<FetchGroupMessagesOutput> {
@@ -440,37 +387,11 @@ export class cordnClient implements coordinatorClient {
     result: Promise<SubscribeGroupMessagesOutput>;
     abort: (reason?: string) => Promise<void>;
   }> {
-    await this.ephemeralConnected;
-
-    const call = await callToolStream<CallToolResult>({
-      client: this.ephemeralClient,
-      transport: this.ephemeralTransport,
-      name: COORDINATOR_METHODS.subscribeGroupMessages,
-      arguments: { ...input },
-    });
-    void call.stream.closed.catch(() => undefined);
-
-    const stream: AsyncIterable<GroupMessage> = {
-      async *[Symbol.asyncIterator]() {
-        for await (const chunk of call.stream) {
-          yield groupMessageSchema.parse(JSON.parse(chunk.value));
-        }
-      },
-    };
-
-    return {
-      stream,
-      result: call.result.then((result) =>
-        subscribeGroupMessagesOutputSchema.parse(result.structuredContent),
-      ),
-      abort: async (reason?: string) => {
-        try {
-          await call.abort(reason);
-        } catch {
-          return;
-        }
-      },
-    };
+    return this.subscribe(
+      COORDINATOR_METHODS.subscribeGroupMessages,
+      input,
+      subscribeGroupMessagesOutputSchema,
+    );
   }
 
   async SubscribeManyGroupMessages(
@@ -480,12 +401,28 @@ export class cordnClient implements coordinatorClient {
     result: Promise<SubscribeManyGroupMessagesOutput>;
     abort: (reason?: string) => Promise<void>;
   }> {
+    return this.subscribe(
+      COORDINATOR_METHODS.subscribeManyGroupMessages,
+      input,
+      subscribeManyGroupMessagesOutputSchema,
+    );
+  }
+
+  private async subscribe<TOutput>(
+    name: string,
+    input: object,
+    schema: ZodType<TOutput>,
+  ): Promise<{
+    stream: AsyncIterable<GroupMessage>;
+    result: Promise<TOutput>;
+    abort: (reason?: string) => Promise<void>;
+  }> {
     await this.ephemeralConnected;
 
     const call = await callToolStream<CallToolResult>({
       client: this.ephemeralClient,
       transport: this.ephemeralTransport,
-      name: COORDINATOR_METHODS.subscribeManyGroupMessages,
+      name,
       arguments: { ...input },
     });
     void call.stream.closed.catch(() => undefined);
@@ -501,7 +438,7 @@ export class cordnClient implements coordinatorClient {
     return {
       stream,
       result: call.result.then((result) =>
-        subscribeManyGroupMessagesOutputSchema.parse(result.structuredContent),
+        schema.parse(result.structuredContent),
       ),
       abort: async (reason?: string) => {
         try {

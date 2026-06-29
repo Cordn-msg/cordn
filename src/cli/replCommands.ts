@@ -98,6 +98,37 @@ export function tokenizeInput(line: string): string[] {
   });
 }
 
+function applyMetadataFlag(
+  flag: string,
+  value: string | undefined,
+  metadata: CordnGroupMetadata,
+): boolean {
+  switch (flag) {
+    case "--name":
+      if (!value) throw new CliUsageError("Missing value for --name");
+      metadata.name = value;
+      return true;
+    case "--description":
+      if (!value) throw new CliUsageError("Missing value for --description");
+      metadata.description = value;
+      return true;
+    case "--icon":
+      if (!value) throw new CliUsageError("Missing value for --icon");
+      metadata.icon = value;
+      return true;
+    case "--image-url":
+      if (!value) throw new CliUsageError("Missing value for --image-url");
+      metadata.imageUrl = value;
+      return true;
+    case "--admin":
+      if (!value) throw new CliUsageError("Missing value for --admin");
+      metadata.adminPubkeys = [...(metadata.adminPubkeys ?? []), value];
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function parseCreateGroupArgs(args: string[]): {
   alias: string;
   keyPackageAlias?: string;
@@ -134,49 +165,26 @@ export function parseCreateGroupArgs(args: string[]): {
       throw new CliUsageError(`Unexpected create-group argument: ${flag}`);
     }
 
-    switch (flag) {
-      case "--watch":
-        watch = true;
-        index += 1;
-        break;
-      case "--coordinator":
-        if (!value) throw new CliUsageError("Missing value for --coordinator");
-        coordinatorKey = value;
-        index += 2;
-        break;
-      case "--name":
-        if (!value) throw new CliUsageError("Missing value for --name");
-        metadata.name = value;
-        metadataProvided = true;
-        index += 2;
-        break;
-      case "--description":
-        if (!value) throw new CliUsageError("Missing value for --description");
-        metadata.description = value;
-        metadataProvided = true;
-        index += 2;
-        break;
-      case "--icon":
-        if (!value) throw new CliUsageError("Missing value for --icon");
-        metadata.icon = value;
-        metadataProvided = true;
-        index += 2;
-        break;
-      case "--image-url":
-        if (!value) throw new CliUsageError("Missing value for --image-url");
-        metadata.imageUrl = value;
-        metadataProvided = true;
-        index += 2;
-        break;
-      case "--admin":
-        if (!value) throw new CliUsageError("Missing value for --admin");
-        metadata.adminPubkeys = [...(metadata.adminPubkeys ?? []), value];
-        metadataProvided = true;
-        index += 2;
-        break;
-      default:
-        throw new CliUsageError(`Unknown create-group option: ${flag}`);
+    if (flag === "--watch") {
+      watch = true;
+      index += 1;
+      continue;
     }
+
+    if (flag === "--coordinator") {
+      if (!value) throw new CliUsageError("Missing value for --coordinator");
+      coordinatorKey = value;
+      index += 2;
+      continue;
+    }
+
+    if (applyMetadataFlag(flag, value, metadata)) {
+      metadataProvided = true;
+      index += 2;
+      continue;
+    }
+
+    throw new CliUsageError(`Unknown create-group option: ${flag}`);
   }
 
   if (metadataProvided && metadata.name === "") {
@@ -218,42 +226,13 @@ export function parseUpdateGroupMetadataArgs(args: string[]): {
       );
     }
 
-    switch (flag) {
-      case "--name":
-        if (!value) throw new CliUsageError("Missing value for --name");
-        metadata.name = value;
-        metadataProvided = true;
-        index += 2;
-        break;
-      case "--description":
-        if (!value) throw new CliUsageError("Missing value for --description");
-        metadata.description = value;
-        metadataProvided = true;
-        index += 2;
-        break;
-      case "--icon":
-        if (!value) throw new CliUsageError("Missing value for --icon");
-        metadata.icon = value;
-        metadataProvided = true;
-        index += 2;
-        break;
-      case "--image-url":
-        if (!value) throw new CliUsageError("Missing value for --image-url");
-        metadata.imageUrl = value;
-        metadataProvided = true;
-        index += 2;
-        break;
-      case "--admin":
-        if (!value) throw new CliUsageError("Missing value for --admin");
-        metadata.adminPubkeys = [...(metadata.adminPubkeys ?? []), value];
-        metadataProvided = true;
-        index += 2;
-        break;
-      default:
-        throw new CliUsageError(
-          `Unknown update-group-metadata option: ${flag}`,
-        );
+    if (applyMetadataFlag(flag, value, metadata)) {
+      metadataProvided = true;
+      index += 2;
+      continue;
     }
+
+    throw new CliUsageError(`Unknown update-group-metadata option: ${flag}`);
   }
 
   if (!metadataProvided || metadata.name === "") {

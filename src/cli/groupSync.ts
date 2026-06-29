@@ -21,7 +21,6 @@ export interface RawGroupMessage {
 export interface GroupIngestionResult {
   received: StoredMessage[];
   issues: GroupSessionState["syncIssues"];
-  cursorAdvancedTo: number;
   appliedPendingCommitMessages: Set<string>;
   rejectedPendingCommitMessages: Set<string>;
   removedLocalMember: boolean;
@@ -251,7 +250,6 @@ export async function ingestGroupMessages(params: {
   return {
     received,
     issues,
-    cursorAdvancedTo: group.fetchCursor,
     appliedPendingCommitMessages,
     rejectedPendingCommitMessages,
     removedLocalMember,
