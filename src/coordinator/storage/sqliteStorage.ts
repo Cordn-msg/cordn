@@ -114,6 +114,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   private readonly storeJoinRequestStatement: Database.Statement<
     [string, string, string, number]
   >;
+  private readonly updateJoinRequestOnReRequestStatement: Database.Statement<
+    [string, number, string, string]
+  >;
   private readonly findPendingJoinRequestStatement: Database.Statement<
     [string, string],
     JoinRequestRow & { id: number }
@@ -413,6 +416,17 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         created_at
       ) VALUES (?, ?, ?, ?)
     `);
+    // ponytail: refresh-in-place on re-request. The consume-ack model retires
+    // rows by (group, requester, createdAt), so a re-request must bump
+    // createdAt (evading an admin's already-recorded consume ref) and update
+    // keyPackageRef (so the admin accepts with the requester's current key
+    // package). Without this a re-request silently returns the stale row and
+    // the admin's next fetch consumes it away — making the user send twice.
+    this.updateJoinRequestOnReRequestStatement = this.database.prepare<
+      [string, number, string, string]
+    >(
+      "UPDATE join_requests SET key_package_ref = ?, created_at = ? WHERE group_id = ? AND requester_stable_pubkey = ?",
+    );
     this.findPendingJoinRequestStatement = this.database.prepare<
       [string, string],
       JoinRequestRow & { id: number }
@@ -613,17 +627,26 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     this.storeJoinRequestTransaction = this.database.transaction(
       (record: JoinRequestRecord) => {
         // Cap pending join requests per group to prevent unbounded accumulation.
-        const countRow = this.countJoinRequestsStatement.get(record.groupId);
-        if (countRow && countRow.count >= MAX_PENDING_JOIN_REQUESTS_PER_GROUP) {
-          throw new Error("Too many pending join requests for this group");
-        }
-
         const existing = this.findPendingJoinRequestStatement.get(
           record.groupId,
           record.requesterStablePubkey,
         );
         if (existing) {
-          return this.mapJoinRequestRow(existing);
+          // Re-request: refresh in place (see updateJoinRequestOnReRequestStatement).
+          this.updateJoinRequestOnReRequestStatement.run(
+            record.keyPackageRef,
+            record.createdAt,
+            record.groupId,
+            record.requesterStablePubkey,
+          );
+          return record;
+        }
+
+        // New row — enforce the per-group cap only on the insert path. A
+        // refresh above doesn't add a row, so it must not hit the cap.
+        const countRow = this.countJoinRequestsStatement.get(record.groupId);
+        if (countRow && countRow.count >= MAX_PENDING_JOIN_REQUESTS_PER_GROUP) {
+          throw new Error("Too many pending join requests for this group");
         }
 
         this.storeJoinRequestStatement.run(

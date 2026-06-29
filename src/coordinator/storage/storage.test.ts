@@ -1157,7 +1157,56 @@ describe.each<StorageFixture>([
     expect(coordinator.fetchPendingJoinRequests("group-beta")).toHaveLength(1);
   });
 
-  test("deduplicates join requests per group and requester", () => {
+  test("deduplicates join requests per group and requester, refreshing on re-request", () => {
+    const storage = createStorage();
+    closers.add(() => storage.close?.());
+    const coordinator = createCoordinatorWithStorage(storage);
+
+    coordinator.postGroupMessage({
+      opaqueMessage: createPrivateMessage({
+        groupId: "group-alpha",
+        epoch: 1n,
+        contentType: 1,
+        bytes: [1],
+      }),
+    });
+
+    const first = coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-1",
+    });
+    // The in-memory backend returns live references to its stored records, so
+    // snapshot the original values before the refresh mutates the stored row.
+    const firstCreatedAt = first.createdAt;
+
+    const second = coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-alice-2",
+    });
+
+    // A re-request refreshes the existing row in place: still one row (dedup),
+    // but the keyPackageRef and createdAt are updated to the new values. The
+    // bumped createdAt is what lets the request reappear for an admin who
+    // already recorded a consume ref against the original createdAt.
+    expect(second.keyPackageRef).toBe("kp-ref-alice-2");
+    expect(second.createdAt).toBeGreaterThan(firstCreatedAt);
+
+    // Fetching still returns only one request for alice, now with the refreshed
+    // key package ref.
+    const fetched = coordinator.fetchPendingJoinRequests("group-alpha");
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]?.requesterStablePubkey).toBe("alice-requester");
+    expect(fetched[0]?.keyPackageRef).toBe("kp-ref-alice-2");
+    expect(fetched[0]?.createdAt).toBe(second.createdAt);
+  });
+
+  test("a re-request evades a consume ref recorded against the original createdAt", () => {
+    // Reproduces the user-reported bug: after leaving a group and re-requesting,
+    // admins only saw the second send. Root cause was that storeJoinRequest
+    // returned the stale row unchanged, so the admin's next fetch consumed it
+    // (createdAt matched the accepted request) and returned nothing.
     const storage = createStorage();
     closers.add(() => storage.close?.());
     const coordinator = createCoordinatorWithStorage(storage);
@@ -1177,21 +1226,32 @@ describe.each<StorageFixture>([
       keyPackageRef: "kp-ref-alice-1",
     });
 
-    const second = coordinator.storeJoinRequest({
+    // The admin accepts the original request and records a consume ref keyed
+    // on its createdAt, but the retire (delete) only happens on the next
+    // fetch — so the row is still pending on the coordinator here.
+    const originalCreatedAt = first.createdAt;
+    const consumedRef = {
+      requesterStablePubkey: "alice-requester",
+      createdAt: originalCreatedAt,
+    };
+
+    // Requester re-requests before the admin's consuming fetch fires.
+    const refreshed = coordinator.storeJoinRequest({
       groupId: "group-alpha",
       requesterStablePubkey: "alice-requester",
       keyPackageRef: "kp-ref-alice-2",
     });
+    expect(refreshed.keyPackageRef).toBe("kp-ref-alice-2");
+    expect(refreshed.createdAt).not.toBe(originalCreatedAt);
 
-    // Second call returns the same record (dedup by pending request).
-    expect(second.keyPackageRef).toBe(first.keyPackageRef);
-    expect(second.createdAt).toBe(first.createdAt);
-
-    // Fetching still returns only one request for alice.
-    const fetched = coordinator.fetchPendingJoinRequests("group-alpha");
+    // The admin's fetch carries the stale consume ref. Because the row's
+    // createdAt was bumped, the consume does not match and the refreshed
+    // request is returned — the admin sees the re-request on the first send.
+    const fetched = coordinator.fetchPendingJoinRequests("group-alpha", [
+      consumedRef,
+    ]);
     expect(fetched).toHaveLength(1);
-    expect(fetched[0]?.requesterStablePubkey).toBe("alice-requester");
-    expect(fetched[0]?.keyPackageRef).toBe("kp-ref-alice-1");
+    expect(fetched[0]?.keyPackageRef).toBe("kp-ref-alice-2");
   });
 
   test("allows a new join request only after the previous one is consumed", () => {
@@ -1213,42 +1273,41 @@ describe.each<StorageFixture>([
       requesterStablePubkey: "alice-requester",
       keyPackageRef: "kp-ref-alice-1",
     });
+    const firstCreatedAt = first.createdAt;
 
-    // While the first request is still pending, a re-store dedups to it.
+    // While the first request is still pending, a re-store refreshes it in
+    // place (new keyPackageRef, bumped createdAt) rather than inserting a
+    // duplicate row.
     const deduped = coordinator.storeJoinRequest({
       groupId: "group-alpha",
       requesterStablePubkey: "alice-requester",
       keyPackageRef: "kp-ref-alice-2",
     });
-    expect(deduped.keyPackageRef).toBe(first.keyPackageRef);
+    expect(deduped.keyPackageRef).toBe("kp-ref-alice-2");
+    expect(deduped.createdAt).toBeGreaterThan(firstCreatedAt);
 
-    // Observe without consuming does NOT free the slot — still deduped.
-    coordinator.fetchPendingJoinRequests("group-alpha");
-    const stillDeduped = coordinator.storeJoinRequest({
-      groupId: "group-alpha",
-      requesterStablePubkey: "alice-requester",
-      keyPackageRef: "kp-ref-alice-2",
-    });
-    expect(stillDeduped.keyPackageRef).toBe(first.keyPackageRef);
+    // Observe without consuming does NOT insert another row.
+    expect(coordinator.fetchPendingJoinRequests("group-alpha")).toHaveLength(1);
 
-    // Consume (ack) the request, then a new one can be stored.
+    // Consume (ack) the refreshed request via its new createdAt, then a new
+    // one can be stored.
     coordinator.fetchPendingJoinRequests("group-alpha", [
       {
         requesterStablePubkey: "alice-requester",
-        createdAt: first.createdAt,
+        createdAt: deduped.createdAt,
       },
     ]);
 
     const newRequest = coordinator.storeJoinRequest({
       groupId: "group-alpha",
       requesterStablePubkey: "alice-requester",
-      keyPackageRef: "kp-ref-alice-2",
+      keyPackageRef: "kp-ref-alice-3",
     });
-    expect(newRequest.keyPackageRef).toBe("kp-ref-alice-2");
+    expect(newRequest.keyPackageRef).toBe("kp-ref-alice-3");
 
     const fetched = coordinator.fetchPendingJoinRequests("group-alpha");
     expect(fetched).toHaveLength(1);
-    expect(fetched[0]?.keyPackageRef).toBe("kp-ref-alice-2");
+    expect(fetched[0]?.keyPackageRef).toBe("kp-ref-alice-3");
   });
 
   test("observation never deletes join requests; maxAge is the only cleanup clock", () => {

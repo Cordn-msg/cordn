@@ -171,16 +171,25 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   storeJoinRequest(record: JoinRequestRecord): JoinRequestRecord {
     const existing = this.joinRequestsByGroup.get(record.groupId) ?? [];
-    // Cap pending join requests per group to prevent unbounded accumulation.
-    if (existing.length >= MAX_PENDING_JOIN_REQUESTS_PER_GROUP) {
-      throw new Error("Too many pending join requests for this group");
-    }
 
     const duplicate = existing.find(
       (req) => req.requesterStablePubkey === record.requesterStablePubkey,
     );
     if (duplicate) {
-      return duplicate;
+      // Re-request: refresh in place. The consume-ack model retires rows by
+      // (group, requester, createdAt), so bumping createdAt evades an admin's
+      // already-recorded consume ref and the updated keyPackageRef makes the
+      // admin accept with the requester's current key package. Without this a
+      // re-request silently returns the stale row and the admin's next fetch
+      // consumes it away — making the user send twice.
+      duplicate.keyPackageRef = record.keyPackageRef;
+      duplicate.createdAt = record.createdAt;
+      return { ...duplicate };
+    }
+
+    // New row — enforce the per-group cap only on the insert path.
+    if (existing.length >= MAX_PENDING_JOIN_REQUESTS_PER_GROUP) {
+      throw new Error("Too many pending join requests for this group");
     }
 
     const stored: JoinRequestRecord = { ...record };

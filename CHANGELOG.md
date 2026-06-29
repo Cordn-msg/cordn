@@ -1,5 +1,18 @@
 # cordn
 
+## 0.3.3
+
+### Patch Changes
+
+- fix(storage): refresh re-requested join entries to prevent stale consumption
+
+  Update in-memory and SQLite storage to bump `createdAt` and refresh
+  `keyPackageRef` when a join request is re-submitted by the same
+  requester. This prevents the admin’s existing consume reference from
+  retiring the stale row and avoids forcing the user to send twice.
+
+  Also bump @contextvm/sdk to ^0.13.3.
+
 ## 0.3.2
 
 ### Patch Changes
