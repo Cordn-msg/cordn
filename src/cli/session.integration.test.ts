@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { CliSession } from "./session.ts";
+import { FileMediaStore } from "./mediaStore.ts";
 import {
   NoPublishedKeyPackageError,
   RemovedFromGroupError,
@@ -81,6 +85,70 @@ describe("CliSession", () => {
       expect(aliceSynced[0]?.sender).toBe(bob.stablePubkey);
     } finally {
       await server.transport.close();
+    }
+  });
+
+  test("exchanges encrypted media end-to-end through the CLI session", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaDir = await mkdtemp(join(tmpdir(), "cordn-media-"));
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      // Shared local store: alice publishes the encrypted blob, bob fetches it.
+      const mediaStore = new FileMediaStore(mediaDir);
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+
+      const plaintext = Uint8Array.from(
+        Buffer.from("fake-image-bytes-for-integration-test", "utf8"),
+      );
+      const sent = await alice.sendMedia("demo", {
+        plaintext,
+        metadata: { mime: "image/png", filename: "photo.png" },
+        caption: "look at this",
+      });
+
+      // Alice's own stored copy carries the imeta reference.
+      expect(sent.tags.some((t) => t[0] === "imeta")).toBe(true);
+
+      const synced = await bob.syncGroup("demo");
+      expect(synced).toHaveLength(1);
+      expect(synced[0]?.content).toBe("look at this");
+      expect(synced[0]?.tags.some((t) => t[0] === "imeta")).toBe(true);
+
+      const { plaintext: decrypted, metadata } = await bob.decryptMediaMessage(
+        "demo",
+        synced[0]!.cursor,
+      );
+      expect(decrypted).toEqual(plaintext);
+      expect(metadata).toEqual({ mime: "image/png", filename: "photo.png" });
+    } finally {
+      await server.transport.close();
+      await rm(mediaDir, { recursive: true, force: true });
     }
   });
 

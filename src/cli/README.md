@@ -43,6 +43,8 @@ Useful commands:
 - `fetch-join-requests <groupAlias>` — list pending join requests for a group
 - `request-join <gid> [keyPackageAlias] [--coordinator <pubkey>]` — send a join request for a group
 - `send <message...>`
+- `send-media <filePath> [caption...]` — requires `--media-dir <dir>`
+- `save-media [groupAlias] <cursor> [destDir]` — decrypts received media to `destDir` (default `.`)
 - `sync [groupAlias]`
 
 ## Notes
@@ -53,6 +55,14 @@ Useful commands:
 - Watching keeps a CEP-41 subscription alive in the background so watched groups stay locally synchronized without repeated bounded fetches.
 - Live messages are rendered immediately when a watched group is currently selected in the REPL.
 - This client is intentionally small and focused on development workflows rather than polished end-user UX.
+
+## Encrypted media
+
+The CLI can exchange encrypted media as defined in [`spec/applications/encrypted-media.md`](../spec/applications/encrypted-media.md).
+
+- Media is encrypted client-side with a key derived from the group's MLS exporter secret and stored as an opaque blob on a content-addressed `MediaStore`.
+- The coordinator is unchanged; only an `imeta` tag travels inside the sealed group message.
+- Pass `--media-dir <dir>` at startup to enable `send-media` / `save-media`. Two CLI processes on the same machine exchange media by pointing at the same directory (via [`FileMediaStore`](src/cli/mediaStore.ts)). Blossom is the recommended production store.
 
 ## Reference client algorithm
 

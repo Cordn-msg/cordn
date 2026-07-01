@@ -2,6 +2,7 @@ import { stdout as output } from "node:process";
 
 import { CliSession, type KeyPackageSummary } from "./session.ts";
 import type { CordnGroupMetadata } from "./groupMetadata.ts";
+import { findImetaTag } from "./utils/mediaMessages.ts";
 
 export const ansi = {
   reset: "\u001b[0m",
@@ -163,16 +164,18 @@ export function formatChatHistory(
   groupAlias: string,
 ): string {
   return formatList(
-    session
-      .listMessages(groupAlias)
-      .map((message) =>
-        formatChatLine(
-          message.direction,
-          message.cursor,
-          message.sender,
-          message.content,
-        ),
-      ),
+    session.listMessages(groupAlias).map((message) => {
+      const ref = findImetaTag(message.tags);
+      const marker = ref
+        ? `${colorize("[media]", ansi.cyan)} ${ref.filename} `
+        : "";
+      return formatChatLine(
+        message.direction,
+        message.cursor,
+        message.sender,
+        marker + message.content,
+      );
+    }),
   );
 }
 
@@ -210,6 +213,8 @@ export function printHelp(): void {
       "  accept-welcome <keyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
       "  send <message...>    (uses selected group)",
       "  send-to <groupAlias> <message...>",
+      "  send-media <filePath> [caption...]   (uses selected group; requires --media-dir)",
+      "  save-media [groupAlias] <cursor> [destDir]   (decrypts media to destDir, default .)",
       "  sync [groupAlias]",
       "  sync-all",
       "  watch-all",

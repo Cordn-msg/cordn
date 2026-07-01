@@ -12,6 +12,17 @@ import {
   encodeAuthenticatedSender,
   encryptGroupPayload,
 } from "./utils/mlsMessages.ts";
+import {
+  buildImetaTag,
+  bytesToHex,
+  decryptMedia,
+  encryptMedia,
+  findImetaTag,
+  hexToBytes,
+  MEDIA_VERSION,
+  type MediaMetadata,
+} from "./utils/mediaMessages.ts";
+import type { MediaStore } from "./mediaStore.ts";
 import { decodeBase64, encodeBase64 } from "./utils/mlsBase.ts";
 import {
   createPrivateKeyHex,
@@ -126,6 +137,8 @@ export class CliSession {
   private readonly coordinatorRegistry: CoordinatorClientRegistry;
   /** Outbound payload encryption gate. See {@link CliSessionOptions.encryptOutbound}. */
   private readonly encryptOutbound: boolean;
+  /** Content-addressed store for encrypted media blobs, if configured. */
+  private readonly mediaStore?: MediaStore;
   private readonly groupIdDecoder = new TextDecoder();
   private readonly watchHandles = new Map<string, GroupWatchHandle>();
   private readonly groupEventListeners = new Set<(event: GroupEvent) => void>();
@@ -139,6 +152,7 @@ export class CliSession {
     });
     this.stablePubkey = deriveStablePubkey(this.privateKey);
     this.encryptOutbound = options.encryptOutbound ?? false;
+    this.mediaStore = options.mediaStore;
   }
 
   async disconnect(): Promise<void> {
@@ -707,6 +721,123 @@ export class CliSession {
       group.messages.push(stored);
       group.lastCursor = Math.max(group.lastCursor, posted.cursor);
       return stored;
+    });
+  }
+
+  /**
+   * Encrypts a media file, publishes the encrypted blob to the configured
+   * media store, and posts a group message carrying an `imeta` reference (plus
+   * an optional caption as the envelope content). Requires a `mediaStore`.
+   *
+   * The media key is derived from the current MLS epoch's exporter secret, so
+   * only group members can decrypt. Decrypt while the sealing epoch is still
+   * current (standard MLS forward-secrecy caveat); the reference client
+   * decrypts on receipt.
+   */
+  async sendMedia(
+    groupAlias: string,
+    params: {
+      plaintext: Uint8Array;
+      metadata: MediaMetadata;
+      caption?: string;
+    },
+  ): Promise<StoredMessage> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      if (!this.mediaStore) {
+        throw new Error("No media store configured for this session");
+      }
+      await this.catchUpGroupIfNeeded(group);
+      this.assertGroupIsActive(group);
+
+      const { blob, nonce, plaintextHash } = await encryptMedia({
+        state: group.state,
+        plaintext: params.plaintext,
+        metadata: params.metadata,
+      });
+      const url = await this.mediaStore.publish(blob);
+      const imeta = buildImetaTag({
+        url,
+        mime: params.metadata.mime,
+        filename: params.metadata.filename,
+        plaintextHashHex: bytesToHex(plaintextHash),
+        nonceHex: bytesToHex(nonce),
+        version: MEDIA_VERSION,
+      });
+
+      const outbound = await createApplicationMessageBase64({
+        state: group.state,
+        event: createUnsignedCordnMessageEvent({
+          pubkey: this.stablePubkey,
+          content: params.caption ?? "",
+          tags: [imeta],
+        }),
+        authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
+      });
+
+      group.state = outbound.newState;
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        outbound.opaqueMessageBase64,
+      );
+
+      const stored: StoredMessage = {
+        cursor: posted.cursor,
+        createdAt: posted.at,
+        direction: "outbound",
+        sender: this.stablePubkey,
+        id: outbound.event.id,
+        kind: outbound.event.kind,
+        tags: outbound.event.tags,
+        content: outbound.event.content,
+      };
+
+      group.messages.push(stored);
+      group.lastCursor = Math.max(group.lastCursor, posted.cursor);
+      return stored;
+    });
+  }
+
+  /**
+   * Fetches and decrypts the media referenced by the `imeta` tag on the message
+   * at `cursor`. Requires a `mediaStore`. Throws if the message has no media
+   * reference or the version is unsupported.
+   */
+  async decryptMediaMessage(
+    groupAlias: string,
+    cursor: number,
+  ): Promise<{ plaintext: Uint8Array; metadata: MediaMetadata }> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      if (!this.mediaStore) {
+        throw new Error("No media store configured for this session");
+      }
+      const message = group.messages.find((m) => m.cursor === cursor);
+      if (!message) {
+        throw new Error(
+          `No message at cursor ${cursor} in group ${groupAlias}`,
+        );
+      }
+      const ref = findImetaTag(message.tags);
+      if (!ref) {
+        throw new Error(`Message at cursor ${cursor} has no media reference`);
+      }
+      if (ref.version !== MEDIA_VERSION) {
+        throw new Error(`Unsupported media version: ${ref.version}`);
+      }
+      const blob = await this.mediaStore.fetch(ref.url);
+      const metadata: MediaMetadata = {
+        mime: ref.mime,
+        filename: ref.filename,
+      };
+      const { plaintext } = await decryptMedia({
+        state: group.state,
+        blob,
+        nonce: hexToBytes(ref.nonceHex),
+        metadata,
+        expectedPlaintextHash: hexToBytes(ref.plaintextHashHex),
+      });
+      return { plaintext, metadata };
     });
   }
 

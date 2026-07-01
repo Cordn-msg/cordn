@@ -4,6 +4,7 @@ import type { UnsignedEvent } from "nostr-tools";
 import type { PendingWelcome } from "../contracts/index.ts";
 import type { CoordinatorTarget } from "./coordinatorRegistry.ts";
 import type { CordnGroupMetadata } from "./groupMetadata.ts";
+import type { MediaStore } from "./mediaStore.ts";
 
 export interface CliSessionOptions {
   privateKey?: string;
@@ -26,6 +27,14 @@ export interface CliSessionOptions {
    * regardless of this setting, so mixed-version groups interoperate.
    */
   encryptOutbound?: boolean;
+
+  /**
+   * Content-addressed store used to publish/fetch encrypted media blobs. When
+   * unset, `sendMedia` and `decryptMediaMessage` throw. The media layer is
+   * independent of `encryptOutbound` and the coordinator, which never sees
+   * blobs. See `spec/applications/encrypted-media.md`.
+   */
+  mediaStore?: MediaStore;
 }
 
 export interface SessionStatus {

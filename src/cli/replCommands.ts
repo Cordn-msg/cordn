@@ -1,4 +1,6 @@
 import type { Writable } from "node:stream";
+import { basename, join } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
 
 import { CliSession } from "./session.ts";
 import type { CordnGroupMetadata } from "./groupMetadata.ts";
@@ -45,6 +47,8 @@ export const knownCommands = new Set([
   "accept-welcome",
   "send",
   "send-to",
+  "send-media",
+  "save-media",
   "sync",
   "sync-all",
   "watch-all",
@@ -570,6 +574,65 @@ export async function executeReplCommand(
       );
       break;
     }
+    case "send-media": {
+      if (!selectedGroupAlias) {
+        throw new CliUsageError(
+          "No selected group. Use `use <groupAlias>` first.",
+        );
+      }
+      const filePath = args[0];
+      if (!filePath)
+        throw new CliUsageError("Usage: send-media <filePath> [caption...]");
+      const caption = args.length > 1 ? args.slice(1).join(" ") : undefined;
+      const plaintext = Uint8Array.from(await readFile(filePath));
+      const filename = basename(filePath);
+      const mediaStored = await session.sendMedia(selectedGroupAlias, {
+        plaintext,
+        metadata: { mime: inferMimeType(filename), filename },
+        caption,
+      });
+      output.write(
+        `${colorize("sent media", ansi.green)} ${colorize(filename, ansi.bold)} cursor=${colorize(String(mediaStored.cursor), ansi.bold)}\n`,
+      );
+      break;
+    }
+    case "save-media": {
+      let alias: string | undefined;
+      let cursorArg: string | undefined;
+      let destDir = ".";
+      const first = args[0];
+      if (!first)
+        throw new CliUsageError(
+          "Usage: save-media [groupAlias] <cursor> [destDir]",
+        );
+      if (/^\d+$/.test(first)) {
+        cursorArg = first;
+        alias = selectedGroupAlias;
+        if (args[1]) destDir = args[1];
+      } else {
+        alias = first;
+        cursorArg = args[1];
+        if (args[2]) destDir = args[2];
+      }
+      if (!alias)
+        throw new CliUsageError(
+          "No selected group. Use `use <groupAlias>` first.",
+        );
+      if (!cursorArg)
+        throw new CliUsageError(
+          "Usage: save-media [groupAlias] <cursor> [destDir]",
+        );
+      const { plaintext, metadata } = await session.decryptMediaMessage(
+        alias,
+        Number(cursorArg),
+      );
+      const destPath = join(destDir, metadata.filename);
+      await writeFile(destPath, plaintext);
+      output.write(
+        `${colorize("saved media", ansi.green)} ${colorize(destPath, ansi.bold)} (${plaintext.length} bytes)\n`,
+      );
+      break;
+    }
     case "sync": {
       const alias = args[0] ?? selectedGroupAlias;
       if (!alias) throw new CliUsageError("Usage: sync <groupAlias>");
@@ -615,4 +678,32 @@ export async function executeReplCommand(
   }
 
   return { selectedGroupAlias };
+}
+
+// ponytail: minimal extension→MIME map for the dev client. The sender's MIME is
+// display-only metadata (it is read back from `imeta` by receivers), so a flat
+// default is fine; extend only if a real client needs more types.
+function inferMimeType(filename: string): string {
+  const ext = filename.slice(filename.lastIndexOf(".") + 1).toLowerCase();
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "pdf":
+      return "application/pdf";
+    case "mp4":
+      return "video/mp4";
+    case "mp3":
+      return "audio/mpeg";
+    case "txt":
+      return "text/plain";
+    default:
+      return "application/octet-stream";
+  }
 }

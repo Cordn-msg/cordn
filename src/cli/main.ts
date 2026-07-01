@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { loadRuntimeEnv } from "../server/runtimeConfig.ts";
 import { startCliRepl } from "./repl.ts";
 import { CliSession } from "./session.ts";
+import { FileMediaStore } from "./mediaStore.ts";
 import { deriveStablePubkey } from "./utils/mlsBase.ts";
 
 function readOptionalStringEnv(name: string): string | undefined {
@@ -47,6 +48,10 @@ program
     "relay URL to use",
     (value, current: string[]) => [...current, value],
     [],
+  )
+  .option(
+    "--media-dir <path>",
+    "directory for the local content-addressed media store (enables send-media / save-media)",
   );
 
 program.parse();
@@ -55,12 +60,16 @@ const options = program.opts<{
   privateKey?: string;
   serverPubkey?: string;
   relay: string[];
+  mediaDir?: string;
 }>();
 
 const session = new CliSession({
   privateKey: options.privateKey,
   serverPubkey: options.serverPubkey ?? readDefaultCoordinatorPubkey(),
   relays: options.relay.length > 0 ? options.relay : readDefaultRelayUrls(),
+  mediaStore: options.mediaDir
+    ? new FileMediaStore(options.mediaDir)
+    : undefined,
 });
 
 await startCliRepl(session);
