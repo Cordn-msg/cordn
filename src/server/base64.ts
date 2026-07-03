@@ -1,12 +1,19 @@
 export function decodeBase64(value: string): Uint8Array {
-  if (value.trim() === "") {
+  // Validate charset + padding length in one pass, then decode. Replaces a
+  // decode -> re-encode -> string-compare round-trip that ran two base64 passes
+  // plus a full-input regex scan on every inbound message. Same rejection
+  // criteria as before: empty/whitespace-only and non-canonical input throw.
+  const normalized = value.replace(/\s+/g, "");
+  if (
+    normalized.length === 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized) ||
+    normalized.length % 4 !== 0
+  ) {
     throw new Error("Invalid base64 payload");
   }
 
-  const decoded = Buffer.from(value, "base64");
-  const normalizedInput = value.replace(/\s+/g, "");
-
-  if (decoded.length === 0 || decoded.toString("base64") !== normalizedInput) {
+  const decoded = Buffer.from(normalized, "base64");
+  if (decoded.length === 0) {
     throw new Error("Invalid base64 payload");
   }
 

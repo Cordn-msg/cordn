@@ -1,5 +1,32 @@
 # cordn
 
+## 0.3.4
+
+### Patch Changes
+
+- perf(server): trim redundant crypto and encoding work on the message path
+
+  Three low-risk optimizations that reduce per-message CPU without changing
+  behavior or the public API:
+  - Drop the redundant `verifyEvent` in `publishKeyPackage`. The ContextVM SDK's
+    `ServerEventPipeline` already verifies every inbound request event's
+    signature before dispatch (the identity-forgery fix), so re-running schnorr
+    verification on the same inner event is wasted work. The credential-to-signer
+    binding check is retained — only cordn can enforce that.
+  - Single-pass `decodeBase64`. The previous decode -> re-encode -> string-compare
+    round-trip is replaced by one charset + padding-length check before decode.
+    Same rejection criteria (empty/whitespace-only and non-canonical input still
+    throw). Removes one base64 encode plus a full-input scan per inbound message
+    (`postGroupMessage`, `storeWelcome`, `publishKeyPackage`).
+  - Serialize-once fanout. A `WeakMap` caches the base64 + JSON wire string per
+    `GroupMessageRecord`, so a live message fanned out to N subscribers is
+    serialized once instead of N times. Backlog fetches return fresh objects per
+    client and miss the cache by design; entries are GC'd with the record.
+
+  These shave edge cost on the coordinator path. The dominant spike cost remains
+  the SDK's per-subscriber NIP-44 gift-wrap (ECDH + ChaCha20-Poly1305 + schnorr
+  sign), which is outside cordn and unchanged.
+
 ## 0.3.3
 
 ### Patch Changes

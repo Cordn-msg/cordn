@@ -5,7 +5,7 @@ import type {
   ServerNotification,
   ServerRequest,
 } from "@contextvm/mcp-sdk/types.js";
-import { verifyEvent, type NostrEvent } from "nostr-tools";
+import type { NostrEvent } from "nostr-tools";
 import type { z } from "zod";
 import {
   isDefaultCredential,
@@ -155,10 +155,8 @@ async function verifyPublishedKeyPackageBinding(params: {
   publicationEvent: NostrEvent;
   keyPackage: KeyPackage;
 }): Promise<string> {
-  if (!verifyEvent(params.publicationEvent)) {
-    throw new Error("Invalid publication event signature");
-  }
-
+  // Signature already verified upstream by the SDK's ServerEventPipeline
+  // (the identity-forgery fix); re-running schnorr here is redundant work.
   if (params.publicationEvent.pubkey !== params.clientPubkey) {
     throw new Error(
       "Publication event signer does not match injected client pubkey",
@@ -219,9 +217,29 @@ function mapGroupMessage(
 
 async function writeGroupMessage(
   stream: OpenStreamWriter,
-  record: Parameters<typeof mapGroupMessage>[0],
+  record: GroupMessageRecord,
 ): Promise<void> {
-  await stream.write(JSON.stringify(mapGroupMessage(record)));
+  await stream.write(encodeWireMessage(record));
+}
+
+// Live messages fan out to every subscribed client; the coordinator pushes the
+// same record reference into each subscriber's queue. Cache the wire string per
+// record so base64 + JSON.stringify run once per message, not once per
+// subscriber. Backlog fetches return fresh objects per client and miss this
+// cache by design -- only live fanout benefits.
+// ponytail: WeakMap so entries GC with the record once queues drain; bounded by
+// in-flight messages, not message history.
+const wireMessageByRecord = new WeakMap<GroupMessageRecord, string>();
+
+function encodeWireMessage(record: GroupMessageRecord): string {
+  const cached = wireMessageByRecord.get(record);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const encoded = JSON.stringify(mapGroupMessage(record));
+  wireMessageByRecord.set(record, encoded);
+  return encoded;
 }
 
 export class CoordinatorAdapter {
@@ -752,8 +770,7 @@ export class CoordinatorAdapter {
       await stream.start();
 
       for (const record of backlog) {
-        const message = mapGroupMessage(record);
-        await stream.write(JSON.stringify(message));
+        await stream.write(encodeWireMessage(record));
         lastEmittedCursor = record.cursor;
       }
 
@@ -762,8 +779,7 @@ export class CoordinatorAdapter {
           continue;
         }
 
-        const message = mapGroupMessage(record);
-        await stream.write(JSON.stringify(message));
+        await stream.write(encodeWireMessage(record));
         lastEmittedCursor = record.cursor;
       }
 
