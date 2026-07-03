@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 
 import { nip44 } from "nostr-tools";
+import { schnorr } from "@noble/curves/secp256k1.js";
 import { clientStateEncoder, encode, type ClientState } from "ts-mls";
 import type { CordnGroupMetadata } from "./groupMetadata.ts";
 import { encodeBase64 } from "./utils/mlsBase.ts";
@@ -37,15 +38,18 @@ export interface SessionGroupEntry {
   clientState: string;
   /** Writer's last-processed delivery cursor for this `gid`. */
   cursor: number;
-  status: "active" | "removed";
 }
 
 export interface SessionDocument {
   schemaVersion: typeof MULTI_DEVICE_SCHEMA_VERSION;
-  ownerPubkey: string;
   issuedAt: number;
-  issuedByDevice?: string;
   prev?: string;
+  /**
+   * Owner Schnorr signature over `sha256(canonical_json(this without the
+   * signature field))`, verified under the receiver's own npub (spec §4, §7).
+   * Authenticity gate checked after the NIP-44 seal is opened.
+   */
+  signature?: string;
   groups: SessionGroupEntry[];
 }
 
@@ -111,6 +115,59 @@ export function documentAddress(sealedPayload: string): string {
     .digest("hex");
 }
 
+/** `sha256` digest of UTF-8 bytes (the signed-message input). */
+function sha256Bytes(utf8: string): Uint8Array {
+  return Uint8Array.from(
+    createHash("sha256").update(Buffer.from(utf8, "utf8")).digest(),
+  );
+}
+
+/**
+ * The bytes the owner signs and the receiver verifies (spec §4): `sha256` of
+ * the canonical encoding of the document WITHOUT its `signature` field.
+ */
+export function documentSignatureMessage(doc: SessionDocument): Uint8Array {
+  const { signature: _signature, ...withoutSignature } = doc;
+  return sha256Bytes(canonicalJson(withoutSignature));
+}
+
+/** Owner Schnorr signature over the document's canonical bytes (spec §4, §7). */
+export function signDocument(
+  doc: SessionDocument,
+  privateKeyHex: string,
+): SessionDocument {
+  const signature = Buffer.from(
+    schnorr.sign(
+      documentSignatureMessage(doc),
+      Uint8Array.from(Buffer.from(privateKeyHex, "hex")),
+    ),
+  ).toString("hex");
+  return { ...doc, signature };
+}
+
+/**
+ * Verify the owner signature under the receiver's own npub (spec §4, §7). The
+ * receiver is the owner, so the verifying key is the npub that opened the
+ * NIP-44 seal. Throws on a missing or invalid signature — the cheap
+ * authenticity gate run before any MLS work.
+ */
+export function verifyDocumentSignature(
+  doc: SessionDocument,
+  ownerPubkey: string,
+): void {
+  if (!doc.signature) {
+    throw new MultiDeviceError("Session document has no owner signature");
+  }
+  const ok = schnorr.verify(
+    Uint8Array.from(Buffer.from(doc.signature, "hex")),
+    documentSignatureMessage(doc),
+    Uint8Array.from(Buffer.from(ownerPubkey, "hex")),
+  );
+  if (!ok) {
+    throw new MultiDeviceError("Session document signature does not verify");
+  }
+}
+
 /** NIP-44 v2 encryption to the owner's own npub. Spec §7. */
 export function sealDocument(
   doc: SessionDocument,
@@ -142,12 +199,9 @@ export function openDocument(
       `Unsupported multi-device schema version: ${doc.schemaVersion}`,
     );
   }
-  // ponytail: owner check is a cheap guard, not a security boundary — the
-  // seal already required the owner nsec to decrypt. It prevents a device
-  // from ingesting a document another identity somehow encrypted for it.
-  if (doc.ownerPubkey !== ownerPubkey) {
-    throw new MultiDeviceError("Document ownerPubkey does not match identity");
-  }
+  // Authenticity gate (spec §7): verify the owner signature under the npub that
+  // opened the seal, before any MLS work.
+  verifyDocumentSignature(doc, ownerPubkey);
   return doc;
 }
 
@@ -161,21 +215,16 @@ export interface GroupSnapshotInput {
   coordinatorKey: string;
   metadata?: CordnGroupMetadata;
   fetchCursor: number;
-  status: "active" | "removed";
 }
 
 export function buildSessionDocument(params: {
-  ownerPubkey: string;
   groups: GroupSnapshotInput[];
-  issuedByDevice?: string;
   prev?: string;
   encryptedOutbound: boolean;
 }): SessionDocument {
   return {
     schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
-    ownerPubkey: params.ownerPubkey,
     issuedAt: Date.now(),
-    issuedByDevice: params.issuedByDevice,
     prev: params.prev,
     groups: params.groups.map((group) => ({
       gid: group.gid,
@@ -184,7 +233,6 @@ export function buildSessionDocument(params: {
       encrypted: params.encryptedOutbound,
       clientState: encodeBase64(encode(clientStateEncoder, group.state)),
       cursor: group.fetchCursor,
-      status: group.status,
     })),
   };
 }
@@ -223,14 +271,11 @@ export interface PublishResult {
 export async function publishCurrentSession(params: {
   session: MultiDeviceSessionView;
   mediaStore: MediaStore;
-  deviceLabel?: string;
   prev?: string;
 }): Promise<PublishResult> {
   const { session } = params;
-  const document = buildSessionDocument({
-    ownerPubkey: session.stablePubkey,
+  const unsigned = buildSessionDocument({
     encryptedOutbound: session.encryptOutbound,
-    issuedByDevice: params.deviceLabel,
     prev: params.prev,
     groups: session.listGroups().map((group) => ({
       gid: session.deriveGroupId(group.state),
@@ -238,9 +283,11 @@ export async function publishCurrentSession(params: {
       coordinatorKey: group.coordinatorKey,
       metadata: group.metadata,
       fetchCursor: group.fetchCursor,
-      status: group.status,
     })),
   });
+  // Sign-then-encrypt (spec §7): the owner signature travels inside the seal
+  // so the npub is never exposed on the content store.
+  const document = signDocument(unsigned, session.privateKey);
 
   const sealed = sealDocument(
     document,

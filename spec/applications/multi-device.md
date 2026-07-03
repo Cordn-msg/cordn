@@ -47,9 +47,7 @@ The session document is a JSON object. Its purpose is to seed groups on devices 
 ```json
 {
   "schemaVersion": 1,
-  "ownerPubkey": "<hex>",
   "issuedAt": 0,
-  "issuedByDevice": "<opaque device label>",
   "prev": "<hex sha256 of previous document>",
   "signature": "<hex schnorr signature by owner over canonical bytes excluding this field>",
   "groups": [
@@ -59,8 +57,7 @@ The session document is a JSON object. Its purpose is to seed groups on devices 
       "metadata": { },
       "encrypted": true,
       "clientState": "<base64 of serialized MLS ClientState>",
-      "cursor": 0,
-      "status": "active"
+      "cursor": 0
     }
   ]
 }
@@ -69,18 +66,15 @@ The session document is a JSON object. Its purpose is to seed groups on devices 
 Field requirements:
 
 - `schemaVersion` MUST be `1`. Clients MUST reject documents with an unknown schema version.
-- `ownerPubkey` MUST equal the Nostr public key of the encrypting identity. Receivers MUST reject documents whose `ownerPubkey` does not match their own identity.
 - `issuedAt` is wall-clock milliseconds and is advisory; it is not a security primitive.
-- `issuedByDevice` is an opaque label for diagnostics only. It is not authenticated and MUST NOT be used to authorize device actions.
 - `prev` SHOULD be populated with the `sha256` of the canonical encoding of the previous document. It forms a hash chain that, because the content store is immutable and content-addressed (§12), is walkable: each parent blob is retained and fetchable. This yields a tamper-evident, owner-authenticated history useful for forensics and recovery (§13). The chain is NOT consulted during reconciliation (§8); convergence uses the newer-epoch rule alone.
-- `signature` MUST be a valid Schnorr signature by the owner over `sha256(canonical_json(document with this field removed))`. It is the document's authenticity guarantee (§7). Clients MUST reject any document whose signature does not verify under `ownerPubkey`.
+- `signature` MUST be a valid Schnorr signature by the owner over `sha256(canonical_json(document with this field removed))`. It is the document's authenticity guarantee (§7). Clients MUST reject any document whose signature does not verify under the receiver's own npub; the receiver is the owner, so the verifying key is the npub that decrypted the seal.
 - `groups[].gid` is the delivery group identifier ([`spec/03.md`](../03.md) §2), opaque to the coordinator and distinct from the MLS `group_id`.
 - `groups[].coordinator` is the coordinator identity or public key that serves `gid`, so a seeded device knows where to fetch the delivery stream.
 - `groups[].metadata` is OPTIONAL and carries the group's `CordnGroupMetadata` ([`spec/01.md`](../01.md)) for presentation only; authoritative metadata is what the receiver derives by replaying the stream.
 - `groups[].encrypted` records whether the group uses end-to-end encrypted payloads ([`spec/03.md`](../03.md)); the seeded device adopts it as the group's outbound encryption mode.
 - `groups[].clientState` is the base64 encoding of the serialized MLS `ClientState` for that group at the instant the document was written.
 - `groups[].cursor` is the writer's last-processed delivery cursor for that `gid` at the same instant. The `(clientState, cursor)` pair MUST be a consistent snapshot: ingesting the delivery stream up to and including `cursor` MUST leave the writer at the epoch encoded in `clientState`.
-- `groups[].status` is advisory. Authoritative membership state is what the receiver derives by replaying the stream from the seeded cursor.
 
 The document MUST NOT carry the identity's Nostr private key (`nsec`), key packages, pending welcomes, join requests, or messages. Devices are responsible for provisioning their own access to the identity, typically via a remote signer. The document converges *group state* only; it does not provision *identity*.
 
@@ -153,13 +147,13 @@ For each entry in `groups`:
 - If the device does NOT have a local group with that `gid`, it MUST seed the group from the entry (§9), using `clientState` and `cursor` as the seed.
 - If the device already has a local group with that `gid`, it MUST compare the entry's epoch to its local epoch:
   - If the entry's epoch is strictly greater, the device MUST fast-forward: adopt the entry's `clientState` and advance its local delivery cursor to `max(local, entry.cursor)`. Fast-forwarding is how sibling Commits propagate (§10), because the serialized `clientState` carries the new leaf private keys that the delivery stream cannot convey.
-  - Otherwise (equal or older epoch) the entry is advisory and the device MUST ignore its `clientState`, `cursor`, `metadata`, and `status`.
+  - Otherwise (equal or older epoch) the entry is advisory and the device MUST ignore its `clientState`, `cursor`, and `metadata`.
 
 The newer-epoch check is the rollback defense and is load-bearing. The document is authoritative for group existence, for seeding missing groups, and for fast-forwarding to a strictly newer epoch; it is never authoritative for downgrading state. In particular:
 
 - The device MUST NOT adopt a `clientState` whose epoch is less than or equal to the local epoch. This prevents a replayed, rolled-back, or stale tip from overwriting newer local state.
 - The device MUST NOT advance an existing group's local delivery cursor past what the adopted `clientState` warrants. Fast-forward advances the cursor to the entry's `cursor` because the adopted state has processed through that point.
-- A group is "already present" if it exists locally in any status, including removed or poisoned. A document entry cannot un-remove a group whose removal the device has already processed unless the entry carries a strictly newer active epoch.
+- A group is "already present" if it exists locally, even one the device has marked removed or poisoned. A document entry cannot un-remove such a group unless it carries a strictly newer epoch — the newer `clientState` is itself proof of renewed membership.
 
 After reconciling, if the device holds groups not represented in the document, or local epochs ahead of the document for shared groups, the device SHOULD publish a new document that merges its local state with the received set. To avoid lost updates under concurrent writers, the device MUST fetch the current tip, decrypt, merge locally (taking the newer epoch per group), then publish-and-advise. Last-tip-wins is acceptable because per-group epoch comparison makes concurrent publication converge.
 
