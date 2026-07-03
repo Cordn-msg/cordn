@@ -2,6 +2,7 @@ import {
   createAdminAuthorizationCallback,
   createUnauthorizedAdminRejectionDetail,
 } from "./adminPolicy.ts";
+import type { IncomingMessageCallback } from "ts-mls";
 import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
 import { decodeCordnMessageEvent } from "./messageEnvelope.ts";
@@ -65,6 +66,25 @@ function isRemovedFromGroupState(state: GroupSessionState["state"]): boolean {
   return state.groupActiveState?.kind === "removedFromGroup";
 }
 
+/**
+ * Wraps an admin-authorization callback so it also captures the sender leaf
+ * index of any Commit. ts-mls fires the callback before applying the commit's
+ * update path (processMessages.js:158 vs :249), so even when path application
+ * throws (the sibling-Commit case) the sender is already captured. Used by the
+ * multi-device sibling-skip (spec/applications/multi-device.md §10).
+ */
+function wrapCallbackWithSenderCapture(
+  inner: IncomingMessageCallback | undefined,
+  capture: { leafIndex?: number },
+): IncomingMessageCallback {
+  return (incoming) => {
+    if (incoming.kind === "commit") {
+      capture.leafIndex = incoming.senderLeafIndex;
+    }
+    return inner ? inner(incoming) : "accept";
+  };
+}
+
 export async function ingestGroupMessages(params: {
   group: GroupSessionState;
   messages: RawGroupMessage[];
@@ -107,14 +127,22 @@ export async function ingestGroupMessages(params: {
 
     let processed: Awaited<ReturnType<typeof processMessageBase64>>;
 
+    // Capture the Commit sender's leaf index via the callback so the
+    // sibling-skip below can tell a sibling Commit (my own shared leaf) from
+    // a genuine removal. See spec/applications/multi-device.md §10.
+    const senderCapture: { leafIndex?: number } = {};
+
     try {
       processed = await processMessageBase64({
         state: group.state,
         opaqueMessageBase64: message.opaqueMessageBase64,
-        callback: createAdminAuthorizationCallback({
-          state: group.state,
-          metadata: group.metadata,
-        }),
+        callback: wrapCallbackWithSenderCapture(
+          createAdminAuthorizationCallback({
+            state: group.state,
+            metadata: group.metadata,
+          }),
+          senderCapture,
+        ),
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -137,6 +165,25 @@ export async function ingestGroupMessages(params: {
           isRemovedMemberCommitIssue(detail) &&
           !isPendingOperationMessage
         ) {
+          // Multi-device sibling-skip (spec/applications/multi-device.md
+          // §10): a Commit from a sibling device (same shared leaf) cannot
+          // be ingested from the stream — the update path refreshed our
+          // shared leaf with keys only the sibling holds. The captured
+          // sender leaf index equals our own, so this is not a genuine
+          // removal. Skip the Commit (cursor already advanced above) and
+          // converge via the session document fast-forward. Application
+          // messages and third-party Commits never reach this branch.
+          const myLeafIndex = findMemberLeafIndexByStablePubkey(
+            group.state,
+            localStablePubkey,
+          );
+          if (
+            senderCapture.leafIndex !== undefined &&
+            myLeafIndex >= 0 &&
+            senderCapture.leafIndex === myLeafIndex
+          ) {
+            continue;
+          }
           group.status = "removed";
           group.removedAtCursor = message.cursor;
           removedLocalMember = true;

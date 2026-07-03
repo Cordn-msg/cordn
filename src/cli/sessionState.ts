@@ -35,6 +35,17 @@ export interface CliSessionOptions {
    * blobs. See `spec/applications/encrypted-media.md`.
    */
   mediaStore?: MediaStore;
+
+  /**
+   * Multi-device hook (spec/applications/multi-device.md §10): fired after a
+   * group operation that advances local state in a way sibling devices must
+   * learn about — when a locally-authored Commit is confirmed via self-echo,
+   * and when a new group is created. A multi-device client wires this to
+   * re-publish its session document so siblings can seed/fast-forward. The
+   * callback is fire-and-forget: its result is not awaited and errors are
+   * swallowed, so publishing never blocks delivery.
+   */
+  onLocalStateAdvance?: () => void | Promise<void>;
 }
 
 export interface SessionStatus {

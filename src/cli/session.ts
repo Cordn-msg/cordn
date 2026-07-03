@@ -69,6 +69,8 @@ import {
   rejectPendingEpochOperations,
   type PendingEpochOperation,
 } from "./pendingEpochOperations.ts";
+import { clientStateDecoder } from "ts-mls";
+import type { SessionGroupEntry } from "./multiDevice.ts";
 import {
   MissingLocalKeyPackageForWelcomeError,
   RemovedFromGroupError,
@@ -136,9 +138,11 @@ export class CliSession {
   private readonly store = new CliSessionStore();
   private readonly coordinatorRegistry: CoordinatorClientRegistry;
   /** Outbound payload encryption gate. See {@link CliSessionOptions.encryptOutbound}. */
-  private readonly encryptOutbound: boolean;
+  readonly encryptOutbound: boolean;
   /** Content-addressed store for encrypted media blobs, if configured. */
   private readonly mediaStore?: MediaStore;
+  /** Multi-device re-publish hook, if configured. */
+  private readonly onLocalStateAdvance?: () => void | Promise<void>;
   private readonly groupIdDecoder = new TextDecoder();
   private readonly watchHandles = new Map<string, GroupWatchHandle>();
   private readonly groupEventListeners = new Set<(event: GroupEvent) => void>();
@@ -153,6 +157,28 @@ export class CliSession {
     this.stablePubkey = deriveStablePubkey(this.privateKey);
     this.encryptOutbound = options.encryptOutbound ?? false;
     this.mediaStore = options.mediaStore;
+    this.onLocalStateAdvance = options.onLocalStateAdvance;
+  }
+
+  /**
+   * Fire-and-forget the multi-device state-advance hook. Never throws and
+   * never blocks: publishing is a client concern, not part of delivery.
+   */
+  private notifyLocalStateAdvance(): void {
+    const hook = this.onLocalStateAdvance;
+    if (!hook) {
+      return;
+    }
+    queueMicrotask(() => {
+      try {
+        const result = hook();
+        if (result && typeof (result as Promise<void>).catch === "function") {
+          (result as Promise<void>).catch(() => undefined);
+        }
+      } catch {
+        // ponytail: publishing must never break delivery.
+      }
+    });
   }
 
   async disconnect(): Promise<void> {
@@ -375,6 +401,8 @@ export class CliSession {
     );
 
     this.store.addGroup(group);
+    // New group: siblings learn of it by seeding from the next published doc.
+    this.notifyLocalStateAdvance();
     return group;
   }
 
@@ -950,6 +978,83 @@ export class CliSession {
     };
   }
 
+  /**
+   * Multi-device seed (spec/applications/multi-device.md §9). Adopts a shared
+   * MLS leaf from a serialized `ClientState` without going through the Welcome
+   * path, then sets the fetch cursor so a subsequent `syncGroup` catches up
+   * from the document's cursor. Used by {@link applyDocumentEntry} for groups
+   * the device does not already have locally.
+   */
+  async seedGroupFromEntry(
+    entry: SessionGroupEntry,
+    alias?: string,
+  ): Promise<GroupSessionState> {
+    const resolvedAlias = alias ?? `group-${this.store.groupCount + 1}`;
+
+    const decoded = clientStateDecoder(decodeBase64(entry.clientState), 0);
+    if (!decoded) {
+      throw new Error("Failed to decode seeded ClientState");
+    }
+    const state = decoded[0];
+    const group = this.createGroupSessionState(
+      resolvedAlias,
+      state,
+      entry.coordinator,
+    );
+    // ponytail: cursor is the writer's fetch progression; the seeded device
+    // fetches forward from here. Messages at or before the cursor are not
+    // re-fetched (state-sync trade, see spec §9).
+    group.fetchCursor = entry.cursor;
+    group.lastCursor = entry.cursor;
+
+    this.store.addGroup(group);
+    return group;
+  }
+
+  /**
+   * Multi-device reconciliation per entry (spec §8). Seeds a missing group,
+   * fast-forwards a present group to a strictly newer epoch, or skips. The
+   * newer-epoch check is the rollback defense: a replayed or stale tip can
+   * never downgrade an existing group. Fast-forward is required because a
+   * sibling device's Commit cannot be ingested via the delivery stream (the
+   * shared leaf's UpdatePath invalidates this device's keys); only the
+   * serialized ClientState carries the new private keys (spec §10).
+   */
+  async applyDocumentEntry(
+    entry: SessionGroupEntry,
+  ): Promise<"seeded" | "fast-forwarded" | "skipped"> {
+    const local = this.listGroups().find(
+      (group) => this.deriveGroupId(group.state) === entry.gid,
+    );
+
+    if (!local) {
+      await this.seedGroupFromEntry(entry);
+      return "seeded";
+    }
+
+    const decoded = clientStateDecoder(decodeBase64(entry.clientState), 0);
+    if (!decoded) {
+      return "skipped";
+    }
+    const docEpoch = decoded[0].groupContext.epoch;
+    if (docEpoch <= local.state.groupContext.epoch) {
+      // Not newer: advisory only. Never downgrade local state from the doc.
+      return "skipped";
+    }
+
+    local.state = decoded[0];
+    local.metadata = getCordnGroupMetadataExtension(decoded[0]);
+    local.fetchCursor = Math.max(local.fetchCursor, entry.cursor);
+    local.lastCursor = Math.max(local.lastCursor, entry.cursor);
+
+    // A newer-epoch document means a sibling device's Commit won the epoch.
+    // Any pending Commit I staged against the old epoch is now stale (the
+    // group moved on); discard it. The intended change is lost and the
+    // caller may retry. Spec §10 (concurrent sibling Commits).
+    this.store.pendingOperations.delete(local.alias);
+    return "fast-forwarded";
+  }
+
   listMessages(groupAlias: string): StoredMessage[] {
     return [...this.getGroup(groupAlias).messages].sort(
       (a, b) => a.cursor - b.cursor,
@@ -1266,6 +1371,10 @@ export class CliSession {
           },
         );
         await this.fetchWelcomes();
+        // A locally-authored Commit just landed on the stream. Notify the
+        // multi-device layer so siblings can fast-forward via a fresh doc
+        // (spec/applications/multi-device.md §10).
+        this.notifyLocalStateAdvance();
       }
 
       if (allRejectedPending.size > 0) {
