@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
 
 import { CliSession } from "./session.ts";
 import { FileMediaStore } from "./mediaStore.ts";
@@ -10,26 +9,20 @@ import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
 import { PrivateKeySigner } from "@contextvm/sdk";
 import {
-  InMemoryTipStore,
-  MULTI_DEVICE_SCHEMA_VERSION,
   publishCurrentSession,
   pullSessionDocument,
   reconcileFromDocument,
-  signDocument,
-  verifyDocumentSignature,
-  type SessionDocument,
+  walkSessionChain,
 } from "./multiDevice.ts";
 import { clientStateEncoder, encode } from "ts-mls";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
-import { deriveStablePubkey } from "./utils/mlsBase.ts";
 
 /**
  * Multi-device synchronization scenarios (spec/applications/multi-device.md).
  *
- * One in-process coordinator (MockRelayHub + connectServer), a shared
- * FileMediaStore as the Blossom stand-in, and an InMemoryTipStore for the
- * mutable tip. Two CliSessions sharing one `privateKey` emulate two devices of
- * one identity on a single shared MLS leaf.
+ * One in-process coordinator (MockRelayHub + connectServer) and a shared
+ * FileMediaStore as the Blossom stand-in. Two CliSessions sharing one
+ * `privateKey` emulate two devices of one identity on a single shared MLS leaf.
  *
  * Convergence model validated here:
  *  - Application messages between siblings converge via the delivery stream.
@@ -63,7 +56,6 @@ describe("multi-device synchronization", () => {
     const mediaStore = new FileMediaStore(
       await mkdtemp(join(tmpdir(), "cordn-md-a-")),
     );
-    const tipStore = new InMemoryTipStore();
     const addressToUrl = (address: string) => `media://${address}`;
     const server = await connectServer({
       signer: serverSigner,
@@ -89,7 +81,6 @@ describe("multi-device synchronization", () => {
         mediaStore,
       });
       expect(pub.address).toHaveLength(64);
-      await tipStore.set(alice.stablePubkey, pub.address);
 
       const device2 = new CliSession({
         privateKey: alice.privateKey,
@@ -166,7 +157,6 @@ describe("multi-device synchronization", () => {
     const mediaStore = new FileMediaStore(
       await mkdtemp(join(tmpdir(), "cordn-md-c-")),
     );
-    const tipStore = new InMemoryTipStore();
     const addressToUrl = (address: string) => `media://${address}`;
     const server = await connectServer({
       signer: serverSigner,
@@ -188,7 +178,6 @@ describe("multi-device synchronization", () => {
       const baseEpoch = group.state.groupContext.epoch;
 
       const pub0 = await publishCurrentSession({ session: alice, mediaStore });
-      await tipStore.set(alice.stablePubkey, pub0.address);
       const device2 = new CliSession({
         privateKey: alice.privateKey,
         serverPubkey,
@@ -216,7 +205,6 @@ describe("multi-device synchronization", () => {
       await alice.updateGroupMetadata("g", { name: "FromAlice" });
       await alice.syncGroup("g");
       const pub1 = await publishCurrentSession({ session: alice, mediaStore });
-      await tipStore.set(alice.stablePubkey, pub1.address);
 
       // Device 2 fast-forwards from the new document (no stream sync).
       const doc1 = await pullSessionDocument({
@@ -555,41 +543,6 @@ describe("multi-device synchronization", () => {
     }
   });
 
-  test("signature verification rejects tampered, rekeyed, and unsigned documents", () => {
-    const privateKey = Buffer.from(randomBytes(32)).toString("hex");
-    const ownerPubkey = deriveStablePubkey(privateKey);
-
-    const doc: SessionDocument = {
-      schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
-      issuedAt: 123,
-      groups: [],
-    };
-    const signed = signDocument(doc, privateKey);
-    // 64-byte BIP340 signature, hex-encoded.
-    expect(signed.signature).toHaveLength(128);
-    expect(() => verifyDocumentSignature(signed, ownerPubkey)).not.toThrow();
-
-    // Tampering any covered field invalidates the signature.
-    expect(() =>
-      verifyDocumentSignature({ ...signed, issuedAt: 999 }, ownerPubkey),
-    ).toThrow(/does not verify/i);
-
-    // A different verifying key rejects it — only the owner nsec could sign.
-    expect(() =>
-      verifyDocumentSignature(
-        signed,
-        deriveStablePubkey(Buffer.from(randomBytes(32)).toString("hex")),
-      ),
-    ).toThrow(/does not verify/i);
-
-    // A document with no signature is rejected.
-    const unsigned: SessionDocument = { ...signed };
-    delete unsigned.signature;
-    expect(() => verifyDocumentSignature(unsigned, ownerPubkey)).toThrow(
-      /no owner signature/i,
-    );
-  });
-
   /**
    * Scenario F — four devices, long-lived staggered convergence. One device
    * commits ~10 times while three others catch up purely through document
@@ -726,6 +679,110 @@ describe("multi-device synchronization", () => {
         expect(epochOf(d, a)).toBe(want);
         expect(metaName(d, a)).toBe("c10");
       }
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  /**
+   * Scenario G — chained catch-up (spec/applications/multi-device.md §8.5).
+   *
+   * A device offline across two sibling-commit epochs recovers the
+   * application messages sent in BOTH epochs by walking the `prev` chain and
+   * decrypting each epoch's messages with that epoch's ClientState. A single
+   * fast-forward to the tip would adopt a cursor past the first epoch's
+   * messages and lose them; the chain is what makes offline catch-up lossless
+   * up to the first epoch the chain cannot cover.
+   */
+  test("chained catch-up recovers messages across sibling-commit epochs (spec §8.5)", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-chain-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      await alice.createGroup("g", {
+        keyPackageAlias: "kp",
+        metadata: { name: "G" },
+      });
+
+      // D0: epoch 0. `prev` auto-populates from here (spec §4).
+      const pub0 = await publishCurrentSession({ session: alice, mediaStore });
+
+      // bob seeds at epoch 0, then stays "offline" (no further sync) while
+      // alice advances the group.
+      const bob = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(bob);
+      const doc0 = await pullSessionDocument({
+        address: pub0.address,
+        mediaStore,
+        addressToUrl,
+        privateKeyHex: bob.privateKey,
+        ownerPubkey: bob.stablePubkey,
+      });
+      await reconcileFromDocument(bob, doc0);
+      const bobAlias = bob.listGroups()[0]!.alias;
+      const groupId = bob.deriveGroupId(bob.getGroup(bobAlias).state);
+      expect(bob.getGroup(bobAlias).state.groupContext.epoch).toBe(0n);
+
+      // alice advances two sibling-commit epochs, publishing after each commit
+      // and sending one message into each epoch. Chain: D2 <- D1 <- D0.
+      await alice.updateGroupMetadata("g", { name: "v1" });
+      await alice.syncGroup("g");
+      const pub1 = await publishCurrentSession({ session: alice, mediaStore });
+      await alice.sendMessage("g", "m0"); // epoch 1
+
+      await alice.updateGroupMetadata("g", { name: "v2" });
+      await alice.syncGroup("g");
+      const pub2 = await publishCurrentSession({ session: alice, mediaStore });
+      await alice.sendMessage("g", "m1"); // epoch 2
+
+      // Auto-chain: D2.prev == D1.address (spec §4 `prev` auto-populate).
+      const doc2 = await pullSessionDocument({
+        address: pub2.address,
+        mediaStore,
+        addressToUrl,
+        privateKeyHex: bob.privateKey,
+        ownerPubkey: bob.stablePubkey,
+      });
+      expect(doc2.prev).toBe(pub1.address);
+
+      // Walk the chain back from the tip: one gen-0 ClientState per epoch > 0.
+      const chain = await walkSessionChain({
+        tipAddress: pub2.address,
+        groupId,
+        localEpoch: 0n,
+        mediaStore,
+        addressToUrl,
+        privateKeyHex: bob.privateKey,
+        ownerPubkey: bob.stablePubkey,
+      });
+      expect(chain.map((step) => step.epoch)).toEqual([1n, 2n]);
+
+      // Chained catch-up recovers BOTH messages. A single fast-forward to D2
+      // would adopt a cursor past m0 and lose it.
+      const { received } = await bob.catchUpGroupFromChain(bobAlias, chain);
+      expect(received.map((m) => m.content)).toEqual(["m0", "m1"]);
+      expect(bob.getGroup(bobAlias).state.groupContext.epoch).toBe(2n);
     } finally {
       await server.transport.close();
     }

@@ -70,7 +70,7 @@ import {
   type PendingEpochOperation,
 } from "./pendingEpochOperations.ts";
 import { clientStateDecoder } from "ts-mls";
-import type { SessionGroupEntry } from "./multiDevice.ts";
+import type { ChainStep, SessionGroupEntry } from "./multiDevice.ts";
 import {
   MissingLocalKeyPackageForWelcomeError,
   RemovedFromGroupError,
@@ -1053,6 +1053,72 @@ export class CliSession {
     // caller may retry. Spec §10 (concurrent sibling Commits).
     this.store.pendingOperations.delete(local.alias);
     return "fast-forwarded";
+  }
+
+  /**
+   * Chained catch-up (spec §8.5). For a group whose local epoch is behind the
+   * tip, replay the message gap epoch-by-epoch: each epoch's application
+   * messages are decrypted with that epoch's `ClientState` from the `prev`
+   * chain, so messages sent during the offline window are NOT lost the way a
+   * single-snapshot fast-forward would lose them. Sibling-Commit epochs come
+   * from the chain; third-party Commits inside a range are replayed in-band by
+   * `applyIncomingMessages` (which advances the state itself). Single-snapshot
+   * fast-forward (§8) remains the fallback when the chain is unavailable.
+   *
+   * `chain` MUST be sorted ascending by cursor and cover every epoch strictly
+   * newer than the local epoch (one gen-0 step each, as `walkSessionChain`
+   * returns); a gap in the chain would mis-partition the message ranges.
+   */
+  async catchUpGroupFromChain(
+    groupAlias: string,
+    chain: ChainStep[],
+  ): Promise<{ received: StoredMessage[]; issues: SyncIssue[] }> {
+    const group = this.getGroup(groupAlias);
+    if (chain.length === 0) {
+      return { received: [], issues: [] };
+    }
+    const localCursor = group.fetchCursor;
+
+    // Fetch the whole gap (messages after the local cursor). ponytail: one
+    // fetch; paginate if real gaps grow large enough to trip a batch limit.
+    const result = await this.fetchRawGroupMessages(
+      this.deriveGroupId(group.state),
+      localCursor,
+    );
+    const gap = result.messages;
+
+    // Per-epoch states: [localState, ...decoded chain states], oldest first.
+    const states: ClientState[] = [group.state];
+    for (const step of chain) {
+      const decoded = clientStateDecoder(decodeBase64(step.clientState), 0);
+      if (!decoded) break;
+      states.push(decoded[0]);
+    }
+
+    // Epoch boundaries: [localCursor, ...chain cursors, +∞).
+    const boundaries: number[] = [
+      localCursor,
+      ...chain.map((step) => step.cursor),
+      Number.POSITIVE_INFINITY,
+    ];
+
+    const allReceived: StoredMessage[] = [];
+    const allIssues: SyncIssue[] = [];
+
+    for (let i = 0; i < states.length; i++) {
+      const lo = boundaries[i]!;
+      const hi = boundaries[i + 1]!;
+      const range = gap.filter((m) => m.cursor > lo && m.cursor <= hi);
+      if (range.length === 0) continue;
+      // Decrypt this epoch's messages with this epoch's state, then advance.
+      group.state = states[i]!;
+      const r = await this.applyIncomingMessages(group, range);
+      allReceived.push(...r.received);
+      allIssues.push(...r.issues);
+    }
+    // group.state and group.fetchCursor are left advanced through the tip
+    // epoch by the final range — the device is now current.
+    return { received: allReceived, issues: allIssues };
   }
 
   listMessages(groupAlias: string): StoredMessage[] {

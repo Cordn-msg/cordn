@@ -12,22 +12,36 @@
  * can decrypt. No pairing, pre-shared key, or extra KDF is defined.
  *
  * The coordinator is not involved: it stays content-opaque, as required by
- * `spec/03.md`. The blob store and tip store are injected so tests can run
- * fully in-process (`FileMediaStore` + `InMemoryTipStore`) and production can
- * use Blossom + a Nostr replaceable event.
+ * `spec/03.md`. The blob store is injected (`FileMediaStore` in tests, Blossom
+ * in production). The seal is confidentiality-only; authenticity is provided
+ * by the tip — a sealed, owner-signed inner Nostr event that points at the
+ * document address (spec §6). The tip transport is out of scope here.
  */
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 
 import { nip44 } from "nostr-tools";
-import { schnorr } from "@noble/curves/secp256k1.js";
-import { clientStateEncoder, encode, type ClientState } from "ts-mls";
+import {
+  clientStateDecoder,
+  clientStateEncoder,
+  encode,
+  type ClientState,
+} from "ts-mls";
 import type { CordnGroupMetadata } from "./groupMetadata.ts";
-import { encodeBase64 } from "./utils/mlsBase.ts";
+import { decodeBase64, encodeBase64 } from "./utils/mlsBase.ts";
 import type { MediaStore } from "./mediaStore.ts";
 import type { GroupSessionState } from "./sessionState.ts";
 
 export const MULTI_DEVICE_SCHEMA_VERSION = 1;
+
+/**
+ * Last published document address per owner, so consecutive publishes form a
+ * `prev` chain (spec §4). ponytail: process-local; a device that restarts
+ * recovers the chain root by reading the current tip on startup (the chain is
+ * self-describing — each doc's `prev` is the prior address). A caller MAY pass
+ * `prev` explicitly to override (e.g. to force a fresh chain root).
+ */
+const lastPublishedTip = new Map<string, string>();
 
 export interface SessionGroupEntry {
   gid: string;
@@ -44,12 +58,6 @@ export interface SessionDocument {
   schemaVersion: typeof MULTI_DEVICE_SCHEMA_VERSION;
   issuedAt: number;
   prev?: string;
-  /**
-   * Owner Schnorr signature over `sha256(canonical_json(this without the
-   * signature field))`, verified under the receiver's own npub (spec §4, §7).
-   * Authenticity gate checked after the NIP-44 seal is opened.
-   */
-  signature?: string;
   groups: SessionGroupEntry[];
 }
 
@@ -115,59 +123,6 @@ export function documentAddress(sealedPayload: string): string {
     .digest("hex");
 }
 
-/** `sha256` digest of UTF-8 bytes (the signed-message input). */
-function sha256Bytes(utf8: string): Uint8Array {
-  return Uint8Array.from(
-    createHash("sha256").update(Buffer.from(utf8, "utf8")).digest(),
-  );
-}
-
-/**
- * The bytes the owner signs and the receiver verifies (spec §4): `sha256` of
- * the canonical encoding of the document WITHOUT its `signature` field.
- */
-export function documentSignatureMessage(doc: SessionDocument): Uint8Array {
-  const { signature: _signature, ...withoutSignature } = doc;
-  return sha256Bytes(canonicalJson(withoutSignature));
-}
-
-/** Owner Schnorr signature over the document's canonical bytes (spec §4, §7). */
-export function signDocument(
-  doc: SessionDocument,
-  privateKeyHex: string,
-): SessionDocument {
-  const signature = Buffer.from(
-    schnorr.sign(
-      documentSignatureMessage(doc),
-      Uint8Array.from(Buffer.from(privateKeyHex, "hex")),
-    ),
-  ).toString("hex");
-  return { ...doc, signature };
-}
-
-/**
- * Verify the owner signature under the receiver's own npub (spec §4, §7). The
- * receiver is the owner, so the verifying key is the npub that opened the
- * NIP-44 seal. Throws on a missing or invalid signature — the cheap
- * authenticity gate run before any MLS work.
- */
-export function verifyDocumentSignature(
-  doc: SessionDocument,
-  ownerPubkey: string,
-): void {
-  if (!doc.signature) {
-    throw new MultiDeviceError("Session document has no owner signature");
-  }
-  const ok = schnorr.verify(
-    Uint8Array.from(Buffer.from(doc.signature, "hex")),
-    documentSignatureMessage(doc),
-    Uint8Array.from(Buffer.from(ownerPubkey, "hex")),
-  );
-  if (!ok) {
-    throw new MultiDeviceError("Session document signature does not verify");
-  }
-}
-
 /** NIP-44 v2 encryption to the owner's own npub. Spec §7. */
 export function sealDocument(
   doc: SessionDocument,
@@ -175,7 +130,7 @@ export function sealDocument(
   ownerPubkey: string,
 ): string {
   const conversationKey = nip44.getConversationKey(
-    Uint8Array.from(Buffer.from(privateKeyHex, "hex")),
+    Buffer.from(privateKeyHex, "hex"),
     ownerPubkey,
   );
   return nip44.encrypt(canonicalJson(doc), conversationKey);
@@ -188,7 +143,7 @@ export function openDocument(
   ownerPubkey: string,
 ): SessionDocument {
   const conversationKey = nip44.getConversationKey(
-    Uint8Array.from(Buffer.from(privateKeyHex, "hex")),
+    Buffer.from(privateKeyHex, "hex"),
     ownerPubkey,
   );
   const plaintext = nip44.decrypt(sealedPayload, conversationKey);
@@ -199,9 +154,8 @@ export function openDocument(
       `Unsupported multi-device schema version: ${doc.schemaVersion}`,
     );
   }
-  // Authenticity gate (spec §7): verify the owner signature under the npub that
-  // opened the seal, before any MLS work.
-  verifyDocumentSignature(doc, ownerPubkey);
+  // Authenticity lives in the tip (a sealed owner-signed inner event, spec §6),
+  // not in the document: the seal is confidentiality-only (spec §7).
   return doc;
 }
 
@@ -238,30 +192,10 @@ export function buildSessionDocument(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Tip store (transport not normative — see spec §6)
-// ---------------------------------------------------------------------------
-
-export interface TipStore {
-  set(ownerPubkey: string, address: string): Promise<void> | void;
-  get(ownerPubkey: string): Promise<string | undefined> | string | undefined;
-}
-
-export class InMemoryTipStore implements TipStore {
-  private readonly tips = new Map<string, string>();
-  set(ownerPubkey: string, address: string): void {
-    this.tips.set(ownerPubkey, address);
-  }
-  get(ownerPubkey: string): string | undefined {
-    return this.tips.get(ownerPubkey);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // High-level publish / pull / reconcile
 // ---------------------------------------------------------------------------
 
 export interface PublishResult {
-  document: SessionDocument;
   /** `sha256` of the sealed payload — the content address / tip value. */
   address: string;
   /** Store URL the blob was published at. */
@@ -274,9 +208,13 @@ export async function publishCurrentSession(params: {
   prev?: string;
 }): Promise<PublishResult> {
   const { session } = params;
-  const unsigned = buildSessionDocument({
+  // Auto-chain `prev` (spec §4): the last address this owner published,
+  // unless the caller passes one explicitly. Lets the catch-up chain
+  // (spec §8.5) form without the caller tracking state.
+  const prev = params.prev ?? lastPublishedTip.get(session.stablePubkey);
+  const document = buildSessionDocument({
     encryptedOutbound: session.encryptOutbound,
-    prev: params.prev,
+    prev,
     groups: session.listGroups().map((group) => ({
       gid: session.deriveGroupId(group.state),
       state: group.state,
@@ -285,10 +223,8 @@ export async function publishCurrentSession(params: {
       fetchCursor: group.fetchCursor,
     })),
   });
-  // Sign-then-encrypt (spec §7): the owner signature travels inside the seal
-  // so the npub is never exposed on the content store.
-  const document = signDocument(unsigned, session.privateKey);
-
+  // The seal is confidentiality-only (spec §7); authenticity is provided by
+  // the tip's sealed owner-signed inner event (spec §6), not by the document.
   const sealed = sealDocument(
     document,
     session.privateKey,
@@ -297,7 +233,8 @@ export async function publishCurrentSession(params: {
   const blob = Buffer.from(sealed, "utf8");
   const url = await params.mediaStore.publish(blob);
   const address = documentAddress(sealed);
-  return { document, address, url };
+  lastPublishedTip.set(session.stablePubkey, address);
+  return { address, url };
 }
 
 /**
@@ -351,4 +288,76 @@ export async function reconcileFromDocument(
   }
 
   return { seeded, fastForwarded, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// Chained catch-up (spec §8.5)
+// ---------------------------------------------------------------------------
+
+export interface ChainStep {
+  epoch: bigint;
+  /** Base64 ClientState for this epoch (spec §4 `groups[].clientState`). */
+  clientState: string;
+  /**
+   * Writer's cursor at the moment this epoch's document was published — the
+   * epoch boundary used to partition the message gap during catch-up.
+   */
+  cursor: number;
+  /** Content address of the document this step was read from. */
+  address: string;
+}
+
+/**
+ * Walk the `prev` chain (spec §4) backward from the tip, collecting one
+ * `ClientState` per epoch strictly newer than `localEpoch` for `groupId`.
+ *
+ * Authenticity is transitive: the tip transport endorses the tip address
+ * (spec §6), each document commits to the next-older address via `prev`, and
+ * `pullSessionDocument` re-verifies `sha256(blob) == address` at every hop —
+ * so a blob the owner did not author cannot be reached through the chain.
+ *
+ * One step per epoch, keeping the OLDEST document for that epoch (smallest
+ * cursor = published right after the epoch's Commit, ratchet at generation 0).
+ * A newer same-epoch document has an advanced ratchet and, by MLS forward
+ * secrecy, cannot derive earlier generations — so it could not decrypt that
+ * epoch's earlier messages. Sorted ascending by cursor. ponytail: bounded to
+ * 1000 hops; a deeper gap should single-snapshot fast-forward (spec §10).
+ */
+export async function walkSessionChain(params: {
+  tipAddress: string;
+  groupId: string;
+  localEpoch: bigint;
+  mediaStore: MediaStore;
+  addressToUrl: (address: string) => string;
+  privateKeyHex: string;
+  ownerPubkey: string;
+}): Promise<ChainStep[]> {
+  const byEpoch = new Map<bigint, ChainStep>();
+  let address: string | undefined = params.tipAddress;
+  for (let hop = 0; hop < 1000 && address; hop++) {
+    const doc = await pullSessionDocument({
+      address,
+      mediaStore: params.mediaStore,
+      addressToUrl: params.addressToUrl,
+      privateKeyHex: params.privateKeyHex,
+      ownerPubkey: params.ownerPubkey,
+    });
+    const entry = doc.groups.find((g) => g.gid === params.groupId);
+    if (!entry) break; // group did not exist this far back
+    const decoded = clientStateDecoder(decodeBase64(entry.clientState), 0);
+    if (!decoded) break;
+    const epoch = decoded[0].groupContext.epoch;
+    if (epoch <= params.localEpoch) break; // reached local-or-older state
+    const existing = byEpoch.get(epoch);
+    if (!existing || entry.cursor < existing.cursor) {
+      byEpoch.set(epoch, {
+        epoch,
+        clientState: entry.clientState,
+        cursor: entry.cursor,
+        address,
+      });
+    }
+    address = doc.prev;
+  }
+  return [...byEpoch.values()].sort((a, b) => a.cursor - b.cursor);
 }
