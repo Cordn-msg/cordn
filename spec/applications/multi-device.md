@@ -53,8 +53,6 @@ The session document is a JSON object. Its purpose is to seed groups on devices 
     {
       "gid": "<delivery group id, per spec/03 §2>",
       "coordinator": "<coordinator identity or key>",
-      "metadata": { },
-      "encrypted": true,
       "clientState": "<base64 of serialized MLS ClientState>",
       "cursor": 0
     }
@@ -72,9 +70,7 @@ Field requirements:
 - `prev` SHOULD be populated with the address of the previous document (`sha256` of its sealed blob). Whenever a device has published a previous document it SHOULD set `prev` to that document's address: omitting it after a prior publish breaks the catch-up chain for that gap. `prev` forms a hash chain walkable on the immutable content store (§12) and is the mechanism that makes offline catch-up lossless (§8.5); its authenticity is transitive via the owner-endorsed tip (§6), so no per-document signature is needed (§8.5, §13).
 - `groups[].gid` is the delivery group identifier ([`spec/03.md`](../03.md) §2), opaque to the coordinator and distinct from the MLS `group_id`.
 - `groups[].coordinator` is the coordinator identity or public key that serves `gid`, so a seeded device knows where to fetch the delivery stream.
-- `groups[].metadata` is OPTIONAL and carries the group's `CordnGroupMetadata` ([`spec/01.md`](../01.md)) for presentation only; authoritative metadata is what the receiver derives by replaying the stream.
-- `groups[].encrypted` records whether the group uses end-to-end encrypted payloads ([`spec/03.md`](../03.md)); the seeded device adopts it as the group's outbound encryption mode.
-- `groups[].clientState` is the base64 encoding of the serialized MLS `ClientState` for that group at the instant the document was written.
+- `groups[].clientState` is the base64 encoding of the serialized MLS `ClientState` for that group at the instant the document was written. It is the sole carrier of group presentation state: `CordnGroupMetadata` ([`spec/01.md`](../01.md)) is an MLS GroupContext extension and is therefore already inside `clientState`, so a seeded device reads it from the adopted state and the document does not duplicate it. Outbound payload encryption ([`spec/03.md`](../03.md)) is likewise absent: it is a local sender default each device configures itself, not a group property, and receivers handle both modes per message.
 - `groups[].cursor` is the writer's last-processed delivery cursor for that `gid` at the same instant. The `(clientState, cursor)` pair MUST be a consistent snapshot: ingesting the delivery stream up to and including `cursor` MUST leave the writer at the epoch encoded in `clientState`.
 - `removed` is OPTIONAL. Each entry is a tombstone `{gid, epoch}`, recording that the identity stopped tracking `gid` when the group was at MLS `epoch`. A `gid` appears in `groups` XOR `removed`, never both in the same document. `epoch` is the ordering primitive for the §8 resolution rule (not a timestamp); rejoin at a higher epoch clears a tombstone. Absence from both arrays means only that the publisher does not know the group (§8).
 
@@ -198,7 +194,7 @@ Seeding installs a group on a device without the Welcome flow defined in [`welco
 To seed an entry:
 
 1. Deserialize `clientState` into a local `ClientState`.
-2. Record `gid`, `coordinator`, `metadata`, and `encrypted` as the group's local presentation and routing data.
+2. Record `gid` and `coordinator` as the group's routing data, and derive its presentation metadata from the adopted state's `CordnGroupMetadata` GroupContext extension ([`spec/01.md`](../01.md)).
 3. Set the local delivery cursor for `gid` to the entry's `cursor`.
 4. Begin normal fetch progression from `afterCursor = cursor` as defined in [`spec/00.md`](../00.md) §5 and [`spec/03.md`](../03.md).
 
@@ -215,7 +211,7 @@ The coordinator delivery stream and the session document each carry part of the 
 - **A Commit authored by a sibling device (the same shared leaf) does NOT converge via the delivery stream.** A Commit refreshes the committer's leaf with new HPKE keys via an UpdatePath; only the committer receives the corresponding private keys (from `createCommit`). A sibling device that tried to ingest the Commit would update its leaf's public keys to the committer's new keys without holding the private keys, which MLS surfaces as the member being removed from the group. Therefore:
   - A device MUST NOT ingest a Commit whose sender leaf index equals its own. Such a Commit is a sibling Commit; the device MUST skip it on the stream (advance the cursor, do not process, do not mark itself removed) and await convergence through the document. The detection is exact, not heuristic: in the shared-leaf model a sibling occupies the device's own leaf index, which no third party ever does. The sender leaf index is available to the client even when ingestion subsequently fails, because the MLS authorization callback is invoked before the Commit's UpdatePath is applied.
   - The committing device MUST re-publish the document after any epoch-advancing operation, and after creating a tombstone, so its siblings converge (§8). A client SHOULD expose this as a single hook fired when a locally-authored Commit is confirmed via self-echo, on group creation, and on soft-deleting a group, wired to re-publish via the Operational Model (§10.5). The hook is fire-and-forget: publishing latency MUST NOT block delivery.
-  - Receiving devices converge by replaying the per-epoch `clientState` chain (§8.5), which carries the new leaf private keys; a single-snapshot fast-forward (§8) is the fallback when the chain is unavailable.
+  - Receiving devices converge by replaying the per-epoch `clientState` chain (§8.5), which carries the new leaf private keys; a single-snapshot fast-forward (§8) is the fallback when the chain is unavailable. A device must reconcile the tip before opening the delivery stream (§10.6).
 
 This split is the defining operational property of the shared-leaf model. It is why the document must carry full `clientState` (not just cursors) and why the committing device bears the burden of re-publishing after membership or metadata changes. Application traffic — the common case — needs no re-publish.
 
@@ -246,6 +242,14 @@ Application traffic and single-admin scenarios — the overwhelming majority —
 **Tombstones ride the union.** The published `removed` array is the union of the device's own tombstones and any it adopted from peers. Carrying adopted tombstones forward is what propagates a deletion across the fleet — dropping one after adopting it would let a stale peer resurrect the group on the next publish.
 
 **Non-blocking.** Publishing is fire-and-forget: its latency MUST NOT block message delivery (§10).
+
+### 10.6 Ingest Discipline
+
+§10.5 governs publishing; this section governs receiving. The delivery stream and the document converge only if a device has adopted the canonical `clientState` for a group before it tries to decrypt messages sealed under that state.
+
+**Procedure (MUST).** On startup and on reconnect, a multi-device client fetches the current tip and reconciles it (§8) — fast-forwarding every group whose local epoch is below the document's, via chained catch-up (§8.5) or single-snapshot fallback (§8) — *before* opening the delivery stream for any group. A device MUST NOT begin backlog fetch for a group whose local epoch is behind the tip: the backlog will contain messages sealed under epochs it has not adopted, and those cannot be decrypted. (A freshly seeded group is already at the document's epoch by construction, §9.)
+
+**Behind is not corruption.** Reconciling on startup closes the common gap, but a sibling may Commit and advance the epoch *while the device is connected*, before its re-published tip arrives (§10). The device then receives a message at an epoch above its adopted state. This is a *behind* condition, not a fault: the device awaits the sibling's re-published tip, fast-forwards, and processes the message then. Only a message that remains undecryptable *at the device's current adopted epoch* indicates corrupt local state. A client MUST NOT treat a higher-epoch undecryptable message as fatal.
 
 ### 11. Device Addition and Removal
 

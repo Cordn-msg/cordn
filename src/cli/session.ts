@@ -1005,6 +1005,9 @@ export class CliSession {
       state,
       entry.coordinator,
     );
+    // Presentation metadata lives in the clientState's GroupContext extension
+    // (spec §4 / spec/01), not the document — derive it from the adopted state.
+    group.metadata = getCordnGroupMetadataExtension(state);
     // ponytail: cursor is the writer's fetch progression; the seeded device
     // fetches forward from here. Messages at or before the cursor are not
     // re-fetched (state-sync trade, see spec §9).

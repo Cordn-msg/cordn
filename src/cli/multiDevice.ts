@@ -27,7 +27,6 @@ import {
   encode,
   type ClientState,
 } from "ts-mls";
-import type { CordnGroupMetadata } from "./groupMetadata.ts";
 import { decodeBase64, encodeBase64 } from "./utils/mlsBase.ts";
 import type { MediaStore } from "./mediaStore.ts";
 import type { GroupSessionState } from "./sessionState.ts";
@@ -46,9 +45,8 @@ const lastPublishedTip = new Map<string, string>();
 export interface SessionGroupEntry {
   gid: string;
   coordinator: string;
-  metadata?: CordnGroupMetadata;
-  encrypted: boolean;
-  /** Base64 of `encode(clientStateEncoder, state)`. */
+  /** Base64 of `encode(clientStateEncoder, state)`. Sole carrier of presentation
+   * metadata (the `CordnGroupMetadata` GroupContext extension, spec/01). */
   clientState: string;
   /** Writer's last-processed delivery cursor for this `gid`. */
   cursor: number;
@@ -86,7 +84,6 @@ export class MultiDeviceError extends Error {
 export interface MultiDeviceSessionView {
   readonly stablePubkey: string;
   readonly privateKey: string;
-  readonly encryptOutbound: boolean;
   listGroups(): GroupSessionState[];
   deriveGroupId(state: ClientState): string;
   /**
@@ -186,14 +183,12 @@ export interface GroupSnapshotInput {
   gid: string;
   state: ClientState;
   coordinatorKey: string;
-  metadata?: CordnGroupMetadata;
   fetchCursor: number;
 }
 
 export function buildSessionDocument(params: {
   groups: GroupSnapshotInput[];
   prev?: string;
-  encryptedOutbound: boolean;
   removed?: SessionTombstone[];
 }): SessionDocument {
   return {
@@ -203,8 +198,6 @@ export function buildSessionDocument(params: {
     groups: params.groups.map((group) => ({
       gid: group.gid,
       coordinator: group.coordinatorKey,
-      metadata: group.metadata,
-      encrypted: params.encryptedOutbound,
       clientState: encodeBase64(encode(clientStateEncoder, group.state)),
       cursor: group.fetchCursor,
     })),
@@ -240,14 +233,12 @@ export async function publishCurrentSession(params: {
   // (spec §8.5) form without the caller tracking state.
   const prev = params.prev ?? lastPublishedTip.get(session.stablePubkey);
   const document = buildSessionDocument({
-    encryptedOutbound: session.encryptOutbound,
     prev,
     removed: params.removed,
     groups: session.listGroups().map((group) => ({
       gid: session.deriveGroupId(group.state),
       state: group.state,
       coordinatorKey: group.coordinatorKey,
-      metadata: group.metadata,
       fetchCursor: group.fetchCursor,
     })),
   });
