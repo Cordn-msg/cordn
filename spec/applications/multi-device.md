@@ -4,9 +4,9 @@
 
 ## Abstract
 
-This document defines how `cordn` clients keep multiple devices of one identity synchronized without server-side key material or coordinator changes. Devices of a single user share one MLS leaf (one `ClientState` per group). They converge on application messages and third-party Commits by replaying the same opaque delivery stream defined in [`spec/03.md`](../03.md), and converge on sibling-device Commits by adopting a newer-epoch `ClientState` carried in a sealed *session document* — because a sibling's Commit cannot be ingested from the stream. The document is stored as a content-addressed blob, addressed by `sha256` of its canonical encoding, and advertised through a mutable, opaque tip pointer whose transport hides the owner's identity and `cordn` usage from passive observers. The coordinator is unchanged: it continues to treat group messages as opaque bytes, as required by [`spec/03.md`](../03.md).
+This document defines how `cordn` clients keep multiple devices of one identity synchronized without server-side key material or coordinator changes. Devices of a single user share one MLS leaf (one `ClientState` per group). They converge on application messages and third-party Commits by replaying the same opaque delivery stream defined in [`spec/03.md`](../03.md), and converge on sibling-device Commits by replaying a chain of per-epoch `ClientState` snapshots carried in sealed *session documents* linked by `prev` — because a sibling's Commit cannot be ingested from the stream. Each document is stored as a content-addressed blob, addressed by `sha256` of the sealed blob, and advertised through a mutable, opaque tip pointer whose transport hides the owner's identity and `cordn` usage from passive observers. The coordinator is unchanged: it continues to treat group messages as opaque bytes, as required by [`spec/03.md`](../03.md).
 
-This document specifies the session document format, the sealed-document content-protection model, the seed-not-merge reconciliation rule, the cursor semantics that let a freshly-seeded device catch up, a RECOMMENDED hardened tip transport, and a connection-string device-addition flow. On-device MLS state storage is out of scope; alternative tip transports remain interoperable because the tip is a lookup.
+This document specifies the session document format, the sealed-document content-protection model, the seed-not-merge reconciliation rule, a tombstone model for group removal (§8), the cursor semantics that let a freshly-seeded device catch up, a RECOMMENDED hardened tip transport, and a connection-string device-addition flow. On-device MLS state storage is out of scope; alternative tip transports remain interoperable because the tip is a lookup.
 
 ## Specification
 
@@ -16,8 +16,8 @@ Multi-device reuses the delivery model of [`spec/03.md`](../03.md) for a separat
 
 - A user's devices share a single MLS leaf per group: one `ClientState`, one membership, one set of per-epoch secrets.
 - Application messages and Commits authored by other members converge via the per-group ordered delivery stream. A Commit authored by a sibling device (same leaf) does NOT: the committing device re-publishes, and siblings fast-forward their `ClientState` to the newer epoch from the document.
-- A sealed *session document* snapshots each group's MLS state and delivery cursor. Its only purpose is to seed groups a device does not yet have and to advertise which groups exist.
-- The document is encrypted (sealed) to the owner's own Nostr public key, stored on a content-addressed store chosen by the client, and addressed by `sha256` of its canonical encoding. [Blossom](https://github.com/hzrd149/blossom) is RECOMMENDED.
+- A sealed *session document* snapshots each group's MLS state and delivery cursor. It seeds groups a device lacks, advertises which groups exist, converges group state, and propagates group removals across devices (§8).
+- The document is encrypted (sealed) to the owner's own Nostr public key, stored on a content-addressed store chosen by the client, and addressed by `sha256` of the sealed blob. [Blossom](https://github.com/hzrd149/blossom) is RECOMMENDED.
 - A mutable, opaque *tip* (§6) advertises the current document address. Devices fetch the tip, verify the owner-signed pointer it carries, fetch the document, decrypt, and reconcile.
 
 This keeps the trust boundary established by [`spec/03.md`](../03.md) intact: the coordinator remains content-opaque and gains no new per-user mutable state.
@@ -42,7 +42,7 @@ This model trades per-device post-compromise security and per-device revocation 
 
 ### 4. Session Document
 
-The session document is a JSON object. Its purpose is to seed groups on devices that lack them and to advertise the set of groups the identity belongs to. It is not a log of messages and does not carry identity private keys.
+The session document is a JSON object. Its purpose is to seed groups on devices that lack them, advertise the set of groups the identity belongs to, and converge group state — including group removal — across devices (§8). It is not a log of messages and does not carry identity private keys.
 
 ```json
 {
@@ -58,6 +58,9 @@ The session document is a JSON object. Its purpose is to seed groups on devices 
       "clientState": "<base64 of serialized MLS ClientState>",
       "cursor": 0
     }
+  ],
+  "removed": [
+    { "gid": "<delivery group id>", "epoch": 7 }
   ]
 }
 ```
@@ -66,26 +69,27 @@ Field requirements:
 
 - `schemaVersion` MUST be `1`. Clients MUST reject documents with an unknown schema version.
 - `issuedAt` is wall-clock milliseconds and is advisory; it is not a security primitive.
-- `prev` SHOULD be populated with the `sha256` of the canonical encoding of the previous document. It forms a hash chain that, because the content store is immutable and content-addressed (§12), is walkable: each parent blob is retained and fetchable. This yields a tamper-evident, owner-authenticated history useful for forensics and recovery (§13), AND is the mechanism that makes offline catch-up lossless: a device behind the tip walks the chain to obtain one `ClientState` per skipped epoch and decrypts that epoch's messages (§8.5). Because each document commits to the next-older address via `prev` and the tip is owner-endorsed (§6), the walk is authenticated by transitive hash commitment — no per-document signature is needed.
+- `prev` SHOULD be populated with the address of the previous document (`sha256` of its sealed blob). Whenever a device has published a previous document it SHOULD set `prev` to that document's address: omitting it after a prior publish breaks the catch-up chain for that gap. `prev` forms a hash chain walkable on the immutable content store (§12) and is the mechanism that makes offline catch-up lossless (§8.5); its authenticity is transitive via the owner-endorsed tip (§6), so no per-document signature is needed (§8.5, §13).
 - `groups[].gid` is the delivery group identifier ([`spec/03.md`](../03.md) §2), opaque to the coordinator and distinct from the MLS `group_id`.
 - `groups[].coordinator` is the coordinator identity or public key that serves `gid`, so a seeded device knows where to fetch the delivery stream.
 - `groups[].metadata` is OPTIONAL and carries the group's `CordnGroupMetadata` ([`spec/01.md`](../01.md)) for presentation only; authoritative metadata is what the receiver derives by replaying the stream.
 - `groups[].encrypted` records whether the group uses end-to-end encrypted payloads ([`spec/03.md`](../03.md)); the seeded device adopts it as the group's outbound encryption mode.
 - `groups[].clientState` is the base64 encoding of the serialized MLS `ClientState` for that group at the instant the document was written.
 - `groups[].cursor` is the writer's last-processed delivery cursor for that `gid` at the same instant. The `(clientState, cursor)` pair MUST be a consistent snapshot: ingesting the delivery stream up to and including `cursor` MUST leave the writer at the epoch encoded in `clientState`.
+- `removed` is OPTIONAL. Each entry is a tombstone `{gid, epoch}`, recording that the identity stopped tracking `gid` when the group was at MLS `epoch`. A `gid` appears in `groups` XOR `removed`, never both in the same document. `epoch` is the ordering primitive for the §8 resolution rule (not a timestamp); rejoin at a higher epoch clears a tombstone. Absence from both arrays means only that the publisher does not know the group (§8).
 
 The document MUST NOT carry the identity's Nostr private key (`nsec`), key packages, pending welcomes, join requests, or messages. Devices are responsible for provisioning their own access to the identity, typically via a remote signer. The document converges *group state* only; it does not provision *identity*.
 
 ### 5. Canonical Encoding
 
-The document MUST be encoded as canonical JSON for the purposes of content-addressing (§6):
+The document plaintext is serialized as canonical JSON; this is the input to the seal (§7). The document **address** is `sha256` of the sealed (ciphertext) output, not of this plaintext (§6).
 
 - UTF-8, object members in lexicographic code-point order by name, no insignificant whitespace.
-- [RFC 8785](https://datatracker.ietf.org/doc/rfc8785/) is RECOMMENDED. Clients MAY store and transmit non-canonical JSON internally; canonicalization is required only when computing the document address.
+- [RFC 8785](https://datatracker.ietf.org/doc/rfc8785/) is RECOMMENDED. Clients MAY serialize differently internally; only the sealed output is exchanged and addressed.
 
 ### 6. Content-Addressing and the Tip
 
-The document address is `sha256` of the canonical document encoding, lowercase hex. The address doubles as the content-addressed store key (e.g. the Blossom blob hash).
+The document address is `sha256` of the sealed blob (§7), lowercase hex. The address doubles as the content-addressed store key (e.g. the Blossom blob hash).
 
 - The stored blob is the *sealed* document (§7). Its address is `sha256(blob)`.
 - Clients MUST verify, after fetching, that `sha256(fetched bytes)` equals the advertised address. Mismatch MUST be rejected.
@@ -132,7 +136,7 @@ The document address is `sha256` of the canonical document encoding, lowercase h
 - The ephemeral `nsec` is a bounded-tier secret: leaking it can move the tip (republish under the ephemeral key) but cannot forge an acceptable inner pointer — that requires the owner `nsec`. Its only play is to repoint to a stale-but-valid older inner event — denial-of-service, not corruption (§13).
 - Fetch locations come only from the sealed `server` tags, never from the owner's public `kind:10063` server list ([BUD-03](https://github.com/hzrd149/blossom/blob/master/buds/03.md)): that list is published under the owner `npub` and would defeat the tip's unlinkability.
 
-**Connection string.** Locating the tip (a NIP-19 `naddr`: kind + ephemeral pubkey + `d` + relay hints) and the write capability (the ephemeral `nsec`) travel together in a single connection string minted by an existing device. It carries no owner key material. See §11 for the bootstrap flow and rotation.
+**Connection string.** The tip's locator (a NIP-19 `naddr`: kind + ephemeral pubkey + `d` + relay hints) and write capability (the ephemeral `nsec`) travel together as a connection string minted by an existing device. See §11 for the bootstrap flow and rotation.
 
 ### 7. Document Sealing
 
@@ -152,26 +156,26 @@ Requirements:
 - The sender and recipient public keys are equal; the NIP-44 payload's encrypted sender field therefore reveals only that the owner addressed itself.
 - The MLS exporter is intentionally not used. The session document spans all of a user's groups and is not a payload of any single group; there is no single epoch secret to derive from. Reusing NIP-44 keeps content protection tied to the identity the user already manages.
 
-The seal provides **confidentiality only**: NIP-44 to self does not authenticate the sender, since anyone can encrypt to the owner `npub`. Authenticity is provided by the **tip**, not the document: the address a device fetches is endorsed by the tip's sealed, owner-signed inner event (§6), and content-addressing carries that endorsement to the exact blob — a blob the owner did not endorse cannot be reached through the tip. The document therefore carries no signature and no owner `npub`; the owner `npub` appears only inside the tip's NIP-44 seal. The four properties are distinct: NIP-44 seal = confidentiality, tip inner signature = authenticity, MLS `ClientState` validity = coherence, §8 epoch check = anti-downgrade. Replay and rollback protection is provided by §8, not by the seal.
+The seal provides **confidentiality only**: NIP-44 to self does not authenticate the sender, since anyone can encrypt to the owner `npub`. Authenticity is provided by the **tip** (§6), not the document; the document therefore carries no signature and no owner `npub` (the owner `npub` appears only inside the tip's seal). Replay and rollback protection is provided by §8, not the seal. The distinct guarantees — NIP-44 seal = confidentiality, tip = authenticity, MLS `ClientState` = coherence, §8 = anti-downgrade — are summarized in §13.
 
 ### 8. Reconciliation
 
 A device reconciles an incoming document against its local state.
 
-For each entry in `groups`:
+**Resolution rule.** For each `gid`, the local state and the document each assert at most one fact: *present@E* (a `ClientState`, in local state or in `groups`) or *removed@E* (a tombstone, in `removed`). The device adopts the fact with the highest epoch; if a present fact and a removed fact share the highest epoch, removal wins. This single rule subsumes seeding, fast-forward, and removal:
 
-- If the device does NOT have a local group with that `gid`, it MUST seed the group from the entry (§9), using `clientState` and `cursor` as the seed.
-- If the device already has a local group with that `gid`, it MUST compare the entry's epoch to its local epoch:
-  - If the entry's epoch is strictly greater, the device MUST advance to the newer epoch. The preferred path is chained catch-up (§8.5), which recovers the application messages a snapshot jump would lose; the single-snapshot fast-forward — adopt the entry's `clientState` and advance the local delivery cursor to `max(local, entry.cursor)` — is the fallback when the chain is unavailable. Either way, advancing is how sibling Commits propagate (§10), because the serialized `clientState` carries the new leaf private keys that the delivery stream cannot convey.
-  - Otherwise (equal or older epoch) the entry is advisory and the device MUST ignore its `clientState`, `cursor`, and `metadata`.
+- *Present vs. unknown* → seed the group (§9).
+- *Present@E_doc vs. present@E_local* → if `E_doc > E_local`, advance (preferred: chained catch-up §8.5; fallback: single-snapshot fast-forward, adopting `clientState` and advancing the cursor to `max(local, entry.cursor)`); if `E_doc ≤ E_local`, the entry is advisory and MUST be ignored. Advancing is how sibling Commits propagate (§10): the serialized `clientState` carries the new leaf private keys the stream cannot convey.
+- *Removed@E vs. present@E_local* → if `E ≥ E_local`, drop the local group; if `E < E_local`, the tombstone is stale and MUST be ignored.
 
-The newer-epoch check is the rollback defense and is load-bearing. The document is authoritative for group existence, for seeding missing groups, and for fast-forwarding to a strictly newer epoch; it is never authoritative for downgrading state. In particular:
+A `gid` absent from both `groups` and `removed` is simply unknown to the publisher; the device MUST NOT treat absence as removal.
 
-- The device MUST NOT adopt a `clientState` whose epoch is less than or equal to the local epoch. This prevents a replayed, rolled-back, or stale tip from overwriting newer local state.
+The forward-only epoch check is the rollback defense and is load-bearing. The document is authoritative for group existence, for seeding missing groups, for fast-forwarding to a strictly newer epoch, and for tombstoning at a newer-or-equal epoch; it is never authoritative for downgrading state. In particular:
+
+- The cases above are equivalently prohibitions: never adopt a `clientState` at or below the local epoch, never apply a tombstone below the local epoch — so a replayed, rolled-back, or stale tip can at most deny service, never corrupt or delete newer state.
 - The device MUST NOT advance an existing group's local delivery cursor past what the adopted `clientState` warrants. Fast-forward advances the cursor to the entry's `cursor` because the adopted state has processed through that point.
-- A group is "already present" if it exists locally, even one the device has marked removed or poisoned. A document entry cannot un-remove such a group unless it carries a strictly newer epoch — the newer `clientState` is itself proof of renewed membership.
 
-After reconciling, if the device holds groups not represented in the document, or local epochs ahead of the document for shared groups, the device SHOULD publish a new document that merges its local state with the received set. To avoid lost updates under concurrent writers, the device MUST fetch the current tip, decrypt, merge locally (taking the newer epoch per group), then publish-and-advise. Last-tip-wins is acceptable because per-group epoch comparison makes concurrent publication converge.
+After reconciling, a device that holds newer local state — groups the document lacks or higher local epochs — SHOULD re-publish per the Operational Model (§10.5).
 
 ### 8.5 Chained Catch-Up (Offline History Recovery)
 
@@ -200,7 +204,7 @@ To seed an entry:
 
 The `cursor` is the writer's fetch progression, not the membership boundary (that role belongs to the Welcome `after` hint in [`welcome-delivery.md`](welcome-delivery.md) §2). The seeded device inherits the writer's current group state through `clientState` and receives messages posted after `cursor`; messages at or before `cursor` are not re-fetched. This is the intended state-sync trade: a freshly-seeded device converges on group state immediately and on message content from `cursor` forward, without the document carrying message history.
 
-After seeding, the device catches up by ingesting the delivery stream. Application messages and Commits authored by OTHER members are processed normally. A Commit authored by a sibling device (same leaf) cannot be ingested from the stream (§10); the seeded device relies on document fast-forward for those.
+After seeding, the device catches up by ingesting the delivery stream. Application messages and Commits authored by OTHER members are processed normally. A Commit authored by a sibling device (same leaf) cannot be ingested from the stream (§10); the seeded device relies on chained catch-up (§8.5) for those, falling back to single-snapshot fast-forward (§8) when the chain is unavailable.
 
 ### 10. Convergence and Sibling Commits
 
@@ -210,10 +214,12 @@ The coordinator delivery stream and the session document each carry part of the 
 - **Commits authored by other members** converge via the delivery stream. Every device is an ordinary member relative to another member's leaf and processes those Commits normally.
 - **A Commit authored by a sibling device (the same shared leaf) does NOT converge via the delivery stream.** A Commit refreshes the committer's leaf with new HPKE keys via an UpdatePath; only the committer receives the corresponding private keys (from `createCommit`). A sibling device that tried to ingest the Commit would update its leaf's public keys to the committer's new keys without holding the private keys, which MLS surfaces as the member being removed from the group. Therefore:
   - A device MUST NOT ingest a Commit whose sender leaf index equals its own. Such a Commit is a sibling Commit; the device MUST skip it on the stream (advance the cursor, do not process, do not mark itself removed) and await convergence through the document. The detection is exact, not heuristic: in the shared-leaf model a sibling occupies the device's own leaf index, which no third party ever does. The sender leaf index is available to the client even when ingestion subsequently fails, because the MLS authorization callback is invoked before the Commit's UpdatePath is applied.
-  - The committing device MUST re-publish the document after any epoch-advancing operation so its siblings can fast-forward (§8). A client SHOULD expose this as a single hook fired when a locally-authored Commit is confirmed via self-echo (and on group creation), wired to re-publish the document. The hook is fire-and-forget: publishing latency MUST NOT block delivery.
+  - The committing device MUST re-publish the document after any epoch-advancing operation, and after creating a tombstone, so its siblings converge (§8). A client SHOULD expose this as a single hook fired when a locally-authored Commit is confirmed via self-echo, on group creation, and on soft-deleting a group, wired to re-publish via the Operational Model (§10.5). The hook is fire-and-forget: publishing latency MUST NOT block delivery.
   - Receiving devices converge by replaying the per-epoch `clientState` chain (§8.5), which carries the new leaf private keys; a single-snapshot fast-forward (§8) is the fallback when the chain is unavailable.
 
 This split is the defining operational property of the shared-leaf model. It is why the document must carry full `clientState` (not just cursors) and why the committing device bears the burden of re-publishing after membership or metadata changes. Application traffic — the common case — needs no re-publish.
+
+A soft-deleted group (§8 tombstone) is still a live MLS membership, so a sibling that advances it — any Commit, e.g. a metadata change — raises its epoch past the tombstone and the §8 resolution rule resurrects the group on every device. This is intended: a tombstone stops devices *tracking* a group, not *being in* it. Permanent removal is an MLS Leave (§11), a separate operation.
 
 Concurrent Commits across devices of the same identity fall into two cases:
 
@@ -221,13 +227,29 @@ Concurrent Commits across devices of the same identity fall into two cases:
 - **Symmetric (two devices commit within the same delivery round-trip window, before either sees the other's Commit):** a race. Each device confirms its OWN Commit via self-echo and skips the sibling's, so both advance to epoch N+1 with different states. The forward-only epoch check (§8) cannot pick a winner because the epoch numbers are equal, so neither document fast-forwards the other. This is a known limitation of the shared-leaf model without a tiebreaker. Mitigations, in order of preference:
   1. Re-publish promptly so siblings fast-forward before staging their own Commit. A client SHOULD refuse to stage a Commit on a group that has skipped a sibling Commit but not yet fast-forwarded (the device is known to be behind the canonical state).
   2. Surface a conflict signal so the user can re-sync the diverged device from the canonical device's document.
-  3. Full automatic resolution requires a cursor-based tiebreaker (the Commit delivered at the lower cursor wins) plus state rollback to the pre-Commit epoch. This is not specified here; it is disproportionate to the rarity (two devices performing admin on the same group within a sub-second window).
+  3. Full automatic resolution (cursor tiebreaker plus state rollback) is possible but unspecified; it is disproportionate to a two-devices-admin-in-a-sub-second-window race.
 
 Application traffic and single-admin scenarios — the overwhelming majority — are unaffected by the race.
 
+### 10.5 Operational Model (Publish Discipline)
+
+§8 governs reconciling an *incoming* document; this section governs publishing an *outgoing* one. A device's working state is its reconciled document view — the groups and tombstones it has adopted (§8) — plus its own unpublished changes. The discipline is what makes the convergence properties in §8 and §10 hold in practice: a device never overwrites a peer's newer state, and a deletion sticks across the fleet.
+
+**Procedure (MUST).** Before publishing, a device fetches the current tip, reconciles it against local state (adopting newer facts — including tombstones — per §8), merges its local changes, then publishes and updates the tip. A device MUST NOT push without first ensuring it is current with the tip. Pushing blind is the root cause of two errors: clobbering a peer's newer state (re-adding a group a peer tombstoned, or tombstoning a group a peer advanced), and the stale-push resurrection race (§13). Last-tip-wins on `created_at` is acceptable because every publish reconciles first and carries the union of known facts; per-`gid` epoch comparison makes concurrent publication converge.
+
+**Tip-address check (SHOULD).** Persist the last-seen document address. Before pushing, fetch only the tip event and compare its `x` (§6): if unchanged, no peer has published since and the device may push directly; if changed, reconcile first. This makes the discipline cheap in the common case of a single active writer.
+
+**Offline (MUST).** If the tip cannot be fetched, the push MUST be deferred until the device is online and can reconcile. Queue the change; never push blind.
+
+**Triggers.** A device re-publishes after any epoch-advancing Commit (so siblings converge, §10), after group creation, after creating a tombstone (soft-delete), and on startup if local state is ahead of the tip. Every trigger uses the procedure above.
+
+**Tombstones ride the union.** The published `removed` array is the union of the device's own tombstones and any it adopted from peers. Carrying adopted tombstones forward is what propagates a deletion across the fleet — dropping one after adopting it would let a stale peer resurrect the group on the next publish.
+
+**Non-blocking.** Publishing is fire-and-forget: its latency MUST NOT block message delivery (§10).
+
 ### 11. Device Addition and Removal
 
-Adding a device is an identity-provisioning step, not an MLS operation. The new device obtains access to the owner's `nsec` (directly or via a signer) and is given a **connection string** (§6) by an existing device. From the string alone it bootstraps: parse the `naddr` to learn the relay(s), ephemeral pubkey, and `d`; fetch the replaceable tip event; NIP-44-decrypt its content with the owner `nsec` to obtain the inner event and verify its owner signature; read the `x` and `server` tags; fetch the blob via `GET <server>/<x>` ([BUD-01](https://github.com/hzrd149/blossom/blob/master/buds/01.md)) and verify `sha256(blob) == x`; decrypt the document; seed every group (§9). It then persists the ephemeral `nsec` so it can publish its own tip moves. No Welcomes are issued and group membership does not change, because the device adopts the existing shared leaf of each group.
+Adding a device is an identity-provisioning step, not an MLS operation. The new device obtains access to the owner's `nsec` (directly or via a signer) and is given a **connection string** (§6) by an existing device. From the string alone it bootstraps: it performs the tip read defined in §6 (parse the `naddr`, fetch the replaceable event, decrypt and verify, fetch and verify the blob) to obtain the document, then seeds every group (§9). It persists the ephemeral `nsec` so it can publish its own tip moves. No Welcomes are issued and group membership does not change, because the device adopts the existing shared leaf of each group.
 
 The connection string is a one-shot, offline-shareable capability (locator + write key) — pairing reduced to a scannable code, not a mutual key-agreement ceremony. It carries no owner key material, but should be conveyed over a secure channel; its leak enables tip denial-of-service only (§6, §13).
 
@@ -249,12 +271,13 @@ Protected:
 
 - **Confidentiality.** Only a device able to perform the owner ECDH can decrypt. The store and network observers see only sealed ciphertext.
 - **Authenticity.** The document address a device fetches is endorsed by the tip's sealed, owner-signed inner event (§6); content-addressing (§6) carries that endorsement to the exact blob, so a blob the owner did not endorse cannot be reached through the tip. A leaked ephemeral write key cannot forge an acceptable pointer — that requires the owner `nsec` — so it can at most repoint to a stale-but-valid older pointer (denial-of-service). MLS `ClientState` validity is a second, per-state coherence gate.
-- **Integrity and rollback defense.** Content-addressing plus the §8 newer-epoch rule mean a replayed or rolled-back tip cannot downgrade an existing group's `ClientState`, advance its cursor past the adopted state, or re-seed a group the device has already removed. Forging an acceptable *new* pointer requires the owner `nsec` (see Authenticity); a leaked ephemeral write key can only repoint to stale or undecryptable blobs — denial-of-service, not corruption.
-- **History and catch-up.** The `prev` chain (§4) is a walkable, tamper-evident, owner-authenticated log on the immutable content store. It doubles as the lossless offline-catch-up mechanism (§8.5): authenticity of every walked document is transitive — the tip is owner-endorsed (§6), each document commits to the next-older address via `prev`, and `sha256(blob) == address` is re-checked at every hop. Catch-up holds each walked epoch's `ClientState` only for the duration of that epoch's replay and discards it, so past-epoch keys are not retained beyond the catch-up window.
-- **Convergence.** Because the delivery stream is authoritative for application messages and third-party Commits, and the document fast-forwards sibling Commits under a forward-only epoch check, conflicting documents cannot corrupt local MLS state.
+- **Integrity and rollback defense.** Content-addressing plus the §8 forward-only epoch rule mean a replayed or rolled-back tip cannot downgrade an existing group's `ClientState`, advance its cursor past the adopted state, or apply a tombstone whose epoch is below the local epoch. Forging an acceptable *new* pointer requires the owner `nsec` (see Authenticity); a leaked ephemeral write key can only repoint to stale or undecryptable blobs — denial-of-service, not corruption.
+- **History and catch-up.** The `prev` chain (§4) is a walkable, tamper-evident, owner-authenticated log on the immutable content store, and is the lossless offline-catch-up mechanism (§8.5); its transitive authenticity is described there. Catch-up holds each walked epoch's `ClientState` only for the duration of that epoch's replay and discards it, so past-epoch keys are not retained beyond the catch-up window.
+- **Convergence.** Because the delivery stream is authoritative for application messages and third-party Commits, and the document converges sibling Commits under a forward-only epoch check (§8), conflicting documents cannot corrupt local MLS state.
 
 Not protected (inherent to the shared-leaf model):
 
+- **Soft-delete is not MLS removal.** A tombstone (§8) stops devices *tracking* a group; it does not end MLS membership. The identity remains a member, the coordinator may still deliver the group's messages (they are simply not fetched), and a sibling's Commit raises the epoch and resurrects the group (§10). Ending membership on every device requires an MLS Leave (§11).
 - **No per-device post-compromise security.** Compromising one device compromises the shared leaf for every group until the user rekeys each group. An MLS Update/Commit from any device rekeys the leaf for all devices.
 - **No per-device revocation.** Removing a user from a group removes all devices. See §11.
 - **Device-count leakage.** The ratchet tree reveals one leaf per user regardless of device count. The content store and tip transport can still infer, from fetch and publish patterns, that more than one device is active.
@@ -268,10 +291,10 @@ Not protected (inherent to the shared-leaf model):
 Implementations MUST agree on all of the following:
 
 - the session document JSON shape and field semantics in §4
-- canonical JSON encoding (§5) for content-addressing
 - NIP-44 v2 encryption to the owner's own `npub` as the seal (§7)
 - content addressing by `sha256(blob)` where `blob` is the sealed document (§6)
-- the reconciliation rule in §8: seed missing groups, fast-forward present groups only to a strictly newer epoch, never downgrade
+- the reconciliation rule in §8: per `gid`, the highest-epoch fact wins — seed missing groups, fast-forward present groups only to a strictly newer epoch, apply tombstones only at ≥ the local epoch, never downgrade
+- the `removed` tombstone shape `{gid, epoch}` (§4); absence from both `groups` and `removed` is not removal
 - the group-seeding procedure and the use of `cursor` as the starting `afterCursor` (§9)
 - the §10 rule that a device MUST NOT ingest a Commit whose sender leaf index equals its own (sibling-skip), and that the committing device MUST re-publish after any epoch-advancing operation
 - the tip content format (§6): a NIP-44 seal of an owner-signed inner Nostr event whose `x` tag is the document `sha256` and whose `server` tags list the Blossom hosts ([BUD-08](https://github.com/hzrd149/blossom/blob/master/buds/08.md), [BUD-03](https://github.com/hzrd149/blossom/blob/master/buds/03.md))
@@ -285,6 +308,7 @@ The model is intentionally minimal and reuses existing `cordn` primitives.
 
 - **Shared leaf over per-device leaves.** Per-device leaves (RFC 9420 §5.2) provide per-device post-compromise security and revocation but require a Welcome per device per group, grow the ratchet tree with device count, and reveal device count to other members. The shared-leaf model accepts the security trade for simpler UX, a smaller tree, and concealed device count.
 - **Seed-and-fast-forward, not merge.** MLS `ClientState` has linear history and cannot be merged. Missing groups are seeded; present groups fast-forward to a strictly newer epoch; equal-or-older documents are advisory. The forward-only epoch check makes the design rollback-safe without ever fusing two live states.
+- **Tombstones for removal, not absence.** A group missing from the document is ambiguous (deleted vs. not-yet-known), and the §8 union-republish would flap it back. An explicit `removed` tombstone `{gid, epoch}` disambiguates and propagates deletion the way `groups` propagates presence. Epoch — not cursor, not wall-clock — is the ordering primitive: it advances only on a deliberate Commit, so a tombstone is overridden only by genuine re-engagement (rejoin, or a sibling Commit), never by passive message flow; and it is the forward-only guard that keeps a replayed old tombstone from deleting newer state. Soft-delete is layered above MLS — it stops devices tracking a group without ending membership — leaving MLS Leave (§11) as the permanent-removal operation.
 - **Document carries full `clientState`.** This is forced by the shared-leaf Commit semantics in §10: a sibling's Commit cannot be ingested from the stream, so the new leaf private keys must travel in the document. Cursors alone would not suffice.
 - **Blossom single blob.** A session document is small JSON; content-addressed single-blob storage is the simplest mechanism that satisfies the addressing and immutability requirements, and it is already used by [`encrypted-media.md`](encrypted-media.md).
 - **Hardened, opaque tip transport.** The tip is a lookup, so any transport interoperates; a hardened Nostr replaceable event is RECOMMENDED because it keeps the coordinator content-opaque AND hides the owner's `cordn` usage and identity from passive relay observers. The ephemeral signer is independent (not derived) so knowledge of the owner `npub` cannot reveal the tip.

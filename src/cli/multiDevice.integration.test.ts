@@ -2,8 +2,10 @@ import { afterEach, describe, expect, test } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Buffer } from "node:buffer";
 
 import { CliSession } from "./session.ts";
+import { NostrTipStore } from "./nostrTipStore.ts";
 import { FileMediaStore } from "./mediaStore.ts";
 import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
@@ -13,6 +15,8 @@ import {
   pullSessionDocument,
   reconcileFromDocument,
   walkSessionChain,
+  MULTI_DEVICE_SCHEMA_VERSION,
+  type SessionDocument,
 } from "./multiDevice.ts";
 import { clientStateEncoder, encode } from "ts-mls";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
@@ -783,6 +787,388 @@ describe("multi-device synchronization", () => {
       const { received } = await bob.catchUpGroupFromChain(bobAlias, chain);
       expect(received.map((m) => m.content)).toEqual(["m0", "m1"]);
       expect(bob.getGroup(bobAlias).state.groupContext.epoch).toBe(2n);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Tombstones (group removal sync), spec/applications/multi-device.md §8/§10.
+  // No device-local tombstone memory: the document's `removed` array is the
+  // authority, and §10.5 reconcile-before-push propagates deletions via the
+  // published union. These tests pin that model.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Shared setup: one coordinator, alice creates a group and publishes, bob
+   * (same identity) seeds it. Returns everything the tombstone tests need.
+   */
+  async function setupSeededPair() {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-tomb-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+    const alice = new CliSession({
+      serverPubkey,
+      relayHandler: relayHub.createRelayHandler(),
+      mediaStore,
+    });
+    sessions.push(alice);
+    await alice.generateKeyPackage("kp", { localOnly: true });
+    const group = await alice.createGroup("g", {
+      keyPackageAlias: "kp",
+      metadata: { name: "G" },
+    });
+    const gid = alice.deriveGroupId(group.state);
+
+    const bob = new CliSession({
+      privateKey: alice.privateKey,
+      serverPubkey,
+      relayHandler: relayHub.createRelayHandler(),
+      mediaStore,
+    });
+    sessions.push(bob);
+    const pub0 = await publishCurrentSession({ session: alice, mediaStore });
+    const doc0 = await pullSessionDocument({
+      address: pub0.address,
+      mediaStore,
+      addressToUrl,
+      privateKeyHex: bob.privateKey,
+      ownerPubkey: bob.stablePubkey,
+    });
+    await reconcileFromDocument(bob, doc0);
+    const bobAlias = bob.listGroups()[0]!.alias;
+
+    return {
+      server,
+      alice,
+      bob,
+      mediaStore,
+      addressToUrl,
+      gid,
+      bobAlias,
+      baseEpoch: group.state.groupContext.epoch,
+    };
+  }
+
+  /** Case 4 (spec §8): a tombstone drops the local group on reconcile. */
+  test("a tombstone drops the local group on reconcile (spec §8 case 4)", async () => {
+    const ctx = await setupSeededPair();
+    try {
+      const tombstone = await ctx.alice.softDeleteGroup("g");
+      expect(tombstone.gid).toBe(ctx.gid);
+
+      const pub = await publishCurrentSession({
+        session: ctx.alice,
+        mediaStore: ctx.mediaStore,
+        removed: [tombstone],
+      });
+      const doc = await pullSessionDocument({
+        address: pub.address,
+        mediaStore: ctx.mediaStore,
+        addressToUrl: ctx.addressToUrl,
+        privateKeyHex: ctx.bob.privateKey,
+        ownerPubkey: ctx.bob.stablePubkey,
+      });
+      expect(doc.removed).toContainEqual(tombstone);
+
+      const { dropped, ignored } = await reconcileFromDocument(ctx.bob, doc);
+      expect(dropped).toContainEqual(tombstone);
+      expect(ignored).toHaveLength(0);
+      expect(ctx.bob.listGroups()).toHaveLength(0);
+    } finally {
+      await ctx.server.transport.close();
+    }
+  });
+
+  /** Case 5 (spec §8 anti-downgrade): a tombstone below the local epoch is ignored. */
+  test("a stale tombstone (epoch below local) is ignored", async () => {
+    const ctx = await setupSeededPair();
+    try {
+      // Advance bob's local group one epoch past the tombstone's epoch.
+      await ctx.bob.updateGroupMetadata(ctx.bobAlias, { name: "advanced" });
+      await ctx.bob.syncGroup(ctx.bobAlias);
+      expect(ctx.bob.getGroup(ctx.bobAlias).state.groupContext.epoch).toBe(
+        ctx.baseEpoch + 1n,
+      );
+
+      // A document carrying a stale tombstone at the base epoch.
+      const staleDoc: SessionDocument = {
+        schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
+        issuedAt: Date.now(),
+        groups: [],
+        removed: [{ gid: ctx.gid, epoch: Number(ctx.baseEpoch) }],
+      };
+      const { dropped, ignored } = await reconcileFromDocument(
+        ctx.bob,
+        staleDoc,
+      );
+      expect(dropped).toHaveLength(0);
+      expect(ignored).toContainEqual({
+        gid: ctx.gid,
+        epoch: Number(ctx.baseEpoch),
+      });
+      expect(ctx.bob.listGroups()).toHaveLength(1); // retained
+    } finally {
+      await ctx.server.transport.close();
+    }
+  });
+
+  /** Absence from both arrays is not removal (spec §8). */
+  test("a group absent from the document is not removed (absence != removal)", async () => {
+    const ctx = await setupSeededPair();
+    try {
+      const absentDoc: SessionDocument = {
+        schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
+        issuedAt: Date.now(),
+        groups: [],
+        removed: [],
+      };
+      const { dropped } = await reconcileFromDocument(ctx.bob, absentDoc);
+      expect(dropped).toHaveLength(0);
+      expect(ctx.bob.listGroups()).toHaveLength(1); // G retained
+      expect(ctx.bob.getGroup(ctx.bobAlias).state.groupContext.epoch).toBe(
+        ctx.baseEpoch,
+      );
+    } finally {
+      await ctx.server.transport.close();
+    }
+  });
+
+  /**
+   * Tombstones ride the union (spec §10.5): a device that adopted a peer's
+   * tombstone re-publishes it, propagating the deletion — and does NOT
+   * resurrect the group (it carries the tombstone, not a present entry).
+   */
+  test("an adopted tombstone rides the union and does not resurrect the group", async () => {
+    const ctx = await setupSeededPair();
+    try {
+      const tombstone = await ctx.alice.softDeleteGroup("g");
+      const pubA = await publishCurrentSession({
+        session: ctx.alice,
+        mediaStore: ctx.mediaStore,
+        removed: [tombstone],
+      });
+      const docA = await pullSessionDocument({
+        address: pubA.address,
+        mediaStore: ctx.mediaStore,
+        addressToUrl: ctx.addressToUrl,
+        privateKeyHex: ctx.bob.privateKey,
+        ownerPubkey: ctx.bob.stablePubkey,
+      });
+      const { dropped } = await reconcileFromDocument(ctx.bob, docA);
+      expect(dropped).toContainEqual(tombstone);
+      expect(ctx.bob.listGroups()).toHaveLength(0);
+
+      // bob publishes the union: its (now empty) groups + the adopted tombstone.
+      const pubB = await publishCurrentSession({
+        session: ctx.bob,
+        mediaStore: ctx.mediaStore,
+        removed: docA.removed,
+      });
+      const docB = await pullSessionDocument({
+        address: pubB.address,
+        mediaStore: ctx.mediaStore,
+        addressToUrl: ctx.addressToUrl,
+        privateKeyHex: ctx.bob.privateKey,
+        ownerPubkey: ctx.bob.stablePubkey,
+      });
+      expect(docB.removed).toContainEqual(tombstone);
+      expect(docB.groups).toHaveLength(0); // no resurrection
+    } finally {
+      await ctx.server.transport.close();
+    }
+  });
+
+  /**
+   * Resurrection via a sibling Commit (spec §10). A tombstoned group is still
+   * a live MLS membership; a sibling that advances it raises its epoch past
+   * the tombstone, and the §8 rule resurrects the group on the device that
+   * had dropped it. Single committer (bob) keeps the in-process relay off the
+   * shared-npub concurrent-RPC collision.
+   */
+  test("a sibling commit at a higher epoch resurrects a tombstoned group (spec §10)", async () => {
+    const ctx = await setupSeededPair();
+    try {
+      // alice soft-deletes G (drops it locally); bob has NOT reconciled the
+      // tombstone and still has G — bob is the concurrent sibling.
+      await ctx.alice.softDeleteGroup("g");
+      expect(ctx.alice.listGroups()).toHaveLength(0);
+
+      // bob advances G by one epoch and publishes (no tombstone — bob never
+      // saw alice's deletion).
+      await ctx.bob.updateGroupMetadata(ctx.bobAlias, { name: "resurrected" });
+      await ctx.bob.syncGroup(ctx.bobAlias);
+      expect(ctx.bob.getGroup(ctx.bobAlias).state.groupContext.epoch).toBe(
+        ctx.baseEpoch + 1n,
+      );
+
+      const pubB = await publishCurrentSession({
+        session: ctx.bob,
+        mediaStore: ctx.mediaStore,
+      });
+      const docB = await pullSessionDocument({
+        address: pubB.address,
+        mediaStore: ctx.mediaStore,
+        addressToUrl: ctx.addressToUrl,
+        privateKeyHex: ctx.alice.privateKey,
+        ownerPubkey: ctx.alice.stablePubkey,
+      });
+      expect(docB.groups).toHaveLength(1);
+
+      // alice pulls bob's doc: present@(base+1) vs unknown (alice dropped G)
+      // → seed. The group is resurrected at the higher epoch.
+      const { seeded } = await reconcileFromDocument(ctx.alice, docB);
+      expect(seeded).toHaveLength(1);
+      expect(ctx.alice.listGroups()).toHaveLength(1);
+      const aliceAlias = ctx.alice.listGroups()[0]!.alias;
+      expect(ctx.alice.getGroup(aliceAlias).state.groupContext.epoch).toBe(
+        ctx.baseEpoch + 1n,
+      );
+    } finally {
+      await ctx.server.transport.close();
+    }
+  });
+
+  /**
+   * softDeleteGroup (spec §10): drops the local group, returns the tombstone,
+   * and fires the re-publish hook so siblings converge.
+   */
+  test("softDeleteGroup drops the group, returns the tombstone, and fires onLocalStateAdvance", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const fired: string[] = [];
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        onLocalStateAdvance: () => {
+          fired.push("advance");
+        },
+      });
+      sessions.push(alice);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      const group = await alice.createGroup("g", {
+        keyPackageAlias: "kp",
+        metadata: { name: "G" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(fired).toEqual(["advance"]); // createGroup
+
+      const gid = alice.deriveGroupId(group.state);
+      const tombstone = await alice.softDeleteGroup("g");
+      expect(tombstone).toEqual({
+        gid,
+        epoch: Number(group.state.groupContext.epoch),
+      });
+      expect(alice.listGroups()).toHaveLength(0);
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(fired).toEqual(["advance", "advance"]); // softDelete fired the hook
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  /**
+   * End-to-end (spec §6/§11): a device publishes a session document, points the
+   * hardened tip at it, and mints a connection string. A second device of the
+   * same identity bootstraps from the string ALONE — reads the tip, fetches +
+   * verifies the document, seeds the shared leaf — then converges with the
+   * first device over the normal delivery stream. Ties the document layer
+   * (§4–§9) to the tip transport (§6) and the bootstrap flow (§11).
+   */
+  test("a device bootstraps from a connection string and converges (spec §6/§11)", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-e2e-")),
+    );
+    // FileMediaStore url is `media://<sha256>` — treat `media://` as the toy
+    // Blossom server base (production uses https server URLs per §6/§12).
+    const mediaServer = "media://";
+    const urlFromTip = (address: string, servers: string[]) =>
+      `${servers[0]}${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      const group = await alice.createGroup("g", {
+        keyPackageAlias: "kp",
+        metadata: { name: "G" },
+      });
+      const gid = alice.deriveGroupId(group.state);
+
+      // alice publishes its document and points the tip at it, then mints the
+      // connection string.
+      const aliceTip = new NostrTipStore({
+        relayHandler: relayHub.createRelayHandler(),
+        ownerPrivateKey: Buffer.from(alice.privateKey, "hex"),
+        ownerPubkey: alice.stablePubkey,
+      });
+      const pub = await publishCurrentSession({ session: alice, mediaStore });
+      await aliceTip.publishTip({
+        address: pub.address,
+        servers: [mediaServer],
+      });
+      const conn = aliceTip.toConnectionString(["memory://relay"]);
+
+      // bob bootstraps from the connection string alone (same identity).
+      const bob = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(bob);
+      const bobTip = NostrTipStore.fromConnectionString(conn, {
+        relayHandler: relayHub.createRelayHandler(),
+        ownerPrivateKey: Buffer.from(bob.privateKey, "hex"),
+        ownerPubkey: bob.stablePubkey,
+      });
+      const pointer = await bobTip.readTip();
+      expect(pointer).not.toBeNull();
+      expect(pointer!.address).toBe(pub.address);
+
+      const doc = await pullSessionDocument({
+        address: pointer!.address,
+        mediaStore,
+        addressToUrl: (address) => urlFromTip(address, pointer!.servers),
+        privateKeyHex: bob.privateKey,
+        ownerPubkey: bob.stablePubkey,
+      });
+      const { seeded } = await reconcileFromDocument(bob, doc);
+      expect(seeded).toHaveLength(1);
+      const bobAlias = bob.listGroups()[0]!.alias;
+      expect(bob.deriveGroupId(bob.getGroup(bobAlias).state)).toBe(gid);
+
+      // Convergence over the normal delivery stream.
+      await alice.sendMessage("g", "hello from alice");
+      await bob.syncGroup(bobAlias);
+      expect(bob.listMessages(bobAlias).map((m) => m.content)).toContain(
+        "hello from alice",
+      );
     } finally {
       await server.transport.close();
     }

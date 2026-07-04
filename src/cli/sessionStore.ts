@@ -203,6 +203,14 @@ export class CliSessionStore {
     this.groups.set(group.alias, group);
   }
 
+  /** Remove a group from the store (soft-delete / tombstone drop). Watch
+   *  handles and pending operations keyed by alias are the caller's job. */
+  deleteGroup(alias: string): GroupSessionState {
+    const group = this.getGroup(alias);
+    this.groups.delete(alias);
+    return group;
+  }
+
   getGroup(alias: string): GroupSessionState {
     const group = this.groups.get(alias);
 

@@ -70,7 +70,11 @@ import {
   type PendingEpochOperation,
 } from "./pendingEpochOperations.ts";
 import { clientStateDecoder } from "ts-mls";
-import type { ChainStep, SessionGroupEntry } from "./multiDevice.ts";
+import type {
+  ChainStep,
+  SessionGroupEntry,
+  SessionTombstone,
+} from "./multiDevice.ts";
 import {
   MissingLocalKeyPackageForWelcomeError,
   RemovedFromGroupError,
@@ -1053,6 +1057,58 @@ export class CliSession {
     // caller may retry. Spec §10 (concurrent sibling Commits).
     this.store.pendingOperations.delete(local.alias);
     return "fast-forwarded";
+  }
+
+  /**
+   * Multi-device tombstone (spec §8 case 4). Drops a local group whose epoch
+   * is ≤ the tombstone epoch; ignores a stale tombstone (local epoch higher)
+   * or one for a group the device does not have. Soft-delete stops the device
+   * *tracking* a group; it is not an MLS Leave (spec §13).
+   */
+  async applyDocumentTombstone(
+    tombstone: SessionTombstone,
+  ): Promise<"dropped" | "ignored"> {
+    const local = this.listGroups().find(
+      (group) => this.deriveGroupId(group.state) === tombstone.gid,
+    );
+    if (!local) {
+      return "ignored";
+    }
+    if (BigInt(tombstone.epoch) < local.state.groupContext.epoch) {
+      return "ignored"; // stale tombstone (§8 anti-downgrade)
+    }
+    this.store.deleteGroup(local.alias);
+    this.store.pendingOperations.delete(local.alias);
+    if (this.isWatching(local.alias)) {
+      queueMicrotask(() => {
+        void this.unwatchGroup(local.alias).catch(() => undefined);
+      });
+    }
+    return "dropped";
+  }
+
+  /**
+   * Soft-delete a group (spec §8/§10 tombstone). Drops the local group and
+   * returns its `{gid, epoch}` tombstone for the caller to carry in the next
+   * published document's `removed` (per the §10.5 union). Fires the
+   * `onLocalStateAdvance` hook so a client re-publishes and siblings converge.
+   */
+  async softDeleteGroup(groupAlias: string): Promise<SessionTombstone> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      const gid = this.deriveGroupId(group.state);
+      const epoch = Number(group.state.groupContext.epoch);
+      this.store.deleteGroup(groupAlias);
+      this.store.pendingOperations.delete(groupAlias);
+      if (this.isWatching(groupAlias)) {
+        queueMicrotask(() => {
+          void this.unwatchGroup(groupAlias).catch(() => undefined);
+        });
+      }
+      // Spec §10: re-publish hook fires on soft-delete so siblings converge.
+      this.notifyLocalStateAdvance();
+      return { gid, epoch };
+    });
   }
 
   /**

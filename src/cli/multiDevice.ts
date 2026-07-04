@@ -54,11 +54,22 @@ export interface SessionGroupEntry {
   cursor: number;
 }
 
+/**
+ * Tombstone (spec §4 `removed[]`): records that the identity stopped tracking
+ * `gid` when the group was at MLS `epoch`. `epoch` is a JSON number (MLS
+ * epochs are small); compared as `BigInt` against `groupContext.epoch`.
+ */
+export interface SessionTombstone {
+  gid: string;
+  epoch: number;
+}
+
 export interface SessionDocument {
   schemaVersion: typeof MULTI_DEVICE_SCHEMA_VERSION;
   issuedAt: number;
   prev?: string;
   groups: SessionGroupEntry[];
+  removed?: SessionTombstone[];
 }
 
 export class MultiDeviceError extends Error {
@@ -83,6 +94,14 @@ export interface MultiDeviceSessionView {
    * group to a strictly newer epoch, or skip (advisory). Returns the outcome.
    */
   applyDocumentEntry(entry: SessionGroupEntry): Promise<ApplyDocumentOutcome>;
+  /**
+   * Apply one tombstone (spec §8 case 4): drop a local group whose epoch is
+   * ≤ the tombstone epoch; ignore a stale tombstone or one for an unknown
+   * group. Returns "dropped" if a local group was removed, else "ignored".
+   */
+  applyDocumentTombstone(
+    tombstone: SessionTombstone,
+  ): Promise<"dropped" | "ignored">;
 }
 
 export type ApplyDocumentOutcome = "seeded" | "fast-forwarded" | "skipped";
@@ -175,6 +194,7 @@ export function buildSessionDocument(params: {
   groups: GroupSnapshotInput[];
   prev?: string;
   encryptedOutbound: boolean;
+  removed?: SessionTombstone[];
 }): SessionDocument {
   return {
     schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
@@ -188,6 +208,7 @@ export function buildSessionDocument(params: {
       clientState: encodeBase64(encode(clientStateEncoder, group.state)),
       cursor: group.fetchCursor,
     })),
+    removed: params.removed,
   };
 }
 
@@ -206,6 +227,12 @@ export async function publishCurrentSession(params: {
   session: MultiDeviceSessionView;
   mediaStore: MediaStore;
   prev?: string;
+  /**
+   * Tombstones to carry in the published `removed` (spec §10.5 union): the
+   * device's own new tombstones plus any it adopted from the reconciled tip.
+   * The caller composes this; the session does not retain tombstone state.
+   */
+  removed?: SessionTombstone[];
 }): Promise<PublishResult> {
   const { session } = params;
   // Auto-chain `prev` (spec §4): the last address this owner published,
@@ -215,6 +242,7 @@ export async function publishCurrentSession(params: {
   const document = buildSessionDocument({
     encryptedOutbound: session.encryptOutbound,
     prev,
+    removed: params.removed,
     groups: session.listGroups().map((group) => ({
       gid: session.deriveGroupId(group.state),
       state: group.state,
@@ -275,10 +303,14 @@ export async function reconcileFromDocument(
   seeded: SessionGroupEntry[];
   fastForwarded: SessionGroupEntry[];
   skipped: SessionGroupEntry[];
+  dropped: SessionTombstone[];
+  ignored: SessionTombstone[];
 }> {
   const seeded: SessionGroupEntry[] = [];
   const fastForwarded: SessionGroupEntry[] = [];
   const skipped: SessionGroupEntry[] = [];
+  const dropped: SessionTombstone[] = [];
+  const ignored: SessionTombstone[] = [];
 
   for (const entry of document.groups) {
     const outcome = await session.applyDocumentEntry(entry);
@@ -287,7 +319,20 @@ export async function reconcileFromDocument(
     else skipped.push(entry);
   }
 
-  return { seeded, fastForwarded, skipped };
+  // Tombstones are processed AFTER groups so a malformed doc that violates the
+  // §4 XOR rule still resolves removal-wins on ties (§8). For well-formed docs
+  // (XOR) the order is irrelevant. ponytail: no device-local tombstone memory
+  // — a tombstone for an unknown group is carried forward by the caller via
+  // the published union (§10.5); case 7 (refuse to re-seed from a stale peer
+  // that blind-pushes the group as present) is enforced by the §10.5
+  // reconcile-before-push discipline, not by a local denylist.
+  for (const tombstone of document.removed ?? []) {
+    const outcome = await session.applyDocumentTombstone(tombstone);
+    if (outcome === "dropped") dropped.push(tombstone);
+    else ignored.push(tombstone);
+  }
+
+  return { seeded, fastForwarded, skipped, dropped, ignored };
 }
 
 // ---------------------------------------------------------------------------
