@@ -4,9 +4,11 @@ import {
   keyPackageEncoder,
   mlsMessageDecoder,
   mlsMessageEncoder,
+  privateKeyPackageDecoder,
   protocolVersions,
   wireformats,
   type KeyPackage,
+  type PrivateKeyPackage,
   type Welcome,
 } from "ts-mls";
 
@@ -37,6 +39,13 @@ export function decodeKeyPackage(
   label = "key package",
 ): KeyPackage {
   return decodeExact(bytes, keyPackageDecoder, label);
+}
+
+export function decodePrivateKeyPackage(
+  bytes: Uint8Array,
+  label = "private key package",
+): PrivateKeyPackage {
+  return decodeExact(bytes, privateKeyPackageDecoder, label);
 }
 
 export function encodeWelcome(welcome: Welcome): Uint8Array {

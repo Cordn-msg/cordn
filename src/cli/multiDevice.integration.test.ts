@@ -7,16 +7,20 @@ import { Buffer } from "node:buffer";
 import { CliSession } from "./session.ts";
 import { NostrTipStore } from "./nostrTipStore.ts";
 import { FileMediaStore } from "./mediaStore.ts";
+import type { MediaStore } from "./mediaStore.ts";
 import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
 import { PrivateKeySigner } from "@contextvm/sdk";
 import {
-  publishCurrentSession,
-  pullSessionDocument,
-  reconcileFromDocument,
-  walkSessionChain,
+  publishGroupDocument,
+  publishMetaDocument,
+  pullDocument,
+  reconcileGroupDocument,
+  reconcileMetaDocument,
+  walkGroupChain,
   MULTI_DEVICE_SCHEMA_VERSION,
-  type SessionDocument,
+  type GroupDocument,
+  type MetaDocument,
 } from "./multiDevice.ts";
 import { clientStateEncoder, encode } from "ts-mls";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
@@ -32,8 +36,13 @@ import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
  *  - Application messages between siblings converge via the delivery stream.
  *  - A sibling device's Commit CANNOT be ingested via the stream (the shared
  *    leaf's UpdatePath invalidates the receiving device's keys). The committing
- *    device re-publishes; the sibling fast-forwards its ClientState to the
- *    newer epoch from the document.
+ *    device re-publishes that group's document; the sibling fast-forwards its
+ *    ClientState to the newer epoch.
+ *
+ * The redesigned model (per-group documents + one meta document, spec §4) is
+ * exercised throughout: group convergence uses `publishGroupDocument` /
+ * `reconcileGroupDocument`; tombstones and the last-resort key package travel
+ * in the meta document (`publishMetaDocument` / `reconcileMetaDocument`).
  */
 describe("multi-device synchronization", () => {
   const sessions: CliSession[] = [];
@@ -43,6 +52,42 @@ describe("multi-device synchronization", () => {
       sessions.splice(0).map((session) => session.disconnect()),
     );
   });
+
+  /** Pull a group document by address, narrowing the union (spec §4.1). */
+  const pullGroupDoc = async (
+    session: CliSession,
+    address: string,
+    mediaStore: MediaStore,
+    addressToUrl: (address: string) => string,
+  ): Promise<GroupDocument> => {
+    const doc = await pullDocument({
+      address,
+      mediaStore,
+      addressToUrl,
+      privateKeyHex: session.privateKey,
+      ownerPubkey: session.stablePubkey,
+    });
+    if (doc.type !== "group") throw new Error("expected group document");
+    return doc;
+  };
+
+  /** Pull a meta document by address, narrowing the union (spec §4.2). */
+  const pullMetaDoc = async (
+    session: CliSession,
+    address: string,
+    mediaStore: MediaStore,
+    addressToUrl: (address: string) => string,
+  ): Promise<MetaDocument> => {
+    const doc = await pullDocument({
+      address,
+      mediaStore,
+      addressToUrl,
+      privateKeyHex: session.privateKey,
+      ownerPubkey: session.stablePubkey,
+    });
+    if (doc.type !== "meta") throw new Error("expected meta document");
+    return doc;
+  };
 
   /**
    * Scenario A — application messages converge via the stream after a seed.
@@ -78,11 +123,13 @@ describe("multi-device synchronization", () => {
         keyPackageAlias: "kp",
         metadata: { name: "Demo" },
       });
+      const gid = alice.deriveGroupId(alice.getGroup("demo").state);
 
       // Publish BEFORE sending so the seed state precedes the messages.
-      const pub = await publishCurrentSession({
+      const pub = await publishGroupDocument({
         session: alice,
         mediaStore,
+        gid,
       });
       expect(pub.address).toHaveLength(64);
 
@@ -96,26 +143,17 @@ describe("multi-device synchronization", () => {
       expect(device2.stablePubkey).toBe(alice.stablePubkey);
       expect(device2.listGroups()).toHaveLength(0);
 
-      const doc = await pullSessionDocument({
-        address: pub.address,
+      const doc = await pullGroupDoc(
+        device2,
+        pub.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: device2.privateKey,
-        ownerPubkey: device2.stablePubkey,
-      });
-      const { seeded, fastForwarded, skipped } = await reconcileFromDocument(
-        device2,
-        doc,
       );
-      expect(seeded).toHaveLength(1);
-      expect(fastForwarded).toHaveLength(0);
-      expect(skipped).toHaveLength(0);
+      expect(await reconcileGroupDocument(device2, doc)).toBe("seeded");
       const d2alias = device2.listGroups()[0]!.alias;
 
       // Same shared leaf (delivery group id).
-      expect(device2.deriveGroupId(device2.getGroup(d2alias).state)).toBe(
-        alice.deriveGroupId(alice.getGroup("demo").state),
-      );
+      expect(device2.deriveGroupId(device2.getGroup(d2alias).state)).toBe(gid);
 
       // Now alice sends; device 2 receives purely via the stream.
       await alice.sendMessage("demo", "hello");
@@ -124,10 +162,7 @@ describe("multi-device synchronization", () => {
       expect(received.map((m) => m.content)).toEqual(["hello", "world"]);
 
       // Replaying the same document must not re-seed or overwrite (spec §8).
-      const replay = await reconcileFromDocument(device2, doc);
-      expect(replay.seeded).toHaveLength(0);
-      expect(replay.fastForwarded).toHaveLength(0);
-      expect(replay.skipped).toHaveLength(1);
+      expect(await reconcileGroupDocument(device2, doc)).toBe("skipped");
 
       // Shared leaf is bidirectional: device 2 sends, device 1 receives.
       await device2.sendMessage(d2alias, "hi from device2");
@@ -179,9 +214,14 @@ describe("multi-device synchronization", () => {
         keyPackageAlias: "kp",
         metadata: { name: "Original" },
       });
+      const gid = alice.deriveGroupId(group.state);
       const baseEpoch = group.state.groupContext.epoch;
 
-      const pub0 = await publishCurrentSession({ session: alice, mediaStore });
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
       const device2 = new CliSession({
         privateKey: alice.privateKey,
         serverPubkey,
@@ -189,14 +229,13 @@ describe("multi-device synchronization", () => {
         mediaStore,
       });
       sessions.push(device2);
-      const doc0 = await pullSessionDocument({
-        address: pub0.address,
+      const doc0 = await pullGroupDoc(
+        device2,
+        pub0.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: device2.privateKey,
-        ownerPubkey: device2.stablePubkey,
-      });
-      await reconcileFromDocument(device2, doc0);
+      );
+      await reconcileGroupDocument(device2, doc0);
       const d2alias = device2.listGroups()[0]!.alias;
       expect(device2.getGroup(d2alias).state.groupContext.epoch).toBe(
         baseEpoch,
@@ -208,22 +247,22 @@ describe("multi-device synchronization", () => {
       // Commit is never fetched back over the stream by device 2).
       await alice.updateGroupMetadata("g", { name: "FromAlice" });
       await alice.syncGroup("g");
-      const pub1 = await publishCurrentSession({ session: alice, mediaStore });
+      const pub1 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
 
       // Device 2 fast-forwards from the new document (no stream sync).
-      const doc1 = await pullSessionDocument({
-        address: pub1.address,
+      const doc1 = await pullGroupDoc(
+        device2,
+        pub1.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: device2.privateKey,
-        ownerPubkey: device2.stablePubkey,
-      });
-      const { fastForwarded, skipped } = await reconcileFromDocument(
-        device2,
-        doc1,
       );
-      expect(fastForwarded).toHaveLength(1);
-      expect(skipped).toHaveLength(0);
+      expect(await reconcileGroupDocument(device2, doc1)).toBe(
+        "fast-forwarded",
+      );
 
       const aliceState = alice.getGroup("g").state;
       const d2State = device2.getGroup(d2alias).state;
@@ -241,9 +280,7 @@ describe("multi-device synchronization", () => {
 
       // A document at the same or older epoch must NOT fast-forward (rollback
       // defense, spec §8): replaying the old document is a no-op.
-      const stale = await reconcileFromDocument(device2, doc0);
-      expect(stale.fastForwarded).toHaveLength(0);
-      expect(stale.skipped).toHaveLength(1);
+      expect(await reconcileGroupDocument(device2, doc0)).toBe("skipped");
 
       // Post-commit application messages still converge via the stream.
       await alice.sendMessage("g", "post-commit");
@@ -301,10 +338,15 @@ describe("multi-device synchronization", () => {
         keyPackageAlias: "kp",
         metadata: { name: "Original" },
       });
+      const gid = alice.deriveGroupId(group.state);
       const baseEpoch = group.state.groupContext.epoch;
 
       // Seed device 2 at the base epoch.
-      const pub0 = await publishCurrentSession({ session: alice, mediaStore });
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
       const device2 = new CliSession({
         privateKey: alice.privateKey,
         serverPubkey,
@@ -312,14 +354,13 @@ describe("multi-device synchronization", () => {
         mediaStore,
       });
       sessions.push(device2);
-      const doc0 = await pullSessionDocument({
-        address: pub0.address,
+      const doc0 = await pullGroupDoc(
+        device2,
+        pub0.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: device2.privateKey,
-        ownerPubkey: device2.stablePubkey,
-      });
-      await reconcileFromDocument(device2, doc0);
+      );
+      await reconcileGroupDocument(device2, doc0);
       const d2alias = device2.listGroups()[0]!.alias;
       expect(device2.getGroup(d2alias).state.groupContext.epoch).toBe(
         baseEpoch,
@@ -338,16 +379,20 @@ describe("multi-device synchronization", () => {
       expect(d2group.state.groupContext.epoch).toBe(baseEpoch); // unchanged
 
       // Convergence via the document fast-forward.
-      const pub1 = await publishCurrentSession({ session: alice, mediaStore });
-      const doc1 = await pullSessionDocument({
-        address: pub1.address,
+      const pub1 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
+      const doc1 = await pullGroupDoc(
+        device2,
+        pub1.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: device2.privateKey,
-        ownerPubkey: device2.stablePubkey,
-      });
-      const { fastForwarded } = await reconcileFromDocument(device2, doc1);
-      expect(fastForwarded).toHaveLength(1);
+      );
+      expect(await reconcileGroupDocument(device2, doc1)).toBe(
+        "fast-forwarded",
+      );
       expect(device2.getGroup(d2alias).state.groupContext.epoch).toBe(
         baseEpoch + 1n,
       );
@@ -409,10 +454,11 @@ describe("multi-device synchronization", () => {
   /**
    * Scenario E — multi-epoch catch-up (recovery from being offline). A device
    * seeds at epoch 0, then stays offline while the committer advances several
-   * epochs. Pulling the latest document MUST fast-forward across the whole gap
-   * in one reconcile (not +1 at a time), land on the correct state and cursor,
-   * and leave the shared leaf usable for messages. Existing scenarios only jump
-   * a single epoch; this proves the catch-up path scales to a real gap.
+   * epochs. Pulling the latest group document MUST fast-forward across the
+   * whole gap in one reconcile (not +1 at a time), land on the correct state
+   * and cursor, and leave the shared leaf usable for messages. Existing
+   * scenarios only jump a single epoch; this proves the catch-up path scales
+   * to a real gap.
    */
   test("an offline device fast-forwards across multiple epochs in one reconcile", async () => {
     const relayHub = new MockRelayHub();
@@ -439,10 +485,15 @@ describe("multi-device synchronization", () => {
         keyPackageAlias: "kp",
         metadata: { name: "E0" },
       });
+      const gid = alice.deriveGroupId(group.state);
       const baseEpoch = group.state.groupContext.epoch;
 
       // Device 2 seeds at the base epoch, then goes "offline" (no stream sync).
-      const pub0 = await publishCurrentSession({ session: alice, mediaStore });
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
       const device2 = new CliSession({
         privateKey: alice.privateKey,
         serverPubkey,
@@ -450,14 +501,13 @@ describe("multi-device synchronization", () => {
         mediaStore,
       });
       sessions.push(device2);
-      const doc0 = await pullSessionDocument({
-        address: pub0.address,
+      const doc0 = await pullGroupDoc(
+        device2,
+        pub0.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: device2.privateKey,
-        ownerPubkey: device2.stablePubkey,
-      });
-      await reconcileFromDocument(device2, doc0);
+      );
+      await reconcileGroupDocument(device2, doc0);
       const d2alias = device2.listGroups()[0]!.alias;
       expect(device2.getGroup(d2alias).state.groupContext.epoch).toBe(
         baseEpoch,
@@ -471,21 +521,25 @@ describe("multi-device synchronization", () => {
       expect(alice.getGroup("g").state.groupContext.epoch).toBe(baseEpoch + 3n);
 
       // One reconcile jumps the whole gap.
-      const pub3 = await publishCurrentSession({ session: alice, mediaStore });
-      const doc3 = await pullSessionDocument({
-        address: pub3.address,
+      const pub3 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
+      const doc3 = await pullGroupDoc(
+        device2,
+        pub3.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: device2.privateKey,
-        ownerPubkey: device2.stablePubkey,
-      });
-      const { fastForwarded } = await reconcileFromDocument(device2, doc3);
-      expect(fastForwarded).toHaveLength(1);
+      );
+      expect(await reconcileGroupDocument(device2, doc3)).toBe(
+        "fast-forwarded",
+      );
       const d2 = device2.getGroup(d2alias);
       expect(d2.state.groupContext.epoch).toBe(baseEpoch + 3n);
       expect(getCordnGroupMetadataExtension(d2.state)?.name).toBe("E3");
       // Cursor advanced to the writer's progression, not stuck at the seed.
-      expect(d2.fetchCursor).toBeGreaterThanOrEqual(doc3.groups[0]!.cursor);
+      expect(d2.fetchCursor).toBeGreaterThanOrEqual(doc3.cursor);
 
       // The adopted state is usable: the shared leaf still round-trips messages.
       await alice.sendMessage("g", "after-catchup");
@@ -528,13 +582,18 @@ describe("multi-device synchronization", () => {
         keyPackageAlias: "kp",
         metadata: { name: "G" },
       });
+      const gid = alice.deriveGroupId(alice.getGroup("g").state);
 
-      const pub = await publishCurrentSession({ session: alice, mediaStore });
+      const pub = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
 
       // Advertise a bogus address but serve the real blob: the store returns
       // the sealed document, whose sha256 does not match the bogus address.
       await expect(
-        pullSessionDocument({
+        pullDocument({
           address: "0".repeat(64),
           mediaStore,
           addressToUrl: () => pub.url,
@@ -595,17 +654,10 @@ describe("multi-device synchronization", () => {
         sessions.push(d);
         return d;
       };
-      const pull = async (d: CliSession, address: string) =>
-        reconcileFromDocument(
-          d,
-          await pullSessionDocument({
-            address,
-            mediaStore,
-            addressToUrl,
-            privateKeyHex: d.privateKey,
-            ownerPubkey: d.stablePubkey,
-          }),
-        );
+      const pull = async (d: CliSession, address: string) => {
+        const doc = await pullGroupDoc(d, address, mediaStore, addressToUrl);
+        return reconcileGroupDocument(d, doc);
+      };
       const epochOf = (d: CliSession, alias: string) =>
         d.getGroup(alias).state.groupContext.epoch;
       const metaName = (d: CliSession, alias: string) =>
@@ -614,14 +666,16 @@ describe("multi-device synchronization", () => {
         await alice.updateGroupMetadata("g", { name });
         await alice.syncGroup("g");
       };
-      const publish = () =>
-        publishCurrentSession({ session: alice, mediaStore });
 
       const group = await alice.createGroup("g", {
         keyPackageAlias: "kp",
         metadata: { name: "c0" },
       });
+      const gid = alice.deriveGroupId(group.state);
       const e0 = group.state.groupContext.epoch;
+      const publish = () =>
+        publishGroupDocument({ session: alice, mediaStore, gid });
+
       const b = mkDevice();
       const c = mkDevice();
       const dd = mkDevice();
@@ -692,11 +746,11 @@ describe("multi-device synchronization", () => {
    * Scenario G — chained catch-up (spec/applications/multi-device.md §8.5).
    *
    * A device offline across two sibling-commit epochs recovers the
-   * application messages sent in BOTH epochs by walking the `prev` chain and
-   * decrypting each epoch's messages with that epoch's ClientState. A single
-   * fast-forward to the tip would adopt a cursor past the first epoch's
-   * messages and lose them; the chain is what makes offline catch-up lossless
-   * up to the first epoch the chain cannot cover.
+   * application messages sent in BOTH epochs by walking the per-group `prev`
+   * chain and decrypting each epoch's messages with that epoch's ClientState.
+   * A single fast-forward to the tip would adopt a cursor past the first
+   * epoch's messages and lose them; the chain is what makes offline catch-up
+   * lossless up to the first epoch the chain cannot cover.
    */
   test("chained catch-up recovers messages across sibling-commit epochs (spec §8.5)", async () => {
     const relayHub = new MockRelayHub();
@@ -723,9 +777,14 @@ describe("multi-device synchronization", () => {
         keyPackageAlias: "kp",
         metadata: { name: "G" },
       });
+      const gid = alice.deriveGroupId(alice.getGroup("g").state);
 
-      // D0: epoch 0. `prev` auto-populates from here (spec §4).
-      const pub0 = await publishCurrentSession({ session: alice, mediaStore });
+      // D0: epoch 0. `prev` auto-populates from here (spec §4.1).
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
 
       // bob seeds at epoch 0, then stays "offline" (no further sync) while
       // alice advances the group.
@@ -736,14 +795,13 @@ describe("multi-device synchronization", () => {
         mediaStore,
       });
       sessions.push(bob);
-      const doc0 = await pullSessionDocument({
-        address: pub0.address,
+      const doc0 = await pullGroupDoc(
+        bob,
+        pub0.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: bob.privateKey,
-        ownerPubkey: bob.stablePubkey,
-      });
-      await reconcileFromDocument(bob, doc0);
+      );
+      await reconcileGroupDocument(bob, doc0);
       const bobAlias = bob.listGroups()[0]!.alias;
       const groupId = bob.deriveGroupId(bob.getGroup(bobAlias).state);
       expect(bob.getGroup(bobAlias).state.groupContext.epoch).toBe(0n);
@@ -752,26 +810,33 @@ describe("multi-device synchronization", () => {
       // and sending one message into each epoch. Chain: D2 <- D1 <- D0.
       await alice.updateGroupMetadata("g", { name: "v1" });
       await alice.syncGroup("g");
-      const pub1 = await publishCurrentSession({ session: alice, mediaStore });
+      const pub1 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
       await alice.sendMessage("g", "m0"); // epoch 1
 
       await alice.updateGroupMetadata("g", { name: "v2" });
       await alice.syncGroup("g");
-      const pub2 = await publishCurrentSession({ session: alice, mediaStore });
+      const pub2 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
       await alice.sendMessage("g", "m1"); // epoch 2
 
-      // Auto-chain: D2.prev == D1.address (spec §4 `prev` auto-populate).
-      const doc2 = await pullSessionDocument({
-        address: pub2.address,
+      // Auto-chain: D2.prev == D1.address (spec §4.1 `prev` auto-populate).
+      const doc2 = await pullGroupDoc(
+        bob,
+        pub2.address,
         mediaStore,
         addressToUrl,
-        privateKeyHex: bob.privateKey,
-        ownerPubkey: bob.stablePubkey,
-      });
+      );
       expect(doc2.prev).toBe(pub1.address);
 
       // Walk the chain back from the tip: one gen-0 ClientState per epoch > 0.
-      const chain = await walkSessionChain({
+      const chain = await walkGroupChain({
         tipAddress: pub2.address,
         groupId,
         localEpoch: 0n,
@@ -794,8 +859,8 @@ describe("multi-device synchronization", () => {
 
   // -------------------------------------------------------------------------
   // Tombstones (group removal sync), spec/applications/multi-device.md §8/§10.
-  // No device-local tombstone memory: the document's `removed` array is the
-  // authority, and §10.5 reconcile-before-push propagates deletions via the
+  // No device-local tombstone memory: the meta document's `removed` array is
+  // the authority, and §10.5 reconcile-before-push propagates deletions via the
   // published union. These tests pin that model.
   // -------------------------------------------------------------------------
 
@@ -835,15 +900,18 @@ describe("multi-device synchronization", () => {
       mediaStore,
     });
     sessions.push(bob);
-    const pub0 = await publishCurrentSession({ session: alice, mediaStore });
-    const doc0 = await pullSessionDocument({
-      address: pub0.address,
+    const pub0 = await publishGroupDocument({
+      session: alice,
+      mediaStore,
+      gid,
+    });
+    const doc0 = await pullGroupDoc(
+      bob,
+      pub0.address,
       mediaStore,
       addressToUrl,
-      privateKeyHex: bob.privateKey,
-      ownerPubkey: bob.stablePubkey,
-    });
-    await reconcileFromDocument(bob, doc0);
+    );
+    await reconcileGroupDocument(bob, doc0);
     const bobAlias = bob.listGroups()[0]!.alias;
 
     return {
@@ -858,28 +926,29 @@ describe("multi-device synchronization", () => {
     };
   }
 
-  /** Case 4 (spec §8): a tombstone drops the local group on reconcile. */
+  /** Case 4 (spec §8): a tombstone in the meta document drops the local group. */
   test("a tombstone drops the local group on reconcile (spec §8 case 4)", async () => {
     const ctx = await setupSeededPair();
     try {
       const tombstone = await ctx.alice.softDeleteGroup("g");
       expect(tombstone.gid).toBe(ctx.gid);
 
-      const pub = await publishCurrentSession({
+      // Soft-delete removes the group from the tip's live list and records the
+      // tombstone in the meta document (spec §4.3 XOR invariant).
+      const pub = await publishMetaDocument({
         session: ctx.alice,
         mediaStore: ctx.mediaStore,
         removed: [tombstone],
       });
-      const doc = await pullSessionDocument({
-        address: pub.address,
-        mediaStore: ctx.mediaStore,
-        addressToUrl: ctx.addressToUrl,
-        privateKeyHex: ctx.bob.privateKey,
-        ownerPubkey: ctx.bob.stablePubkey,
-      });
+      const doc = await pullMetaDoc(
+        ctx.bob,
+        pub.address,
+        ctx.mediaStore,
+        ctx.addressToUrl,
+      );
       expect(doc.removed).toContainEqual(tombstone);
 
-      const { dropped, ignored } = await reconcileFromDocument(ctx.bob, doc);
+      const { dropped, ignored } = await reconcileMetaDocument(ctx.bob, doc);
       expect(dropped).toContainEqual(tombstone);
       expect(ignored).toHaveLength(0);
       expect(ctx.bob.listGroups()).toHaveLength(0);
@@ -899,14 +968,14 @@ describe("multi-device synchronization", () => {
         ctx.baseEpoch + 1n,
       );
 
-      // A document carrying a stale tombstone at the base epoch.
-      const staleDoc: SessionDocument = {
+      // A meta document carrying a stale tombstone at the base epoch.
+      const staleDoc: MetaDocument = {
         schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
+        type: "meta",
         issuedAt: Date.now(),
-        groups: [],
         removed: [{ gid: ctx.gid, epoch: Number(ctx.baseEpoch) }],
       };
-      const { dropped, ignored } = await reconcileFromDocument(
+      const { dropped, ignored } = await reconcileMetaDocument(
         ctx.bob,
         staleDoc,
       );
@@ -921,17 +990,17 @@ describe("multi-device synchronization", () => {
     }
   });
 
-  /** Absence from both arrays is not removal (spec §8). */
-  test("a group absent from the document is not removed (absence != removal)", async () => {
+  /** Absence from `removed` is not removal (spec §8). */
+  test("a group absent from the meta document is not removed (absence != removal)", async () => {
     const ctx = await setupSeededPair();
     try {
-      const absentDoc: SessionDocument = {
+      const absentDoc: MetaDocument = {
         schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
+        type: "meta",
         issuedAt: Date.now(),
-        groups: [],
         removed: [],
       };
-      const { dropped } = await reconcileFromDocument(ctx.bob, absentDoc);
+      const { dropped } = await reconcileMetaDocument(ctx.bob, absentDoc);
       expect(dropped).toHaveLength(0);
       expect(ctx.bob.listGroups()).toHaveLength(1); // G retained
       expect(ctx.bob.getGroup(ctx.bobAlias).state.groupContext.epoch).toBe(
@@ -951,37 +1020,35 @@ describe("multi-device synchronization", () => {
     const ctx = await setupSeededPair();
     try {
       const tombstone = await ctx.alice.softDeleteGroup("g");
-      const pubA = await publishCurrentSession({
+      const pubA = await publishMetaDocument({
         session: ctx.alice,
         mediaStore: ctx.mediaStore,
         removed: [tombstone],
       });
-      const docA = await pullSessionDocument({
-        address: pubA.address,
-        mediaStore: ctx.mediaStore,
-        addressToUrl: ctx.addressToUrl,
-        privateKeyHex: ctx.bob.privateKey,
-        ownerPubkey: ctx.bob.stablePubkey,
-      });
-      const { dropped } = await reconcileFromDocument(ctx.bob, docA);
+      const docA = await pullMetaDoc(
+        ctx.bob,
+        pubA.address,
+        ctx.mediaStore,
+        ctx.addressToUrl,
+      );
+      const { dropped } = await reconcileMetaDocument(ctx.bob, docA);
       expect(dropped).toContainEqual(tombstone);
       expect(ctx.bob.listGroups()).toHaveLength(0);
 
-      // bob publishes the union: its (now empty) groups + the adopted tombstone.
-      const pubB = await publishCurrentSession({
+      // bob re-publishes the union: the adopted tombstone (no group document —
+      // bob holds no live group, so there is nothing to resurrect with).
+      const pubB = await publishMetaDocument({
         session: ctx.bob,
         mediaStore: ctx.mediaStore,
         removed: docA.removed,
       });
-      const docB = await pullSessionDocument({
-        address: pubB.address,
-        mediaStore: ctx.mediaStore,
-        addressToUrl: ctx.addressToUrl,
-        privateKeyHex: ctx.bob.privateKey,
-        ownerPubkey: ctx.bob.stablePubkey,
-      });
+      const docB = await pullMetaDoc(
+        ctx.bob,
+        pubB.address,
+        ctx.mediaStore,
+        ctx.addressToUrl,
+      );
       expect(docB.removed).toContainEqual(tombstone);
-      expect(docB.groups).toHaveLength(0); // no resurrection
     } finally {
       await ctx.server.transport.close();
     }
@@ -1002,31 +1069,30 @@ describe("multi-device synchronization", () => {
       await ctx.alice.softDeleteGroup("g");
       expect(ctx.alice.listGroups()).toHaveLength(0);
 
-      // bob advances G by one epoch and publishes (no tombstone — bob never
-      // saw alice's deletion).
+      // bob advances G by one epoch and publishes a group document (no
+      // tombstone — bob never saw alice's deletion).
       await ctx.bob.updateGroupMetadata(ctx.bobAlias, { name: "resurrected" });
       await ctx.bob.syncGroup(ctx.bobAlias);
       expect(ctx.bob.getGroup(ctx.bobAlias).state.groupContext.epoch).toBe(
         ctx.baseEpoch + 1n,
       );
 
-      const pubB = await publishCurrentSession({
+      const pubB = await publishGroupDocument({
         session: ctx.bob,
         mediaStore: ctx.mediaStore,
+        gid: ctx.gid,
       });
-      const docB = await pullSessionDocument({
-        address: pubB.address,
-        mediaStore: ctx.mediaStore,
-        addressToUrl: ctx.addressToUrl,
-        privateKeyHex: ctx.alice.privateKey,
-        ownerPubkey: ctx.alice.stablePubkey,
-      });
-      expect(docB.groups).toHaveLength(1);
+      const docB = await pullGroupDoc(
+        ctx.alice,
+        pubB.address,
+        ctx.mediaStore,
+        ctx.addressToUrl,
+      );
+      expect(docB.gid).toBe(ctx.gid);
 
       // alice pulls bob's doc: present@(base+1) vs unknown (alice dropped G)
       // → seed. The group is resurrected at the higher epoch.
-      const { seeded } = await reconcileFromDocument(ctx.alice, docB);
-      expect(seeded).toHaveLength(1);
+      expect(await reconcileGroupDocument(ctx.alice, docB)).toBe("seeded");
       expect(ctx.alice.listGroups()).toHaveLength(1);
       const aliceAlias = ctx.alice.listGroups()[0]!.alias;
       expect(ctx.alice.getGroup(aliceAlias).state.groupContext.epoch).toBe(
@@ -1083,12 +1149,86 @@ describe("multi-device synchronization", () => {
   });
 
   /**
-   * End-to-end (spec §6/§11): a device publishes a session document, points the
-   * hardened tip at it, and mints a connection string. A second device of the
-   * same identity bootstraps from the string ALONE — reads the tip, fetches +
-   * verifies the document, seeds the shared leaf — then converges with the
-   * first device over the normal delivery stream. Ties the document layer
-   * (§4–§9) to the tip transport (§6) and the bootstrap flow (§11).
+   * The meta document replicates the account's last-resort key package (spec
+   * §4.2/§11.5). alice generates a last-resort key package and publishes a
+   * meta document; bob (same identity, no key package) loads it from the meta
+   * document and can then resolve a Welcome built against it. The TLS
+   * round-trip (encode → seal → decrypt → decode) preserves the package.
+   */
+  test("the meta document replicates the last-resort key package (spec §11.5)", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-kp-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice);
+      const aliceKp = await alice.generateKeyPackage("lr", {
+        lastResort: true,
+        localOnly: true,
+      });
+      expect(aliceKp.isLastResort).toBe(true);
+
+      // alice publishes a meta document carrying its last-resort key package.
+      const pub = await publishMetaDocument({
+        session: alice,
+        mediaStore,
+      });
+      expect(pub.address).toHaveLength(64);
+
+      // bob (same identity) holds no key package yet.
+      const bob = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(bob);
+      expect(bob.listKeyPackages()).toHaveLength(0);
+
+      const doc = await pullMetaDoc(bob, pub.address, mediaStore, addressToUrl);
+      expect(doc.lastResortKeyPackage?.keyPackage).toBe(
+        aliceKp.keyPackageBase64,
+      );
+
+      const { keyPackageLoaded } = await reconcileMetaDocument(bob, doc);
+      expect(keyPackageLoaded).toBe(true);
+
+      // bob now holds the replicated last-resort key package, and re-exposing
+      // it (idempotency) does not duplicate.
+      const bobKps = bob.listKeyPackages();
+      expect(bobKps).toHaveLength(1);
+      expect(bobKps[0]!.isLastResort).toBe(true);
+      expect(bobKps[0]!.keyPackageBase64).toBe(aliceKp.keyPackageBase64);
+
+      const second = await reconcileMetaDocument(bob, doc);
+      expect(second.keyPackageLoaded).toBe(false); // already held
+      expect(bob.listKeyPackages()).toHaveLength(1);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  /**
+   * End-to-end (spec §6/§11): a device publishes a group document, points the
+   * hardened tip at it (one typed `x` tag per live group + the meta doc), and
+   * mints a connection string. A second device of the same identity bootstraps
+   * from the string ALONE — reads the tip, fetches + verifies the document,
+   * seeds the shared leaf — then converges with the first device over the
+   * normal delivery stream. Ties the document layer (§4–§9) to the tip
+   * transport (§6) and the bootstrap flow (§11).
    */
   test("a device bootstraps from a connection string and converges (spec §6/§11)", async () => {
     const relayHub = new MockRelayHub();
@@ -1120,16 +1260,20 @@ describe("multi-device synchronization", () => {
       });
       const gid = alice.deriveGroupId(group.state);
 
-      // alice publishes its document and points the tip at it, then mints the
-      // connection string.
+      // alice publishes its group document and points the tip at it (one
+      // group `x` tag), then mints the connection string.
       const aliceTip = new NostrTipStore({
         relayHandler: relayHub.createRelayHandler(),
         ownerPrivateKey: Buffer.from(alice.privateKey, "hex"),
         ownerPubkey: alice.stablePubkey,
       });
-      const pub = await publishCurrentSession({ session: alice, mediaStore });
+      const pub = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
       await aliceTip.publishTip({
-        address: pub.address,
+        groups: [{ address: pub.address, gid }],
         servers: [mediaServer],
       });
       const conn = aliceTip.toConnectionString(["memory://relay"]);
@@ -1149,17 +1293,15 @@ describe("multi-device synchronization", () => {
       });
       const pointer = await bobTip.readTip();
       expect(pointer).not.toBeNull();
-      expect(pointer!.address).toBe(pub.address);
+      expect(pointer!.groups).toHaveLength(1);
+      expect(pointer!.groups[0]!.address).toBe(pub.address);
+      expect(pointer!.groups[0]!.gid).toBe(gid);
 
-      const doc = await pullSessionDocument({
-        address: pointer!.address,
-        mediaStore,
-        addressToUrl: (address) => urlFromTip(address, pointer!.servers),
-        privateKeyHex: bob.privateKey,
-        ownerPubkey: bob.stablePubkey,
-      });
-      const { seeded } = await reconcileFromDocument(bob, doc);
-      expect(seeded).toHaveLength(1);
+      const groupAddress = pointer!.groups[0]!.address;
+      const doc = await pullGroupDoc(bob, groupAddress, mediaStore, (address) =>
+        urlFromTip(address, pointer!.servers),
+      );
+      expect(await reconcileGroupDocument(bob, doc)).toBe("seeded");
       const bobAlias = bob.listGroups()[0]!.alias;
       expect(bob.deriveGroupId(bob.getGroup(bobAlias).state)).toBe(gid);
 

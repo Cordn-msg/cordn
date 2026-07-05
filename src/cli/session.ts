@@ -23,7 +23,11 @@ import {
   type MediaMetadata,
 } from "./utils/mediaMessages.ts";
 import type { MediaStore } from "./mediaStore.ts";
-import { decodeBase64, encodeBase64 } from "./utils/mlsBase.ts";
+import {
+  decodeBase64,
+  encodeBase64,
+  getCliCiphersuite,
+} from "./utils/mlsBase.ts";
 import {
   createPrivateKeyHex,
   deriveStablePubkey,
@@ -69,11 +73,18 @@ import {
   rejectPendingEpochOperations,
   type PendingEpochOperation,
 } from "./pendingEpochOperations.ts";
-import { clientStateDecoder } from "ts-mls";
+import {
+  clientStateDecoder,
+  encode,
+  makeKeyPackageRef,
+  privateKeyPackageEncoder,
+} from "ts-mls";
+import { decodeKeyPackage, decodePrivateKeyPackage } from "../mlsCodec.ts";
 import type {
   ChainStep,
-  SessionGroupEntry,
-  SessionTombstone,
+  GroupDocument,
+  LastResortKeyPackageEntry,
+  Tombstone,
 } from "./multiDevice.ts";
 import {
   MissingLocalKeyPackageForWelcomeError,
@@ -990,7 +1001,7 @@ export class CliSession {
    * the device does not already have locally.
    */
   async seedGroupFromEntry(
-    entry: SessionGroupEntry,
+    entry: GroupDocument,
     alias?: string,
   ): Promise<GroupSessionState> {
     const resolvedAlias = alias ?? `group-${this.store.groupCount + 1}`;
@@ -1028,7 +1039,7 @@ export class CliSession {
    * serialized ClientState carries the new private keys (spec §10).
    */
   async applyDocumentEntry(
-    entry: SessionGroupEntry,
+    entry: GroupDocument,
   ): Promise<"seeded" | "fast-forwarded" | "skipped"> {
     const local = this.listGroups().find(
       (group) => this.deriveGroupId(group.state) === entry.gid,
@@ -1069,7 +1080,7 @@ export class CliSession {
    * *tracking* a group; it is not an MLS Leave (spec §13).
    */
   async applyDocumentTombstone(
-    tombstone: SessionTombstone,
+    tombstone: Tombstone,
   ): Promise<"dropped" | "ignored"> {
     const local = this.listGroups().find(
       (group) => this.deriveGroupId(group.state) === tombstone.gid,
@@ -1096,7 +1107,7 @@ export class CliSession {
    * published document's `removed` (per the §10.5 union). Fires the
    * `onLocalStateAdvance` hook so a client re-publishes and siblings converge.
    */
-  async softDeleteGroup(groupAlias: string): Promise<SessionTombstone> {
+  async softDeleteGroup(groupAlias: string): Promise<Tombstone> {
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
       const gid = this.deriveGroupId(group.state);
@@ -1112,6 +1123,56 @@ export class CliSession {
       this.notifyLocalStateAdvance();
       return { gid, epoch };
     });
+  }
+
+  /**
+   * The account's currently-published last-resort key package, for the meta
+   * document (spec §4.2/§11.5). Returns undefined when the device holds none.
+   * Both fields are the base64 TLS wire form (RFC 9420 §3).
+   */
+  getLastResortKeyPackage(): LastResortKeyPackageEntry | undefined {
+    const stored = this.store
+      .listKeyPackages()
+      .find((entry) => entry.isLastResort);
+    if (!stored) return undefined;
+    return {
+      keyPackage: stored.keyPackageBase64,
+      privateKeyPackage: encodeBase64(
+        encode(privateKeyPackageEncoder, stored.privateKeyPackage),
+      ),
+    };
+  }
+
+  /**
+   * Load the account's last-resort key package from a meta document (spec
+   * §11.5) so this device can process a Welcome built against it. Idempotent:
+   * a key package already held (by ref) is not re-added. Returns true if newly
+   * loaded, false if it was already present.
+   */
+  async loadLastResortKeyPackage(
+    entry: LastResortKeyPackageEntry,
+  ): Promise<boolean> {
+    const keyPackage = decodeKeyPackage(decodeBase64(entry.keyPackage));
+    const cipherSuite = await getCliCiphersuite();
+    const keyPackageRef = bytesToHex(
+      await makeKeyPackageRef(keyPackage, cipherSuite.hash),
+    );
+    if (this.store.findKeyPackageByRef(keyPackageRef)) {
+      return false; // already held
+    }
+    const privateKeyPackage = decodePrivateKeyPackage(
+      decodeBase64(entry.privateKeyPackage),
+    );
+    this.store.addKeyPackage({
+      alias: `kp-${this.store.keyPackageCount + 1}`,
+      keyPackage,
+      privateKeyPackage,
+      keyPackageRef,
+      keyPackageBase64: entry.keyPackage,
+      isLastResort: true,
+      consumed: false,
+    });
+    return true;
   }
 
   /**

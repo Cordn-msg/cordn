@@ -18,6 +18,8 @@ import { NostrTipStore } from "./nostrTipStore.ts";
  */
 describe("NostrTipStore (hardened tip transport)", () => {
   const ADDRESS = "a".repeat(64);
+  const META_ADDRESS = "b".repeat(64);
+  const GID = "g".repeat(16);
   const SERVERS = ["https://blossom.example.tld", "https://cdn.other.tld"];
 
   /** A fresh owner keypair + a store on a new relay hub. */
@@ -35,11 +37,16 @@ describe("NostrTipStore (hardened tip transport)", () => {
     return { relayHub, ownerPrivateKey, ownerPubkey, store };
   }
 
-  test("publish then read round-trips the document pointer", async () => {
+  test("publish then read round-trips group and meta pointers", async () => {
     const { store } = setup();
-    await store.publishTip({ address: ADDRESS, servers: SERVERS });
+    await store.publishTip({
+      groups: [{ address: ADDRESS, gid: GID }],
+      metaAddress: META_ADDRESS,
+      servers: SERVERS,
+    });
     expect(await store.readTip()).toEqual({
-      address: ADDRESS,
+      groups: [{ address: ADDRESS, gid: GID }],
+      metaAddress: META_ADDRESS,
       servers: SERVERS,
     });
   });
@@ -52,11 +59,16 @@ describe("NostrTipStore (hardened tip transport)", () => {
   /**
    * The load-bearing privacy property (spec §6): the owner npub never appears
    * in the clear on the relay. Only the ephemeral pubkey is relayed; the owner
-   * npub lives only inside the NIP-44 seal.
+   * npub lives only inside the NIP-44 seal. The typed `x` tags (document
+   * inventory) live INSIDE that seal, never in the public outer event.
    */
   test("the owner npub never appears in any relayed event", async () => {
     const { relayHub, ownerPubkey, store } = setup();
-    await store.publishTip({ address: ADDRESS, servers: SERVERS });
+    await store.publishTip({
+      groups: [{ address: ADDRESS, gid: GID }],
+      metaAddress: META_ADDRESS,
+      servers: SERVERS,
+    });
 
     const events = relayHub.getEvents();
     expect(events).toHaveLength(1);
@@ -75,8 +87,14 @@ describe("NostrTipStore (hardened tip transport)", () => {
    */
   test("republish supersedes: stable d, advancing created_at, latest wins", async () => {
     const { relayHub, store } = setup();
-    await store.publishTip({ address: "1".repeat(64), servers: ["https://a"] });
-    await store.publishTip({ address: "2".repeat(64), servers: ["https://b"] });
+    await store.publishTip({
+      groups: [{ address: "1".repeat(64), gid: GID }],
+      servers: ["https://a"],
+    });
+    await store.publishTip({
+      groups: [{ address: "2".repeat(64), gid: GID }],
+      servers: ["https://b"],
+    });
 
     const events = relayHub.getEvents();
     expect(events).toHaveLength(2);
@@ -87,7 +105,8 @@ describe("NostrTipStore (hardened tip transport)", () => {
     expect(events[1]!.created_at).toBeGreaterThan(events[0]!.created_at);
 
     expect(await store.readTip()).toEqual({
-      address: "2".repeat(64),
+      groups: [{ address: "2".repeat(64), gid: GID }],
+      metaAddress: undefined,
       servers: ["https://b"],
     });
   });
@@ -115,7 +134,7 @@ describe("NostrTipStore (hardened tip transport)", () => {
       content: "",
       created_at: 1,
       tags: [
-        ["x", "f".repeat(64)],
+        ["x", "f".repeat(64), "group", GID],
         ["server", "https://forged"],
       ],
       id: "0".repeat(64),
@@ -145,7 +164,10 @@ describe("NostrTipStore (hardened tip transport)", () => {
    */
   test("a connection string bootstraps a reader that reads the tip", async () => {
     const { relayHub, ownerPrivateKey, ownerPubkey, store } = setup();
-    await store.publishTip({ address: ADDRESS, servers: SERVERS });
+    await store.publishTip({
+      groups: [{ address: ADDRESS, gid: GID }],
+      servers: SERVERS,
+    });
 
     const conn = store.toConnectionString(["memory://relay"]);
 
@@ -158,7 +180,8 @@ describe("NostrTipStore (hardened tip transport)", () => {
     expect(reader.ephemeralPubkey).toBe(store.ephemeralPubkey);
     expect(reader.d).toBe(store.d);
     expect(await reader.readTip()).toEqual({
-      address: ADDRESS,
+      groups: [{ address: ADDRESS, gid: GID }],
+      metaAddress: undefined,
       servers: SERVERS,
     });
   });
@@ -171,7 +194,10 @@ describe("NostrTipStore (hardened tip transport)", () => {
    */
   test("rotation mints a fresh ephemeral key and d, leaving the old tip stale", async () => {
     const { relayHub, ownerPrivateKey, ownerPubkey, store } = setup();
-    await store.publishTip({ address: ADDRESS, servers: SERVERS });
+    await store.publishTip({
+      groups: [{ address: ADDRESS, gid: GID }],
+      servers: SERVERS,
+    });
 
     // A brand-new store (fresh ephemeral + d) publishes a newer pointer.
     const rotated = new NostrTipStore({
@@ -182,18 +208,20 @@ describe("NostrTipStore (hardened tip transport)", () => {
     expect(rotated.ephemeralPubkey).not.toBe(store.ephemeralPubkey);
     expect(rotated.d).not.toBe(store.d);
     await rotated.publishTip({
-      address: "f".repeat(64),
+      groups: [{ address: "f".repeat(64), gid: GID }],
       servers: ["https://rotated"],
     });
 
     // The old locator still resolves to the old tip (it is not deleted, just
     // abandoned); the rotated locator resolves to the new one.
     expect(await store.readTip()).toEqual({
-      address: ADDRESS,
+      groups: [{ address: ADDRESS, gid: GID }],
+      metaAddress: undefined,
       servers: SERVERS,
     });
     expect(await rotated.readTip()).toEqual({
-      address: "f".repeat(64),
+      groups: [{ address: "f".repeat(64), gid: GID }],
+      metaAddress: undefined,
       servers: ["https://rotated"],
     });
   });

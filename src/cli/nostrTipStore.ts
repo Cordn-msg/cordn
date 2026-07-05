@@ -31,10 +31,19 @@ export const DEFAULT_TIP_KIND = 30078;
 /** Default inner (sealed) event kind. Spec §6; self-labeling (never relayed). */
 export const DEFAULT_TIP_INNER_KIND = 178;
 
-export interface TipPointer {
-  /** Document content address: sha256 of the sealed blob (spec §6 `x`). */
+export interface TipGroupPointer {
+  /** Group document content address (spec §6 `x` tagged `group`). */
   address: string;
-  /** Ordered Blossom server URLs hosting the blob (spec §6 `server`). */
+  /** Delivery group id the document is for — enables fetch-only-changed. */
+  gid: string;
+}
+
+export interface TipPointer {
+  /** One pointer per live group document (spec §6: `['x', h, 'group', gid]`). */
+  groups: TipGroupPointer[];
+  /** Meta document content address, if any (spec §6: `['x', h, 'meta']`). */
+  metaAddress?: string;
+  /** Ordered Blossom server URLs hosting the blobs (spec §6 `server`). */
   servers: string[];
 }
 
@@ -96,8 +105,13 @@ export class NostrTipStore {
       content: "",
       created_at: createdAt,
       tags: [
-        ["x", pointer.address],
-        ...pointer.servers.map((s) => ["server", s] as [string, string]),
+        ...pointer.groups.map(
+          (g) => ["x", g.address, "group", g.gid] as string[],
+        ),
+        ...(pointer.metaAddress
+          ? ([["x", pointer.metaAddress, "meta"]] as string[][])
+          : []),
+        ...pointer.servers.map((s) => ["server", s] as string[]),
       ],
     };
     const innerEvent = finalizeEvent(inner, this.ownerPrivateKey);
@@ -162,13 +176,26 @@ export class NostrTipStore {
     if (!verifyEvent(inner)) {
       throw new Error("Tip inner event signature invalid");
     }
-    const x = inner.tags.find((t) => t[0] === "x")?.[1];
-    if (!x) throw new Error("Tip inner event missing x tag");
+    const groups: TipGroupPointer[] = [];
+    let metaAddress: string | undefined;
+    for (const tag of inner.tags) {
+      if (tag[0] !== "x") continue;
+      if (tag[2] === "group") {
+        if (typeof tag[1] === "string" && typeof tag[3] === "string") {
+          groups.push({ address: tag[1], gid: tag[3] });
+        }
+      } else if (tag[2] === "meta" && typeof tag[1] === "string") {
+        metaAddress = tag[1];
+      }
+    }
+    if (groups.length === 0 && metaAddress === undefined) {
+      throw new Error("Tip inner event has no x tags");
+    }
     const servers = inner.tags
       .filter((t) => t[0] === "server")
       .map((t) => t[1])
       .filter((s): s is string => typeof s === "string");
-    return { address: x, servers };
+    return { groups, metaAddress, servers };
   }
 
   /**

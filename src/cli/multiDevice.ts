@@ -1,21 +1,17 @@
 /**
- * Multi-device session synchronization (see `spec/applications/multi-device.md`).
+ * Multi-device synchronization (see `spec/applications/multi-device.md`).
  *
- * Devices of one identity share a single MLS leaf per group. This module
- * snapshots a session's per-group `ClientState` and fetch cursor into a sealed
- * *session document*, content-addresses it, and lets another device of the same
- * identity fetch, decrypt, and seed the groups it is missing — then converge
- * via the normal coordinator delivery stream.
+ * Two sealed, content-addressed JSON document types: one *group document* per
+ * live group (that group's `ClientState` + cursor, linked by a per-`gid` `prev`
+ * chain), and one *meta document* per identity (the account's last-resort key
+ * package + the set of soft-delete tombstones; no chain). Each is sealed to the
+ * owner npub with NIP-44 and addressed by `sha256` of the sealed blob. The tip
+ * (spec §6) advertises every live group document plus the meta document; that
+ * transport lives in `nostrTipStore.ts`.
  *
- * The document carries group state only (no `nsec`, no messages). It is sealed
- * to the owner's own npub with NIP-44, so any device that can sign as the owner
- * can decrypt. No pairing, pre-shared key, or extra KDF is defined.
- *
- * The coordinator is not involved: it stays content-opaque, as required by
- * `spec/03.md`. The blob store is injected (`FileMediaStore` in tests, Blossom
- * in production). The seal is confidentiality-only; authenticity is provided
- * by the tip — a sealed, owner-signed inner Nostr event that points at the
- * document address (spec §6). The tip transport is out of scope here.
+ * The coordinator is unchanged (spec/03.md). Documents carry group state only
+ * (no `nsec`, no messages). The seal is confidentiality-only (spec §7);
+ * authenticity is provided by the tip's sealed owner-signed inner event (§6).
  */
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
@@ -33,43 +29,6 @@ import type { GroupSessionState } from "./sessionState.ts";
 
 export const MULTI_DEVICE_SCHEMA_VERSION = 1;
 
-/**
- * Last published document address per owner, so consecutive publishes form a
- * `prev` chain (spec §4). ponytail: process-local; a device that restarts
- * recovers the chain root by reading the current tip on startup (the chain is
- * self-describing — each doc's `prev` is the prior address). A caller MAY pass
- * `prev` explicitly to override (e.g. to force a fresh chain root).
- */
-const lastPublishedTip = new Map<string, string>();
-
-export interface SessionGroupEntry {
-  gid: string;
-  coordinator: string;
-  /** Base64 of `encode(clientStateEncoder, state)`. Sole carrier of presentation
-   * metadata (the `CordnGroupMetadata` GroupContext extension, spec/01). */
-  clientState: string;
-  /** Writer's last-processed delivery cursor for this `gid`. */
-  cursor: number;
-}
-
-/**
- * Tombstone (spec §4 `removed[]`): records that the identity stopped tracking
- * `gid` when the group was at MLS `epoch`. `epoch` is a JSON number (MLS
- * epochs are small); compared as `BigInt` against `groupContext.epoch`.
- */
-export interface SessionTombstone {
-  gid: string;
-  epoch: number;
-}
-
-export interface SessionDocument {
-  schemaVersion: typeof MULTI_DEVICE_SCHEMA_VERSION;
-  issuedAt: number;
-  prev?: string;
-  groups: SessionGroupEntry[];
-  removed?: SessionTombstone[];
-}
-
 export class MultiDeviceError extends Error {
   constructor(message: string) {
     super(message);
@@ -77,60 +36,92 @@ export class MultiDeviceError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Document shapes (spec §4)
+// ---------------------------------------------------------------------------
+
 /**
- * Narrow view of {@link CliSession} that this module needs. `CliSession`
- * already satisfies it; the interface keeps the module decoupled and testable.
+ * Tombstone (spec §4.2 `removed[]`): the identity stopped tracking `gid` when
+ * the group was at MLS `epoch`. `epoch` is a JSON number (MLS epochs are
+ * small); compared as `BigInt` against `groupContext.epoch`.
  */
+export interface Tombstone {
+  gid: string;
+  epoch: number;
+}
+
+/**
+ * Last-resort key package entry (spec §4.2). Both fields are the base64 TLS
+ * wire form (RFC 9420 §3) — the only MLS serialization.
+ */
+export interface LastResortKeyPackageEntry {
+  keyPackage: string;
+  privateKeyPackage: string;
+}
+
+/**
+ * One group document (spec §4.1): one per live group, per epoch. `prev` chains
+ * per `gid`. `clientState` (base64 TLS) is the sole carrier of presentation
+ * state — `CordnGroupMetadata` (spec/01) is a GroupContext extension inside it.
+ */
+export interface GroupDocument {
+  schemaVersion: typeof MULTI_DEVICE_SCHEMA_VERSION;
+  type: "group";
+  gid: string;
+  coordinator: string;
+  issuedAt: number;
+  prev?: string;
+  clientState: string;
+  cursor: number;
+}
+
+/**
+ * One meta document per identity (spec §4.2): a current-state set with NO
+ * `prev` chain. Carries the account's last-resort key package and tombstones.
+ */
+export interface MetaDocument {
+  schemaVersion: typeof MULTI_DEVICE_SCHEMA_VERSION;
+  type: "meta";
+  issuedAt: number;
+  lastResortKeyPackage?: LastResortKeyPackageEntry;
+  removed?: Tombstone[];
+}
+
+export type MultiDeviceDocument = GroupDocument | MetaDocument;
+
+// ---------------------------------------------------------------------------
+// Session view (narrow shape CliSession satisfies structurally)
+// ---------------------------------------------------------------------------
+
+export type ApplyDocumentOutcome = "seeded" | "fast-forwarded" | "skipped";
+
 export interface MultiDeviceSessionView {
   readonly stablePubkey: string;
   readonly privateKey: string;
   listGroups(): GroupSessionState[];
   deriveGroupId(state: ClientState): string;
   /**
-   * Apply one document entry: seed a missing group, fast-forward a present
-   * group to a strictly newer epoch, or skip (advisory). Returns the outcome.
+   * Seed a missing group, fast-forward a present group to a strictly newer
+   * epoch, or skip (advisory). The newer-epoch check is the rollback defense
+   * (spec §8). A sibling device's Commit cannot be ingested via the stream
+   * (shared leaf's UpdatePath invalidates this device's keys), so the new
+   * private keys must travel in the document (spec §10).
    */
-  applyDocumentEntry(entry: SessionGroupEntry): Promise<ApplyDocumentOutcome>;
+  applyDocumentEntry(doc: GroupDocument): Promise<ApplyDocumentOutcome>;
   /**
-   * Apply one tombstone (spec §8 case 4): drop a local group whose epoch is
-   * ≤ the tombstone epoch; ignore a stale tombstone or one for an unknown
-   * group. Returns "dropped" if a local group was removed, else "ignored".
+   * Spec §8 removal: drop a local group whose epoch is ≤ the tombstone epoch;
+   * ignore a stale tombstone (local epoch higher) or one for an unknown group.
    */
-  applyDocumentTombstone(
-    tombstone: SessionTombstone,
-  ): Promise<"dropped" | "ignored">;
+  applyDocumentTombstone(tombstone: Tombstone): Promise<"dropped" | "ignored">;
+  /** Load the account's last-resort key package from the meta document (§11.5). */
+  loadLastResortKeyPackage(entry: LastResortKeyPackageEntry): Promise<boolean>;
+  /** The account's currently-published last-resort key package, if any. */
+  getLastResortKeyPackage(): LastResortKeyPackageEntry | undefined;
 }
-
-export type ApplyDocumentOutcome = "seeded" | "fast-forwarded" | "skipped";
 
 // ---------------------------------------------------------------------------
-// Canonical JSON + content addressing + sealing
+// Content addressing + sealing (spec §5, §6, §7)
 // ---------------------------------------------------------------------------
-
-/**
- * Deterministic JSON for content-addressing: object members sorted by name,
- * no insignificant whitespace. Sufficient for a stable `sha256` of a document
- * we control end-to-end (writer and reader share this encoder). Not full
- * RFC 8785 — big-number/string-escaping edge cases are irrelevant for the
- * document shape defined here, which is the only thing that is ever addressed.
- */
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalize);
-  }
-  if (value && typeof value === "object") {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      sorted[key] = canonicalize((value as Record<string, unknown>)[key]);
-    }
-    return sorted;
-  }
-  return value;
-}
 
 /** `sha256` of the sealed payload's UTF-8 bytes, lowercase hex. Spec §6. */
 export function documentAddress(sealedPayload: string): string {
@@ -139,9 +130,9 @@ export function documentAddress(sealedPayload: string): string {
     .digest("hex");
 }
 
-/** NIP-44 v2 encryption to the owner's own npub. Spec §7. */
+/** NIP-44 v2 encryption to the owner's own npub. Confidentiality-only (§7). */
 export function sealDocument(
-  doc: SessionDocument,
+  doc: MultiDeviceDocument,
   privateKeyHex: string,
   ownerPubkey: string,
 ): string {
@@ -149,60 +140,92 @@ export function sealDocument(
     Buffer.from(privateKeyHex, "hex"),
     ownerPubkey,
   );
-  return nip44.encrypt(canonicalJson(doc), conversationKey);
+  return nip44.encrypt(JSON.stringify(doc), conversationKey);
 }
 
-/** Decrypt and validate a sealed document. Spec §7. */
+/** Decrypt and validate a sealed document. Dispatches on `type`. Spec §7. */
 export function openDocument(
   sealedPayload: string,
   privateKeyHex: string,
   ownerPubkey: string,
-): SessionDocument {
+): MultiDeviceDocument {
   const conversationKey = nip44.getConversationKey(
     Buffer.from(privateKeyHex, "hex"),
     ownerPubkey,
   );
   const plaintext = nip44.decrypt(sealedPayload, conversationKey);
-  const doc = JSON.parse(plaintext) as SessionDocument;
-
+  const doc = JSON.parse(plaintext) as MultiDeviceDocument;
   if (doc.schemaVersion !== MULTI_DEVICE_SCHEMA_VERSION) {
     throw new MultiDeviceError(
       `Unsupported multi-device schema version: ${doc.schemaVersion}`,
     );
   }
-  // Authenticity lives in the tip (a sealed owner-signed inner event, spec §6),
-  // not in the document: the seal is confidentiality-only (spec §7).
+  // Authenticity lives in the tip (a sealed owner-signed inner event, §6), not
+  // in the document: the seal is confidentiality-only (§7).
+  if (doc.type !== "group" && doc.type !== "meta") {
+    throw new MultiDeviceError(
+      `Unknown document type: ${String((doc as { type?: string }).type)}`,
+    );
+  }
   return doc;
 }
 
 // ---------------------------------------------------------------------------
-// Document construction
+// Document construction (spec §4.1, §4.2)
 // ---------------------------------------------------------------------------
 
-export interface GroupSnapshotInput {
+export interface GroupDocumentInput {
   gid: string;
   state: ClientState;
   coordinatorKey: string;
   fetchCursor: number;
 }
 
-export function buildSessionDocument(params: {
-  groups: GroupSnapshotInput[];
-  prev?: string;
-  removed?: SessionTombstone[];
-}): SessionDocument {
+function buildGroupDocument(
+  input: GroupDocumentInput,
+  prev?: string,
+): GroupDocument {
   return {
     schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
+    type: "group",
+    gid: input.gid,
+    coordinator: input.coordinatorKey,
     issuedAt: Date.now(),
-    prev: params.prev,
-    groups: params.groups.map((group) => ({
-      gid: group.gid,
-      coordinator: group.coordinatorKey,
-      clientState: encodeBase64(encode(clientStateEncoder, group.state)),
-      cursor: group.fetchCursor,
-    })),
+    prev,
+    clientState: encodeBase64(encode(clientStateEncoder, input.state)),
+    cursor: input.fetchCursor,
+  };
+}
+
+function buildMetaDocument(params: {
+  lastResortKeyPackage?: LastResortKeyPackageEntry;
+  removed?: Tombstone[];
+}): MetaDocument {
+  return {
+    schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
+    type: "meta",
+    issuedAt: Date.now(),
+    lastResortKeyPackage: params.lastResortKeyPackage,
     removed: params.removed,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Per-gid prev chain root (process-local; spec §4.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Last published group-document address per (owner, `gid`), so consecutive
+ * publishes of the SAME group extend its `prev` chain (spec §4.1). ponytail:
+ * process-local — sufficient for the test-driven publish flow (one process).
+ * A restarting process loses the root and the next publish starts a new chain
+ * (a `prev` gap); a caller that needs continuity reads the current tip and
+ * passes `prev` explicitly (REPL startup wiring, not implemented here).
+ */
+const lastPublishedGroupTip = new Map<string, string>();
+
+function groupChainKey(ownerPubkey: string, gid: string): string {
+  return `${ownerPubkey}:${gid}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,64 +239,82 @@ export interface PublishResult {
   url: string;
 }
 
-export async function publishCurrentSession(params: {
+/**
+ * Publish one group document, extending that group's per-`gid` `prev` chain
+ * (spec §10.5: a group change republishes only that group's document).
+ */
+export async function publishGroupDocument(params: {
   session: MultiDeviceSessionView;
   mediaStore: MediaStore;
+  gid: string;
   prev?: string;
-  /**
-   * Tombstones to carry in the published `removed` (spec §10.5 union): the
-   * device's own new tombstones plus any it adopted from the reconciled tip.
-   * The caller composes this; the session does not retain tombstone state.
-   */
-  removed?: SessionTombstone[];
 }): Promise<PublishResult> {
-  const { session } = params;
-  // Auto-chain `prev` (spec §4): the last address this owner published,
-  // unless the caller passes one explicitly. Lets the catch-up chain
-  // (spec §8.5) form without the caller tracking state.
-  const prev = params.prev ?? lastPublishedTip.get(session.stablePubkey);
-  const document = buildSessionDocument({
-    prev,
-    removed: params.removed,
-    groups: session.listGroups().map((group) => ({
-      gid: session.deriveGroupId(group.state),
+  const { session, gid } = params;
+  const group = session
+    .listGroups()
+    .find((g) => session.deriveGroupId(g.state) === gid);
+  if (!group) {
+    throw new MultiDeviceError(`No local group for gid ${gid}`);
+  }
+  const prev =
+    params.prev ??
+    lastPublishedGroupTip.get(groupChainKey(session.stablePubkey, gid));
+  const doc = buildGroupDocument(
+    {
+      gid,
       state: group.state,
       coordinatorKey: group.coordinatorKey,
       fetchCursor: group.fetchCursor,
-    })),
-  });
-  // The seal is confidentiality-only (spec §7); authenticity is provided by
-  // the tip's sealed owner-signed inner event (spec §6), not by the document.
-  const sealed = sealDocument(
-    document,
-    session.privateKey,
-    session.stablePubkey,
+    },
+    prev,
   );
+  const sealed = sealDocument(doc, session.privateKey, session.stablePubkey);
   const blob = Buffer.from(sealed, "utf8");
   const url = await params.mediaStore.publish(blob);
   const address = documentAddress(sealed);
-  lastPublishedTip.set(session.stablePubkey, address);
+  lastPublishedGroupTip.set(groupChainKey(session.stablePubkey, gid), address);
   return { address, url };
 }
 
 /**
- * Fetch a document by its content address. `addressToUrl` maps the address to
- * the store's URL scheme (`media://<sha256>` for `FileMediaStore`; a Blossom
- * client would use `https://<server>/<sha256>`). The tip transport is
- * non-normative; this is the only store-specific seam.
+ * Publish the meta document (spec §4.2). It is a current-state set with no
+ * `prev`; a tombstone or key-package change republishes only this document and
+ * updates only its `meta` `x` tag in the tip (§10.5).
  */
-export async function pullSessionDocument(params: {
+export async function publishMetaDocument(params: {
+  session: MultiDeviceSessionView;
+  mediaStore: MediaStore;
+  removed?: Tombstone[];
+  /** Defaults to the session's own last-resort key package. */
+  lastResortKeyPackage?: LastResortKeyPackageEntry;
+}): Promise<PublishResult> {
+  const { session } = params;
+  const doc = buildMetaDocument({
+    lastResortKeyPackage:
+      params.lastResortKeyPackage ?? session.getLastResortKeyPackage(),
+    removed: params.removed,
+  });
+  const sealed = sealDocument(doc, session.privateKey, session.stablePubkey);
+  const blob = Buffer.from(sealed, "utf8");
+  const url = await params.mediaStore.publish(blob);
+  return { address: documentAddress(sealed), url };
+}
+
+/**
+ * Fetch a document by its content address. `addressToUrl` maps the address to
+ * the store's URL scheme. Re-verifies `sha256(blob) == address` (spec §6).
+ */
+export async function pullDocument(params: {
   address: string;
   mediaStore: MediaStore;
   addressToUrl: (address: string) => string;
   privateKeyHex: string;
   ownerPubkey: string;
-}): Promise<SessionDocument> {
+}): Promise<MultiDeviceDocument> {
   const url = params.addressToUrl(params.address);
   const blob = await params.mediaStore.fetch(url);
   const sealed = Buffer.from(blob).toString("utf8");
-  const address = documentAddress(sealed);
-  if (address !== params.address) {
+  if (documentAddress(sealed) !== params.address) {
     throw new MultiDeviceError(
       "Document address mismatch: fetched blob does not match the advertised tip",
     );
@@ -282,57 +323,52 @@ export async function pullSessionDocument(params: {
 }
 
 /**
- * Seed-and-fast-forward reconciliation (spec §8). For each document entry the
- * session either seeds a missing group, fast-forwards a present group to a
- * strictly newer epoch (never a downgrade — that is the rollback defense),
- * or skips it as advisory. Returns the entries per outcome.
+ * Seed/fast-forward/skip one group document against local state (spec §8).
  */
-export async function reconcileFromDocument(
+export async function reconcileGroupDocument(
   session: MultiDeviceSessionView,
-  document: SessionDocument,
+  doc: GroupDocument,
+): Promise<ApplyDocumentOutcome> {
+  return session.applyDocumentEntry(doc);
+}
+
+/**
+ * Apply a meta document: drop local groups named in tombstones (§8), and load
+ * the account's last-resort key package if present (§11.5). Tombstones are the
+ * caller's responsibility to order after group reconciliation (§8 ties to
+ * removal); for a well-formed meta doc the order is irrelevant.
+ */
+export async function reconcileMetaDocument(
+  session: MultiDeviceSessionView,
+  doc: MetaDocument,
 ): Promise<{
-  seeded: SessionGroupEntry[];
-  fastForwarded: SessionGroupEntry[];
-  skipped: SessionGroupEntry[];
-  dropped: SessionTombstone[];
-  ignored: SessionTombstone[];
+  dropped: Tombstone[];
+  ignored: Tombstone[];
+  keyPackageLoaded: boolean;
 }> {
-  const seeded: SessionGroupEntry[] = [];
-  const fastForwarded: SessionGroupEntry[] = [];
-  const skipped: SessionGroupEntry[] = [];
-  const dropped: SessionTombstone[] = [];
-  const ignored: SessionTombstone[] = [];
-
-  for (const entry of document.groups) {
-    const outcome = await session.applyDocumentEntry(entry);
-    if (outcome === "seeded") seeded.push(entry);
-    else if (outcome === "fast-forwarded") fastForwarded.push(entry);
-    else skipped.push(entry);
-  }
-
-  // Tombstones are processed AFTER groups so a malformed doc that violates the
-  // §4 XOR rule still resolves removal-wins on ties (§8). For well-formed docs
-  // (XOR) the order is irrelevant. ponytail: no device-local tombstone memory
-  // — a tombstone for an unknown group is carried forward by the caller via
-  // the published union (§10.5); case 7 (refuse to re-seed from a stale peer
-  // that blind-pushes the group as present) is enforced by the §10.5
-  // reconcile-before-push discipline, not by a local denylist.
-  for (const tombstone of document.removed ?? []) {
+  const dropped: Tombstone[] = [];
+  const ignored: Tombstone[] = [];
+  for (const tombstone of doc.removed ?? []) {
     const outcome = await session.applyDocumentTombstone(tombstone);
-    if (outcome === "dropped") dropped.push(tombstone);
-    else ignored.push(tombstone);
+    // ponytail: no device-local tombstone memory — a tombstone for an unknown
+    // group is carried forward by the caller via the published union (§10.5);
+    // the §10.5 reconcile-before-push discipline keeps a stale peer from
+    // resurrecting it by blind-pushing the group as present.
+    (outcome === "dropped" ? dropped : ignored).push(tombstone);
   }
-
-  return { seeded, fastForwarded, skipped, dropped, ignored };
+  const keyPackageLoaded = doc.lastResortKeyPackage
+    ? await session.loadLastResortKeyPackage(doc.lastResortKeyPackage)
+    : false;
+  return { dropped, ignored, keyPackageLoaded };
 }
 
 // ---------------------------------------------------------------------------
-// Chained catch-up (spec §8.5)
+// Per-group chained catch-up (spec §8.5)
 // ---------------------------------------------------------------------------
 
 export interface ChainStep {
   epoch: bigint;
-  /** Base64 ClientState for this epoch (spec §4 `groups[].clientState`). */
+  /** Base64 ClientState for this epoch (spec §4.1 `clientState`). */
   clientState: string;
   /**
    * Writer's cursor at the moment this epoch's document was published — the
@@ -344,22 +380,22 @@ export interface ChainStep {
 }
 
 /**
- * Walk the `prev` chain (spec §4) backward from the tip, collecting one
- * `ClientState` per epoch strictly newer than `localEpoch` for `groupId`.
+ * Walk one group's `prev` chain (spec §4.1) backward from the tip, collecting
+ * one `ClientState` per epoch strictly newer than `localEpoch` for `groupId`.
  *
  * Authenticity is transitive: the tip transport endorses the tip address
- * (spec §6), each document commits to the next-older address via `prev`, and
- * `pullSessionDocument` re-verifies `sha256(blob) == address` at every hop —
- * so a blob the owner did not author cannot be reached through the chain.
+ * (§6), each document commits to the next-older address via `prev`, and
+ * `pullDocument` re-verifies `sha256(blob) == address` at every hop — so a
+ * blob the owner did not author cannot be reached through the chain.
  *
  * One step per epoch, keeping the OLDEST document for that epoch (smallest
- * cursor = published right after the epoch's Commit, ratchet at generation 0).
- * A newer same-epoch document has an advanced ratchet and, by MLS forward
- * secrecy, cannot derive earlier generations — so it could not decrypt that
- * epoch's earlier messages. Sorted ascending by cursor. ponytail: bounded to
- * 1000 hops; a deeper gap should single-snapshot fast-forward (spec §10).
+ * cursor = published right after that epoch's Commit, ratchet at generation 0).
+ * A newer same-epoch document has an advanced ratchet and cannot, by forward
+ * secrecy, derive earlier generations. Sorted ascending by cursor.
+ * ponytail: bounded to 1000 hops; a deeper gap should single-snapshot
+ * fast-forward (spec §10).
  */
-export async function walkSessionChain(params: {
+export async function walkGroupChain(params: {
   tipAddress: string;
   groupId: string;
   localEpoch: bigint;
@@ -371,25 +407,25 @@ export async function walkSessionChain(params: {
   const byEpoch = new Map<bigint, ChainStep>();
   let address: string | undefined = params.tipAddress;
   for (let hop = 0; hop < 1000 && address; hop++) {
-    const doc = await pullSessionDocument({
+    const doc = await pullDocument({
       address,
       mediaStore: params.mediaStore,
       addressToUrl: params.addressToUrl,
       privateKeyHex: params.privateKeyHex,
       ownerPubkey: params.ownerPubkey,
     });
-    const entry = doc.groups.find((g) => g.gid === params.groupId);
-    if (!entry) break; // group did not exist this far back
-    const decoded = clientStateDecoder(decodeBase64(entry.clientState), 0);
+    // The chain is per-gid: stop at a meta doc or a different group's doc.
+    if (doc.type !== "group" || doc.gid !== params.groupId) break;
+    const decoded = clientStateDecoder(decodeBase64(doc.clientState), 0);
     if (!decoded) break;
     const epoch = decoded[0].groupContext.epoch;
     if (epoch <= params.localEpoch) break; // reached local-or-older state
     const existing = byEpoch.get(epoch);
-    if (!existing || entry.cursor < existing.cursor) {
+    if (!existing || doc.cursor < existing.cursor) {
       byEpoch.set(epoch, {
         epoch,
-        clientState: entry.clientState,
-        cursor: entry.cursor,
+        clientState: doc.clientState,
+        cursor: doc.cursor,
         address,
       });
     }
