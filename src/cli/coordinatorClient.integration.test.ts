@@ -169,12 +169,15 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       ).toHaveLength(1);
 
       const postedCommit = await aliceClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(scenario.commitMessageBytes),
       });
       const postedAliceMessage = await aliceClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
       const postedBobMessage = await bobClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(scenario.bobApplicationBytes),
       });
 
@@ -265,6 +268,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
 
       start = relayHub.getEvents().length;
       await aliceClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
       expect(
@@ -275,6 +279,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       ).toContain(ephemeralPubkey);
 
       const posted = await aliceClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
 
@@ -341,6 +346,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       clients.push(aliceClient, bobClient, carolClient);
 
       const posted = await aliceClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
       const fetched = await bobClient.FetchGroupMessages({
@@ -413,6 +419,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         wireAsPublicMessage: true,
       });
       const postedProposal = await aliceClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(proposal.encodedMessage),
       });
 
@@ -420,6 +427,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         state: proposal.newState,
       });
       const postedCommit = await aliceClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(commit.encodedMessage),
       });
 
@@ -435,6 +443,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         plaintext: JSON.stringify(orderedTrafficEvent),
       });
       const postedApplication = await bobClient.PostGroupMessage({
+        gid: "delivery",
         msg_64: encodeBase64(application.encodedMessage),
       });
 

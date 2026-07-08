@@ -9,7 +9,6 @@ export type { CoordinatorOptions } from "./coordinator.ts";
 export type {
   FetchGroupMessagesInput,
   GroupMessageRecord,
-  GroupRoutingRecord,
   PostGroupMessageInput,
   PublishedKeyPackageRecord,
   PublishKeyPackageInput,

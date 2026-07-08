@@ -97,22 +97,6 @@ function encodeWelcomeBase64(welcome: Welcome): string {
   return encodeBase64(encodeWelcome(welcome));
 }
 
-/** @deprecated Replaced by client-side payload encryption that naturally
- *  filters messages from epochs the client has not joined. */
-function parseSinceEpoch(sinceEpoch: string | undefined): bigint | undefined {
-  if (sinceEpoch === undefined) {
-    return undefined;
-  }
-
-  try {
-    return BigInt(sinceEpoch);
-  } catch {
-    throw new Error(
-      `Invalid since_epoch value: "${sinceEpoch}". Must be a non-negative integer string.`,
-    );
-  }
-}
-
 function decodeOpaqueMessageBase64(msg_64: string): Uint8Array {
   try {
     return assertNonEmptyBase64(msg_64, "msg_64");
@@ -215,13 +199,6 @@ function mapGroupMessage(
   };
 }
 
-async function writeGroupMessage(
-  stream: OpenStreamWriter,
-  record: GroupMessageRecord,
-): Promise<void> {
-  await stream.write(encodeWireMessage(record));
-}
-
 // Live messages fan out to every subscribed client; the coordinator pushes the
 // same record reference into each subscriber's queue. Cache the wire string per
 // record so base64 + JSON.stringify run once per message, not once per
@@ -284,7 +261,7 @@ export class CoordinatorAdapter {
   private recordOperation(methodName: string): void {
     const count = (this.metrics.get(methodName) ?? 0) + 1;
     this.metrics.set(methodName, count);
-    this.logger.info(
+    this.logger.debug(
       { type: "operation", method: methodName, count },
       "cordn operation",
     );
@@ -624,38 +601,21 @@ export class CoordinatorAdapter {
   }
 
   postGroupMessage(input: z.infer<typeof postGroupMessageInputSchema>) {
-    try {
-      const record = this.coordinator.postGroupMessage({
-        opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
-        groupId: input.gid,
-      });
+    const record = this.coordinator.postGroupMessage({
+      opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
+      groupId: input.gid,
+    });
 
-      this.recordOperation("postGroupMessage");
+    this.recordOperation("postGroupMessage");
 
-      return {
-        content: [],
-        structuredContent: {
-          cursor: record.cursor,
-          gid: record.groupId,
-          at: record.createdAt,
-        },
-      };
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.startsWith("Rejected stale handshake")
-      ) {
-        this.logger.warn(
-          {
-            type: "stale_handshake",
-            error: error.message,
-          },
-          "stale handshake rejected",
-        );
-      }
-
-      throw error;
-    }
+    return {
+      content: [],
+      structuredContent: {
+        cursor: record.cursor,
+        gid: record.groupId,
+        at: record.createdAt,
+      },
+    };
   }
 
   fetchGroupMessages(input: z.infer<typeof fetchGroupMessagesInputSchema>) {
@@ -663,7 +623,6 @@ export class CoordinatorAdapter {
     const records = this.coordinator.fetchGroupMessages({
       groupId: input.gid,
       afterCursor: input.after,
-      sinceEpoch: parseSinceEpoch(input.since_epoch),
     });
 
     this.recordOperation("fetchGroupMessages");
@@ -683,7 +642,6 @@ export class CoordinatorAdapter {
       groups: input.groups.map((group) => ({
         groupId: group.gid,
         afterCursor: group.after,
-        sinceEpoch: parseSinceEpoch(group.since_epoch),
       })),
     });
 
@@ -705,17 +663,13 @@ export class CoordinatorAdapter {
     const clientPubkey = extra._meta?.clientPubkey;
     const groupId = input.gid;
 
-    const sinceEpoch = parseSinceEpoch(input.since_epoch);
-
     const subscription = this.coordinator.subscribeGroupMessages({
       groupId,
       afterCursor: input.after,
-      sinceEpoch,
     });
     const backlog = this.coordinator.fetchGroupMessages({
       groupId,
       afterCursor: input.after,
-      sinceEpoch,
     });
     let lastEmittedCursor = input.after ?? 0;
     const originalAbort = stream.abort.bind(stream);
@@ -766,6 +720,15 @@ export class CoordinatorAdapter {
       await originalAbort(reason);
     };
 
+    // ponytail: writer.signal (SDK 0.13.8+) fires on every termination incl.
+    // dispose() (transport teardown), which the abort override above misses.
+    // Idempotent; the override still wins for log reasons on abort paths.
+    stream.signal.addEventListener(
+      "abort",
+      () => cleanupSubscription("client-disconnect"),
+      { once: true },
+    );
+
     try {
       await stream.start();
 
@@ -783,10 +746,10 @@ export class CoordinatorAdapter {
         lastEmittedCursor = record.cursor;
       }
 
+      cleanupSubscription("complete");
       if (stream.isActive) {
         await stream.close();
       }
-      cleanupSubscription("complete");
     } catch (error) {
       try {
         await stream.abort(
@@ -825,7 +788,6 @@ export class CoordinatorAdapter {
       groups: input.groups.map((group) => ({
         groupId: group.gid,
         afterCursor: group.after,
-        sinceEpoch: parseSinceEpoch(group.since_epoch),
       })),
     });
     const originalAbort = stream.abort.bind(stream);
@@ -872,6 +834,15 @@ export class CoordinatorAdapter {
       await originalAbort(reason);
     };
 
+    // ponytail: writer.signal (SDK 0.13.8+) fires on every termination incl.
+    // dispose() (transport teardown), which the abort override above misses.
+    // Idempotent; the override still wins for log reasons on abort paths.
+    stream.signal.addEventListener(
+      "abort",
+      () => cleanupSubscriptions("client-disconnect"),
+      { once: true },
+    );
+
     try {
       await stream.start();
 
@@ -880,13 +851,13 @@ export class CoordinatorAdapter {
           break;
         }
 
-        await writeGroupMessage(stream, record);
+        await stream.write(encodeWireMessage(record));
       }
 
+      cleanupSubscriptions("complete");
       if (stream.isActive) {
         await stream.close();
       }
-      cleanupSubscriptions("complete");
     } catch (error) {
       try {
         await stream.abort(

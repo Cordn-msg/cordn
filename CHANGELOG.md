@@ -1,5 +1,68 @@
 # cordn
 
+## 0.4.0
+
+### Minor Changes
+
+- refactor(coordinator)!: drop epoch awareness, legacy MLS-decode routing, and plaintext outbound
+
+  Completes the private-coordinator rollout. The coordinator is now opaque-only:
+  it stores and replays encrypted MLS ciphertext and no longer parses group
+  routing metadata from message bodies. This is a breaking contract change.
+
+  ### Removed (BREAKING)
+  - **Epoch awareness** — `since_epoch` filtering on `fetchGroupMessages` /
+    `subscribeGroupMessages`, stale-handshake rejection, and the `epoch` /
+    `latestHandshakeEpoch` fields on records and routing types. Group delivery
+    cursors remain monotonic per group; filtering is purely cursor-based now.
+  - **Legacy MLS-decode routing** — `gid` is now **required** on
+    `postGroupMessage`. The coordinator no longer decodes opaque messages to
+    derive a group id (`decodeOpaqueMessage`, `getMessageMetadata`,
+    `resolveLatestHandshakeEpoch`, and the MLS decoder imports are gone); every
+    inbound message takes the opaque path.
+  - **`getGroupRouting`** — removed from the coordinator and the public exports.
+  - **Plaintext outbound (CLI)** — the `encryptOutbound` option is gone; outbound
+    group messages are always encrypted (the group id is always derived and the
+    payload always encrypted before posting).
+
+  ### Migrations
+
+  SQLite gains guarded `ALTER TABLE ... DROP COLUMN` migrations for
+  `group_messages.epoch` and `group_routing.latest_handshake_epoch`, mirroring the
+  existing `ephemeral_sender_pubkey` precedent. Legacy databases keep their rows;
+  the columns are dropped on next startup. New databases never create them.
+
+  ### Kept (transitional)
+
+  The `encrypted` boolean on `GroupMessageRecord` and the response schema stays.
+  It is now always `true` from the coordinator; it remains so deployed reads can
+  distinguish any pre-rollout rows until none remain, after which the field and
+  the CLI read-path branch can collapse.
+
+### Patch Changes
+
+- Fix leaked group-message subscriptions on silent client disconnect.
+
+  Server-side subscribe handlers now listen to the `OpenStreamWriter` `signal`
+  (`@contextvm/sdk` 0.13.8+) and tear down the coordinator subscription when it
+  aborts. Previously a subscriber was only removed when `stream.abort()` was
+  called explicitly; on Nostr a client that silently disappeared (crash, sleep,
+  network drop) never triggered that path, so the subscriber lived forever. Each
+  new group message was then fanned out — and relay-published — for every leaked
+  subscriber, degrading throughput over time while memory stayed flat.
+
+  Bumping to `@contextvm/sdk` 0.13.8 supplies the underlying fix: the writer now
+  self-aborts on keepalive probe timeout and exposes a `signal` that fires on
+  every termination. Our wiring covers the `dispose()`/transport-teardown path
+  that the existing `stream.abort` override misses; the override still claims the
+  log reason on explicit aborts.
+
+  Also fixes `getActiveSubscriptionCount()`, which previously summed group-Set
+  sizes and so over-counted a multi-group subscription once per group it joined
+  (one subscription to N groups reported as N). It now refcounts distinct
+  subscriber objects, so the `activeSubscriptions` value in the logs reflects real
+  subscriptions (and reads in O(1) instead of iterating every group).
+
 ## 0.3.4
 
 ### Patch Changes

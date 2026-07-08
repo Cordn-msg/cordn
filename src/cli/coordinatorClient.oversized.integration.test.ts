@@ -89,6 +89,7 @@ async function postOversizedCatchUp(params: {
     state = created.newState;
 
     const posted = await params.sender.PostGroupMessage({
+      gid: "delivery",
       msg_64: encodeBase64(created.encodedMessage),
     });
 

@@ -161,7 +161,7 @@ export const fetchManyPendingJoinRequestsOutputSchema = z.object({
 
 export const postGroupMessageInputSchema = z.object({
   msg_64: z.string().min(1),
-  gid: z.string().min(1).optional(),
+  gid: z.string().min(1),
 });
 
 export const postGroupMessageOutputSchema = z.object({
@@ -173,13 +173,6 @@ export const postGroupMessageOutputSchema = z.object({
 export const fetchGroupMessagesInputSchema = z.object({
   gid: z.string().min(1),
   after: z.number().int().positive().optional(),
-  /** @deprecated Replaced by client-side encryption that naturally filters
-   *  messages from epochs the client has not joined. Retained for backward
-   *  compatibility with legacy clients. */
-  since_epoch: z
-    .string()
-    .regex(/^\d+$/, "since_epoch must be a non-negative integer string")
-    .optional(),
 });
 
 export const groupMessageSchema = z.object({

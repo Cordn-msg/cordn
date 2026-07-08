@@ -561,12 +561,13 @@ describe.each<StorageFixture>([
     ).toHaveLength(0);
   });
 
-  test("stores group messages, tracks routing, and rejects stale handshakes", () => {
+  test("stores group messages opaquely and tracks routing per group", () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     const coordinator = createCoordinatorWithStorage(storage);
 
     const firstMessage = coordinator.postGroupMessage({
+      groupId: "group-local",
       opaqueMessage: createPrivateMessage({
         epoch: 5n,
         contentType: 3,
@@ -575,6 +576,7 @@ describe.each<StorageFixture>([
     });
 
     const secondMessage = coordinator.postGroupMessage({
+      groupId: "group-local",
       opaqueMessage: createPrivateMessage({
         epoch: 5n,
         contentType: 1,
@@ -591,24 +593,9 @@ describe.each<StorageFixture>([
         afterCursor: firstMessage.cursor,
       }),
     ).toEqual([expect.objectContaining({ cursor: secondMessage.cursor })]);
-    expect(coordinator.getGroupRouting("group-local")).toEqual({
-      groupId: "group-local",
-      latestHandshakeEpoch: 5n,
-      lastMessageCursor: secondMessage.cursor,
-    });
-
-    expect(() =>
-      coordinator.postGroupMessage({
-        opaqueMessage: createPrivateMessage({
-          epoch: 4n,
-          contentType: 2,
-          bytes: [7, 8],
-        }),
-      }),
-    ).toThrow("Rejected stale handshake message");
   });
 
-  test("stores encrypted messages opaquely with encrypted flag and zero epoch", () => {
+  test("stores encrypted messages opaquely with the encrypted flag", () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     const coordinator = createCoordinatorWithStorage(storage);
@@ -625,7 +612,6 @@ describe.each<StorageFixture>([
       expect.objectContaining({
         groupId: "encrypted-topic",
         encrypted: true,
-        epoch: 0n,
         opaqueMessage: encryptedBytes,
         cursor: 1,
       }),
@@ -638,44 +624,35 @@ describe.each<StorageFixture>([
     expect(fetched[0]).toEqual(
       expect.objectContaining({
         encrypted: true,
-        epoch: 0n,
         groupId: "encrypted-topic",
         opaqueMessage: encryptedBytes,
       }),
     );
   });
 
-  test("interleaves legacy and encrypted messages on a shared per-group cursor sequence", () => {
+  test("interleaves multiple opaque messages on a shared per-group cursor sequence", () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     const coordinator = createCoordinatorWithStorage(storage);
 
-    // Legacy message: coordinator decodes MLS and derives gid from the payload.
-    const legacy = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        epoch: 5n,
-        contentType: 3,
-        bytes: [1, 2, 3],
-      }),
-    });
-    // Encrypted message: same group, caller-supplied gid, opaque bytes.
-    const encrypted = coordinator.postGroupMessage({
-      opaqueMessage: Uint8Array.from([0xc0, 0xff, 0xee]),
+    const first = coordinator.postGroupMessage({
       groupId: "group-local",
+      opaqueMessage: Uint8Array.from([0xde, 0xad]),
+    });
+    const second = coordinator.postGroupMessage({
+      groupId: "group-local",
+      opaqueMessage: Uint8Array.from([0xc0, 0xff, 0xee]),
     });
 
     // Both share one monotonic cursor sequence for the group.
-    expect(legacy.cursor).toBe(1);
-    expect(encrypted.cursor).toBe(2);
+    expect(first.cursor).toBe(1);
+    expect(second.cursor).toBe(2);
 
     const fetched = coordinator.fetchGroupMessages({
       groupId: "group-local",
     });
     expect(fetched.map((m) => m.cursor)).toEqual([1, 2]);
-    expect(fetched[0]?.encrypted).toBe(false);
-    expect(fetched[0]?.epoch).toBe(5n);
-    expect(fetched[1]?.encrypted).toBe(true);
-    expect(fetched[1]?.epoch).toBe(0n);
+    expect(fetched.map((m) => m.encrypted)).toEqual([true, true]);
   });
 
   test("assigns monotonic cursors independently per group", () => {
@@ -684,6 +661,7 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     const firstGroupFirstMessage = coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -693,6 +671,7 @@ describe.each<StorageFixture>([
     });
 
     const secondGroupFirstMessage = coordinator.postGroupMessage({
+      groupId: "group-beta",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -702,6 +681,7 @@ describe.each<StorageFixture>([
     });
 
     const firstGroupSecondMessage = coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -724,16 +704,6 @@ describe.each<StorageFixture>([
         .fetchGroupMessages({ groupId: "group-beta" })
         .map((message) => message.cursor),
     ).toEqual([1]);
-    expect(coordinator.getGroupRouting("group-alpha")).toEqual({
-      groupId: "group-alpha",
-      latestHandshakeEpoch: 1n,
-      lastMessageCursor: 2,
-    });
-    expect(coordinator.getGroupRouting("group-beta")).toEqual({
-      groupId: "group-beta",
-      latestHandshakeEpoch: 1n,
-      lastMessageCursor: 1,
-    });
   });
 
   test("treats afterCursor as group-scoped even when another group uses the same cursor values", () => {
@@ -742,6 +712,7 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     const alphaFirst = coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -750,6 +721,7 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
+      groupId: "group-beta",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -758,6 +730,7 @@ describe.each<StorageFixture>([
       }),
     });
     const alphaSecond = coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -788,6 +761,7 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -796,6 +770,7 @@ describe.each<StorageFixture>([
       }),
     });
     const betaFirst = coordinator.postGroupMessage({
+      groupId: "group-beta",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -804,6 +779,7 @@ describe.each<StorageFixture>([
       }),
     });
     const alphaSecond = coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -812,6 +788,7 @@ describe.each<StorageFixture>([
       }),
     });
     const betaSecond = coordinator.postGroupMessage({
+      groupId: "group-beta",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -835,276 +812,13 @@ describe.each<StorageFixture>([
     ]);
   });
 
-  test("filters group messages by sinceEpoch", () => {
-    const storage = createStorage();
-    closers.add(() => storage.close?.());
-    const coordinator = createCoordinatorWithStorage(storage);
-
-    const first = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    const second = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 3n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-    const third = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-
-    const all = coordinator.fetchGroupMessages({ groupId: "g" });
-    expect(all.map((m) => m.cursor)).toEqual([
-      first.cursor,
-      second.cursor,
-      third.cursor,
-    ]);
-
-    const fromEpoch3 = coordinator.fetchGroupMessages({
-      groupId: "g",
-      sinceEpoch: 3n,
-    });
-    expect(fromEpoch3.map((m) => m.cursor)).toEqual([
-      second.cursor,
-      third.cursor,
-    ]);
-
-    const fromEpoch5 = coordinator.fetchGroupMessages({
-      groupId: "g",
-      sinceEpoch: 5n,
-    });
-    expect(fromEpoch5.map((m) => m.cursor)).toEqual([third.cursor]);
-
-    const fromEpoch10 = coordinator.fetchGroupMessages({
-      groupId: "g",
-      sinceEpoch: 10n,
-    });
-    expect(fromEpoch10).toEqual([]);
-  });
-
-  test("combines sinceEpoch with afterCursor", () => {
-    const storage = createStorage();
-    closers.add(() => storage.close?.());
-    const coordinator = createCoordinatorWithStorage(storage);
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    const second = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 3n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-    const third = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-
-    const result = coordinator.fetchGroupMessages({
-      groupId: "g",
-      afterCursor: second.cursor,
-      sinceEpoch: 3n,
-    });
-    expect(result.map((m) => m.cursor)).toEqual([third.cursor]);
-  });
-
-  test("fetchManyGroupMessages respects per-group sinceEpoch", () => {
-    const storage = createStorage();
-    closers.add(() => storage.close?.());
-    const coordinator = createCoordinatorWithStorage(storage);
-
-    const alpha1 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "alpha",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "beta",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-    const beta2 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "beta",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [4],
-      }),
-    });
-
-    const result = coordinator.fetchManyGroupMessages({
-      groups: [
-        { groupId: "alpha", afterCursor: alpha1.cursor, sinceEpoch: 5n },
-        { groupId: "beta", sinceEpoch: 5n },
-      ],
-    });
-    expect(result.map((m) => [m.groupId, m.cursor])).toEqual([
-      ["alpha", alpha1.cursor + 1],
-      ["beta", beta2.cursor],
-    ]);
-  });
-
-  test("sinceEpoch of 0 returns all messages", () => {
-    const storage = createStorage();
-    closers.add(() => storage.close?.());
-    const coordinator = createCoordinatorWithStorage(storage);
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 3n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-
-    const result = coordinator.fetchGroupMessages({
-      groupId: "g",
-      sinceEpoch: 0n,
-    });
-    expect(result).toHaveLength(2);
-  });
-
-  test("sinceEpoch > 0 excludes messages with epoch 0n", () => {
-    const storage = createStorage();
-    closers.add(() => storage.close?.());
-    const coordinator = createCoordinatorWithStorage(storage);
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 0n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "g",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-
-    // sinceEpoch > 0 must exclude epoch 0n messages
-    const filtered = coordinator.fetchGroupMessages({
-      groupId: "g",
-      sinceEpoch: 3n,
-    });
-    expect(filtered).toHaveLength(1);
-    expect(filtered[0]?.epoch).toBe(5n);
-
-    // sinceEpoch = 0 includes everything (backward compat)
-    const all = coordinator.fetchGroupMessages({
-      groupId: "g",
-      sinceEpoch: 0n,
-    });
-    expect(all).toHaveLength(2);
-  });
-
-  test("fetchManyGroupMessages excludes 0n epoch messages per group with sinceEpoch > 0", () => {
-    const storage = createStorage();
-    closers.add(() => storage.close?.());
-    const coordinator = createCoordinatorWithStorage(storage);
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "alpha",
-        epoch: 0n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    const alpha5 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "alpha",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "beta",
-        epoch: 0n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-    const beta5 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "beta",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [4],
-      }),
-    });
-
-    const result = coordinator.fetchManyGroupMessages({
-      groups: [
-        { groupId: "alpha", sinceEpoch: 3n },
-        { groupId: "beta", sinceEpoch: 3n },
-      ],
-    });
-    expect(result.map((m) => [m.groupId, m.cursor])).toEqual([
-      ["alpha", alpha5.cursor],
-      ["beta", beta5.cursor],
-    ]);
-  });
-
   test("stores and returns pending join requests per group without draining", () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1113,6 +827,7 @@ describe.each<StorageFixture>([
       }),
     });
     coordinator.postGroupMessage({
+      groupId: "group-beta",
       opaqueMessage: createPrivateMessage({
         groupId: "group-beta",
         epoch: 1n,
@@ -1163,6 +878,7 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1212,6 +928,7 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1260,6 +977,7 @@ describe.each<StorageFixture>([
     const coordinator = createCoordinatorWithStorage(storage);
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1326,6 +1044,7 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1368,6 +1087,7 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1409,6 +1129,7 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1446,6 +1167,7 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1483,6 +1205,7 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,
@@ -1526,6 +1249,7 @@ describe.each<StorageFixture>([
     });
 
     coordinator.postGroupMessage({
+      groupId: "group-alpha",
       opaqueMessage: createPrivateMessage({
         groupId: "group-alpha",
         epoch: 1n,

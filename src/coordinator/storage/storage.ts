@@ -6,7 +6,6 @@ import type {
   FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
-  GroupRoutingRecord,
   JoinRequestRecord,
   PublishedKeyPackageRecord,
   WelcomeQueueRecord,
@@ -44,17 +43,9 @@ export function partitionConsumedJoinRequests(
  * - different groups may each have a message with cursor 1
  * - `fetchGroupMessages({ groupId, afterCursor })` must interpret
  *   `afterCursor` only within the specified group
- * - `getGroupRouting(groupId)?.lastMessageCursor` must equal the highest
- *   cursor persisted for that same group.
  */
 export interface AppendGroupMessageParams {
   groupId: string;
-  /** @deprecated Only meaningful for legacy (unencrypted) messages.
-   *  Encrypted messages pass 0n and the column is left at its default. */
-  latestHandshakeEpoch: bigint;
-  /** @deprecated NULL for encrypted messages. Retained for legacy
-   *  clients that use server-side since_epoch filtering. */
-  epoch: bigint;
   opaqueMessage: Uint8Array;
   createdAt: number;
   encrypted: boolean;
@@ -141,6 +132,5 @@ export interface CoordinatorStorage {
   fetchManyGroupMessages(
     input: FetchManyGroupMessagesInput,
   ): GroupMessageRecord[];
-  getGroupRouting(groupId: string): GroupRoutingRecord | null;
   close?(): void;
 }

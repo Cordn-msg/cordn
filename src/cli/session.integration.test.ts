@@ -13,8 +13,10 @@ import {
 import { cordnClient } from "./coordinatorClient.ts";
 import { prepareAddMember } from "./membershipFlow.ts";
 import { updateGroupMetadataExtension } from "./utils/mlsGroupLifecycle.ts";
+import { encryptGroupPayload } from "./utils/mlsMessages.ts";
 import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
+import { decodeBase64 } from "../server/base64.ts";
 import { PrivateKeySigner } from "@contextvm/sdk";
 
 async function waitForCondition(
@@ -152,7 +154,7 @@ describe("CliSession", () => {
     }
   });
 
-  test("exchanges encrypted messages end-to-end when encryptOutbound is enabled", async () => {
+  test("exchanges encrypted messages end-to-end", async () => {
     const relayHub = new MockRelayHub();
     const serverSigner = new PrivateKeySigner();
     const serverPubkey = await serverSigner.getPublicKey();
@@ -162,19 +164,17 @@ describe("CliSession", () => {
     });
 
     try {
-      // Both clients opt into payload encryption. This exercises the
+      // Both clients encrypt payloads (Marmot-style). This exercises the
       // encrypted post path, the encrypted self-echo reconciliation of the
-      // add-member commit (matched via postedMsgBase64), and the
-      // encrypted read path.
+      // add-member commit (matched via postedMsgBase64), and the encrypted
+      // read path.
       const alice = new CliSession({
         serverPubkey,
         relayHandler: relayHub.createRelayHandler(),
-        encryptOutbound: true,
       });
       const bob = new CliSession({
         serverPubkey,
         relayHandler: relayHub.createRelayHandler(),
-        encryptOutbound: true,
       });
       sessions.push(alice, bob);
 
@@ -199,57 +199,6 @@ describe("CliSession", () => {
 
       expect(aliceSynced).toHaveLength(1);
       expect(aliceSynced[0]?.content).toBe("hello alice");
-    } finally {
-      await server.transport.close();
-    }
-  });
-
-  test("mixed-version group interoperates: an encrypting client and a legacy client both read each other", async () => {
-    const relayHub = new MockRelayHub();
-    const serverSigner = new PrivateKeySigner();
-    const serverPubkey = await serverSigner.getPublicKey();
-    const server = await connectServer({
-      signer: serverSigner,
-      relayHandler: relayHub.createRelayHandler(),
-    });
-
-    try {
-      // The staged-rollout invariant: the read path is symmetric regardless
-      // of the writer's gate. Alice encrypts; Bob posts legacy. Each must
-      // still read the other's messages because they share MLS group state.
-      const alice = new CliSession({
-        serverPubkey,
-        relayHandler: relayHub.createRelayHandler(),
-        encryptOutbound: true,
-      });
-      const bob = new CliSession({
-        serverPubkey,
-        relayHandler: relayHub.createRelayHandler(),
-        encryptOutbound: false,
-      });
-      sessions.push(alice, bob);
-
-      await alice.generateKeyPackage("alice-main");
-      await bob.generateKeyPackage("bob-main");
-
-      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
-      const invitation = await alice.addMember("demo", bob.stablePubkey);
-      await alice.syncGroup("demo");
-
-      await bob.fetchWelcomes();
-      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
-
-      // Alice (encrypting) -> Bob (legacy reader). Bob decrypts the
-      // encrypted payload using the shared exporter secret.
-      await alice.sendMessage("demo", "encrypted-hello");
-      const bobSynced = await bob.syncGroup("demo");
-      expect(bobSynced.map((m) => m.content)).toEqual(["encrypted-hello"]);
-
-      // Bob (legacy poster) -> Alice (encrypting reader). Alice reads the
-      // raw MLS bytes through the legacy read branch.
-      await bob.sendMessage("demo", "legacy-hello");
-      const aliceSynced = await alice.syncGroup("demo");
-      expect(aliceSynced.map((m) => m.content)).toEqual(["legacy-hello"]);
     } finally {
       await server.transport.close();
     }
@@ -1274,8 +1223,15 @@ describe("CliSession", () => {
       });
       attackerClients.push(bobAttacker);
 
+      const forgedEncrypted = (
+        await encryptGroupPayload({
+          state: bob.getGroup("demo").state,
+          serializedMlsMessage: decodeBase64(forged.commitMessageBase64),
+        })
+      ).encryptedBase64;
       await bobAttacker.PostGroupMessage({
-        msg_64: forged.commitMessageBase64,
+        gid: bob.deriveGroupId(bob.getGroup("demo").state),
+        msg_64: forgedEncrypted,
       });
 
       // Every honest member, including bob's own honest CliSession, must
@@ -1412,8 +1368,15 @@ describe("CliSession", () => {
         deriveGroupId: (state) => bob.deriveGroupId(state),
       });
 
+      const forgedEncrypted = (
+        await encryptGroupPayload({
+          state: bob.getGroup("demo").state,
+          serializedMlsMessage: decodeBase64(forged.commitMessageBase64),
+        })
+      ).encryptedBase64;
       await bobAttacker.PostGroupMessage({
-        msg_64: forged.commitMessageBase64,
+        gid: bob.deriveGroupId(bob.getGroup("demo").state),
+        msg_64: forgedEncrypted,
       });
 
       // Every honest member rejects the forged add and records one sync

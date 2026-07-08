@@ -5,7 +5,6 @@ import type {
   FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
-  GroupRoutingRecord,
   JoinRequestRecord,
   PostGroupMessageInput,
   PublishedKeyPackageRecord,
@@ -19,15 +18,6 @@ import type {
 import type { CoordinatorStorage } from "./storage/storage.ts";
 import { InMemoryCoordinatorStorage } from "./storage/inMemoryStorage.ts";
 import { isLastResortKeyPackage } from "../lastResortKeyPackage.ts";
-
-import {
-  contentTypes,
-  mlsMessageDecoder,
-  wireformats,
-  type MlsMessage,
-} from "ts-mls";
-
-const groupIdDecoder = new TextDecoder();
 
 export interface CoordinatorOptions {
   storage?: CoordinatorStorage;
@@ -43,63 +33,6 @@ export interface CoordinatorOptions {
    *  Observation (fetch) never deletes; only explicit `consumed` acks or
    *  this ceiling remove records. */
   maxAgeMs?: number;
-}
-
-/** @deprecated Encrypted messages skip MLS decoding entirely.
- *  Retained for backward compatibility with legacy clients. */
-function decodeOpaqueMessage(opaqueMessage: Uint8Array): MlsMessage {
-  const decoded = mlsMessageDecoder(opaqueMessage, 0);
-  if (!decoded) {
-    throw new Error("Unable to decode MLS message");
-  }
-
-  return decoded[0];
-}
-
-/** @deprecated Encrypted messages skip MLS metadata extraction.
- *  Retained for backward compatibility with legacy clients. */
-function getMessageMetadata(message: MlsMessage): {
-  groupId: string;
-  epoch: bigint;
-  handshakeMessage: boolean;
-} {
-  switch (message.wireformat) {
-    case wireformats.mls_private_message:
-      return {
-        groupId: groupIdDecoder.decode(message.privateMessage.groupId),
-        epoch: message.privateMessage.epoch,
-        handshakeMessage:
-          message.privateMessage.contentType !== contentTypes.application,
-      };
-    case wireformats.mls_public_message:
-      return {
-        groupId: groupIdDecoder.decode(message.publicMessage.content.groupId),
-        epoch: message.publicMessage.content.epoch,
-        handshakeMessage:
-          message.publicMessage.content.contentType !==
-          contentTypes.application,
-      };
-    default:
-      throw new Error(
-        "Group delivery only accepts MLS private or public messages",
-      );
-  }
-}
-
-/** @deprecated Encrypted messages do not track handshake epochs.
- *  Retained for backward compatibility with legacy clients. */
-function resolveLatestHandshakeEpoch(
-  currentRouting: GroupRoutingRecord | null,
-  epoch: bigint,
-  handshakeMessage: boolean,
-): bigint {
-  if (!handshakeMessage) {
-    return currentRouting?.latestHandshakeEpoch ?? epoch;
-  }
-
-  return currentRouting && currentRouting.latestHandshakeEpoch > epoch
-    ? currentRouting.latestHandshakeEpoch
-    : epoch;
 }
 
 class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
@@ -205,6 +138,13 @@ export class Coordinator {
   private readonly groupSubscribers = new Map<
     string,
     Set<GroupMessageSubscriber>
+  >();
+  // Distinct-subscriber refcount. A multi-group sub joins N group Sets with one
+  // subscriber object, so summed Set sizes over-count; this counts each object
+  // once. O(1) for getActiveSubscriptionCount.
+  private readonly subscriberRefcounts = new Map<
+    GroupMessageSubscriber,
+    number
   >();
   private readonly cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -320,56 +260,17 @@ export class Coordinator {
   }
 
   postGroupMessage(input: PostGroupMessageInput): GroupMessageRecord {
-    // Encrypted path: caller supplies the outer delivery gid.
-    // Coordinator skips MLS decoding entirely — it cannot read
-    // epoch, wireformat, or inner MLS group_id from the payload.
-    if (input.groupId !== undefined) {
-      const record = this.storage.appendGroupMessage({
-        groupId: input.groupId,
-        latestHandshakeEpoch: 0n,
-        epoch: 0n,
-        opaqueMessage: input.opaqueMessage,
-        createdAt: this.now(),
-        encrypted: true,
-      });
-
-      this.publishLiveGroupMessage(record);
-      return record;
-    }
-
-    // Legacy path (deprecated): MLS decoding for backward compatibility
-    const decodedMessage = decodeOpaqueMessage(input.opaqueMessage);
-    const { groupId, epoch, handshakeMessage } =
-      getMessageMetadata(decodedMessage);
-    const currentRouting = this.storage.getGroupRouting(groupId);
-
-    if (
-      handshakeMessage &&
-      currentRouting &&
-      epoch < currentRouting.latestHandshakeEpoch
-    ) {
-      throw new Error(
-        `Rejected stale handshake message for group ${groupId}: ${epoch} < ${currentRouting.latestHandshakeEpoch}`,
-      );
-    }
-
-    const latestHandshakeEpoch = resolveLatestHandshakeEpoch(
-      currentRouting,
-      epoch,
-      handshakeMessage,
-    );
-
+    // Coordinator is opaque: it routes by the caller-supplied delivery gid
+    // and never decodes the payload. It cannot learn epoch, wireformat,
+    // content type, or the inner MLS group_id.
     const record = this.storage.appendGroupMessage({
-      groupId,
-      latestHandshakeEpoch,
-      epoch,
+      groupId: input.groupId,
       opaqueMessage: input.opaqueMessage,
       createdAt: this.now(),
-      encrypted: false,
+      encrypted: true,
     });
 
     this.publishLiveGroupMessage(record);
-
     return record;
   }
 
@@ -470,6 +371,10 @@ export class Coordinator {
     }
 
     subscribers.add(subscriber);
+    this.subscriberRefcounts.set(
+      subscriber,
+      (this.subscriberRefcounts.get(subscriber) ?? 0) + 1,
+    );
   }
 
   private removeGroupSubscriber(
@@ -481,7 +386,14 @@ export class Coordinator {
       return;
     }
 
-    subscribers.delete(subscriber);
+    if (subscribers.delete(subscriber)) {
+      const next = (this.subscriberRefcounts.get(subscriber) ?? 0) - 1;
+      if (next <= 0) {
+        this.subscriberRefcounts.delete(subscriber);
+      } else {
+        this.subscriberRefcounts.set(subscriber, next);
+      }
+    }
     if (subscribers.size === 0) {
       this.groupSubscribers.delete(groupId);
     }
@@ -498,16 +410,8 @@ export class Coordinator {
     }
   }
 
-  getGroupRouting(groupId: string): GroupRoutingRecord | null {
-    return this.storage.getGroupRouting(groupId);
-  }
-
   getActiveSubscriptionCount(): number {
-    let count = 0;
-    for (const subscribers of this.groupSubscribers.values()) {
-      count += subscribers.size;
-    }
-    return count;
+    return this.subscriberRefcounts.size;
   }
 }
 

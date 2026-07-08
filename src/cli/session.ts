@@ -135,8 +135,6 @@ export class CliSession {
 
   private readonly store = new CliSessionStore();
   private readonly coordinatorRegistry: CoordinatorClientRegistry;
-  /** Outbound payload encryption gate. See {@link CliSessionOptions.encryptOutbound}. */
-  private readonly encryptOutbound: boolean;
   /** Content-addressed store for encrypted media blobs, if configured. */
   private readonly mediaStore?: MediaStore;
   private readonly groupIdDecoder = new TextDecoder();
@@ -151,7 +149,6 @@ export class CliSession {
       privateKey: this.privateKey,
     });
     this.stablePubkey = deriveStablePubkey(this.privateKey);
-    this.encryptOutbound = options.encryptOutbound ?? false;
     this.mediaStore = options.mediaStore;
   }
 
@@ -971,24 +968,18 @@ export class CliSession {
     gid: string;
     postedMsgBase64: string;
   }> {
-    // When encryption is enabled, the serialized MLS message is sealed
-    // with a key derived from the current epoch's exporter secret: all
-    // group members can decrypt, the coordinator cannot. The wrapper we
-    // post is also what we match against the self-echo of a commit
-    // (sealed with the pre-commit secret) when reconciling pending
-    // operations after the session adopts the new state. When disabled,
-    // raw MLS bytes are posted so legacy clients can still read them.
-    const gid = this.encryptOutbound
-      ? this.deriveGroupId(group.state)
-      : undefined;
-    const msg_64 = this.encryptOutbound
-      ? (
-          await encryptGroupPayload({
-            state: group.state,
-            serializedMlsMessage: decodeBase64(mlsMessageBase64),
-          })
-        ).encryptedBase64
-      : mlsMessageBase64;
+    // The serialized MLS message is sealed with a key derived from the
+    // current epoch's exporter secret: all group members can decrypt, the
+    // coordinator cannot. The wrapper we post is also what we match against
+    // the self-echo of a commit (sealed with the pre-commit secret) when
+    // reconciling pending operations after the session adopts the new state.
+    const gid = this.deriveGroupId(group.state);
+    const msg_64 = (
+      await encryptGroupPayload({
+        state: group.state,
+        serializedMlsMessage: decodeBase64(mlsMessageBase64),
+      })
+    ).encryptedBase64;
     const result = await this.getGroupClient(group).PostGroupMessage({
       msg_64,
       gid,
