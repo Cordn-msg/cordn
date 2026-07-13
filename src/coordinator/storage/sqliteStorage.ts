@@ -60,15 +60,12 @@ interface JoinRequestRow {
 interface GroupMessageRow {
   cursor: number;
   group_id: string;
-  epoch: string | null;
   opaque_message: Buffer;
   created_at: number;
-  encrypted: number;
 }
 
 interface GroupRoutingRow {
   group_id: string;
-  latest_handshake_epoch: string;
   last_message_cursor: number;
 }
 
@@ -139,14 +136,14 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     { count: number }
   >;
   private readonly upsertGroupRoutingStatement: Database.Statement<
-    [string, string, number]
+    [string, number]
   >;
   private readonly selectGroupRoutingStatement: Database.Statement<
     [string],
     GroupRoutingRow
   >;
   private readonly insertGroupMessageStatement: Database.Statement<
-    [number, string, string, Buffer, number, number]
+    [number, string, Buffer, number]
   >;
   private readonly selectGroupRoutingForCursorStatement: Database.Statement<
     [string],
@@ -158,14 +155,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   >;
   private readonly fetchGroupMessagesAfterCursorStatement: Database.Statement<
     [string, number],
-    GroupMessageRow
-  >;
-  private readonly fetchGroupMessagesSinceEpochStatement: Database.Statement<
-    [string, string],
-    GroupMessageRow
-  >;
-  private readonly fetchGroupMessagesSinceEpochAfterCursorStatement: Database.Statement<
-    [string, number, string],
     GroupMessageRow
   >;
   private readonly fetchManyGroupMessagesStatements = new Map<
@@ -267,9 +256,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS group_routing (
         group_id TEXT PRIMARY KEY,
-        /** @deprecated No longer meaningful for encrypted messages.
-         *  Retained for legacy clients during transition. */
-        latest_handshake_epoch TEXT NOT NULL,
         last_message_cursor INTEGER NOT NULL
       );
 
@@ -278,8 +264,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         cursor INTEGER NOT NULL,
         group_id TEXT NOT NULL,
         opaque_message BLOB NOT NULL,
-        created_at INTEGER NOT NULL,
-        encrypted INTEGER NOT NULL DEFAULT 0
+        created_at INTEGER NOT NULL
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_group_messages_group_cursor_unique
@@ -289,24 +274,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       ON group_messages (group_id, cursor);
     `);
 
-    /** @deprecated epoch column retained only for legacy sinceEpoch filtering.
-     *  Encrypted messages write "0"; clients filter epochs via decryption. */
-    // Migration: add epoch column for group message sinceEpoch filtering.
-    // NULL means "unknown epoch" (legacy data). SinceEpoch > 0 excludes NULL
-    // epochs; sinceEpoch = 0 (or undefined) includes them for backward compat.
     const groupMessagesColumns = this.database
       .prepare("PRAGMA table_info('group_messages')")
       .all() as Array<{ name: string }>;
-    if (!groupMessagesColumns.some((col) => col.name === "epoch")) {
-      this.database.exec("ALTER TABLE group_messages ADD COLUMN epoch TEXT");
-    }
-    // Migration: add encrypted column for payload encryption support.
-    // 0 = legacy (unencrypted), 1 = encrypted.
-    if (!groupMessagesColumns.some((col) => col.name === "encrypted")) {
-      this.database.exec(
-        "ALTER TABLE group_messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0",
-      );
-    }
     // Migration: drop the ephemeral_sender_pubkey column. It was a
     // session-scoped transport handle the coordinator never read (routing
     // is by gid, rate-limiting uses the caller identity at call time).
@@ -457,38 +427,26 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       { count: number }
     >("SELECT COUNT(*) as count FROM join_requests WHERE group_id = ?");
-    this.upsertGroupRoutingStatement = this.database.prepare<
-      [string, string, number]
-    >(`
-      INSERT INTO group_routing (
-        group_id,
-        latest_handshake_epoch,
-        last_message_cursor
-      ) VALUES (?, ?, ?)
+    this.upsertGroupRoutingStatement = this.database.prepare<[string, number]>(`
+      INSERT INTO group_routing (group_id, last_message_cursor)
+      VALUES (?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
-        latest_handshake_epoch = excluded.latest_handshake_epoch,
         last_message_cursor = excluded.last_message_cursor
     `);
     this.selectGroupRoutingStatement = this.database.prepare<
       [string],
       GroupRoutingRow
     >(`
-      SELECT group_id, latest_handshake_epoch, last_message_cursor
+      SELECT group_id, last_message_cursor
       FROM group_routing
       WHERE group_id = ?
       LIMIT 1
     `);
     this.insertGroupMessageStatement = this.database.prepare<
-      [number, string, string, Buffer, number, number]
+      [number, string, Buffer, number]
     >(`
-      INSERT INTO group_messages (
-        cursor,
-        group_id,
-        epoch,
-        opaque_message,
-        created_at,
-        encrypted
-      ) VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO group_messages (cursor, group_id, opaque_message, created_at)
+      VALUES (?, ?, ?, ?)
     `);
     this.selectGroupRoutingForCursorStatement = this.database.prepare<
       [string],
@@ -502,7 +460,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, epoch, opaque_message, created_at, encrypted
+      SELECT cursor, group_id, opaque_message, created_at
       FROM group_messages
       WHERE group_id = ?
       ORDER BY cursor ASC
@@ -511,33 +469,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string, number],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, epoch, opaque_message, created_at, encrypted
+      SELECT cursor, group_id, opaque_message, created_at
       FROM group_messages
       WHERE group_id = ? AND cursor > ?
-      ORDER BY cursor ASC
-    `);
-    /** @deprecated sinceEpoch filtering is replaced by client-side
-     *  payload decryption. Retained for legacy clients. */
-    this.fetchGroupMessagesSinceEpochStatement = this.database.prepare<
-      [string, string],
-      GroupMessageRow
-    >(`
-      SELECT cursor, group_id, epoch, opaque_message, created_at, encrypted
-      FROM group_messages
-      WHERE group_id = ?
-        AND epoch IS NOT NULL
-        AND CAST(epoch AS INTEGER) >= CAST(? AS INTEGER)
-      ORDER BY cursor ASC
-    `);
-    /** @deprecated sinceEpoch filtering is replaced by client-side
-     *  payload decryption. Retained for legacy clients. */
-    this.fetchGroupMessagesSinceEpochAfterCursorStatement = this.database
-      .prepare<[string, number, string], GroupMessageRow>(`
-      SELECT cursor, group_id, epoch, opaque_message, created_at, encrypted
-      FROM group_messages
-      WHERE group_id = ? AND cursor > ?
-        AND epoch IS NOT NULL
-        AND CAST(epoch AS INTEGER) >= CAST(? AS INTEGER)
       ORDER BY cursor ASC
     `);
 
@@ -672,25 +606,17 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         this.insertGroupMessageStatement.run(
           cursor,
           params.groupId,
-          params.encrypted ? "0" : params.epoch.toString(),
           Buffer.from(params.opaqueMessage),
           params.createdAt,
-          params.encrypted ? 1 : 0,
         );
 
-        this.upsertGroupRoutingStatement.run(
-          params.groupId,
-          params.latestHandshakeEpoch.toString(),
-          cursor,
-        );
+        this.upsertGroupRoutingStatement.run(params.groupId, cursor);
 
         return {
           cursor,
           groupId: params.groupId,
-          epoch: params.encrypted ? 0n : params.epoch,
           opaqueMessage: params.opaqueMessage,
           createdAt: params.createdAt,
-          encrypted: params.encrypted,
         } satisfies GroupMessageRecord;
       },
     );
@@ -815,22 +741,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   }
 
   fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[] {
-    if (input.sinceEpoch !== undefined && input.sinceEpoch > 0n) {
-      const sinceEpochStr = input.sinceEpoch.toString();
-      const rows =
-        input.afterCursor === undefined
-          ? this.fetchGroupMessagesSinceEpochStatement.all(
-              input.groupId,
-              sinceEpochStr,
-            )
-          : this.fetchGroupMessagesSinceEpochAfterCursorStatement.all(
-              input.groupId,
-              input.afterCursor,
-              sinceEpochStr,
-            );
-      return rows.map((row) => this.mapGroupMessageRow(row));
-    }
-
     const rows =
       input.afterCursor === undefined
         ? this.fetchGroupMessagesStatement.all(input.groupId)
@@ -856,9 +766,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       index,
       group.groupId,
       group.afterCursor ?? 0,
-      group.sinceEpoch !== undefined && group.sinceEpoch > 0n
-        ? group.sinceEpoch.toString()
-        : "0",
     ]);
     const rows = statement.all(...params);
 
@@ -873,23 +780,18 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       return cached;
     }
 
-    const values = Array.from(
-      { length: groupCount },
-      () => "(?, ?, ?, ?)",
-    ).join(", ");
+    const values = Array.from({ length: groupCount }, () => "(?, ?, ?)").join(
+      ", ",
+    );
     const statement = this.database.prepare<unknown[], GroupMessageRow>(`
-        WITH requested(group_order, group_id, after_cursor, since_epoch) AS (
+        WITH requested(group_order, group_id, after_cursor) AS (
           VALUES ${values}
         )
-        SELECT gm.cursor, gm.group_id, gm.epoch, gm.opaque_message, gm.created_at, gm.encrypted
+        SELECT gm.cursor, gm.group_id, gm.opaque_message, gm.created_at
         FROM requested r
         JOIN group_messages gm
           ON gm.group_id = r.group_id
          AND gm.cursor > r.after_cursor
-         AND (
-           CAST(r.since_epoch AS INTEGER) = 0
-           OR gm.epoch IS NOT NULL AND CAST(gm.epoch AS INTEGER) >= CAST(r.since_epoch AS INTEGER)
-         )
         ORDER BY r.group_order ASC, gm.cursor ASC
       `);
 
@@ -934,7 +836,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
 
     return {
       groupId: row.group_id,
-      latestHandshakeEpoch: BigInt(row.latest_handshake_epoch),
       lastMessageCursor: row.last_message_cursor,
     };
   }
@@ -979,10 +880,8 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     return {
       cursor: row.cursor,
       groupId: row.group_id,
-      epoch: row.epoch !== null ? BigInt(row.epoch) : 0n,
       opaqueMessage: toUint8Array(row.opaque_message),
       createdAt: row.created_at,
-      encrypted: row.encrypted === 1,
     };
   }
 }

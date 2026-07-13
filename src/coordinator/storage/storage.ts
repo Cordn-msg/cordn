@@ -49,15 +49,8 @@ export function partitionConsumedJoinRequests(
  */
 export interface AppendGroupMessageParams {
   groupId: string;
-  /** @deprecated Only meaningful for legacy (unencrypted) messages.
-   *  Encrypted messages pass 0n and the column is left at its default. */
-  latestHandshakeEpoch: bigint;
-  /** @deprecated NULL for encrypted messages. Retained for legacy
-   *  clients that use server-side since_epoch filtering. */
-  epoch: bigint;
   opaqueMessage: Uint8Array;
   createdAt: number;
-  encrypted: boolean;
 }
 
 export interface CoordinatorStorage {

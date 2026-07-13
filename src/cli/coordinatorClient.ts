@@ -15,11 +15,8 @@ import {
   COORDINATOR_METHODS,
   type FetchManyGroupMessagesInput,
   type FetchManyPendingJoinRequestsInput,
-  type FetchGroupMessagesInput,
   fetchManyGroupMessagesOutputSchema,
   fetchManyPendingJoinRequestsOutputSchema,
-  fetchGroupMessagesOutputSchema,
-  fetchPendingJoinRequestsOutputSchema,
   fetchPendingWelcomesOutputSchema,
   listAvailableKeyPackagesOutputSchema,
   type PostGroupMessageInput,
@@ -29,13 +26,9 @@ import {
   storeJoinRequestOutputSchema,
   storeWelcomeOutputSchema,
   subscribeManyGroupMessagesOutputSchema,
-  subscribeGroupMessagesOutputSchema,
   type ConsumeKeyPackageOutput,
-  type FetchGroupMessagesOutput,
   type FetchManyGroupMessagesOutput,
   type FetchManyPendingJoinRequestsOutput,
-  type FetchPendingJoinRequestsInput,
-  type FetchPendingJoinRequestsOutput,
   type FetchPendingWelcomesInput,
   type FetchPendingWelcomesOutput,
   type GroupMessage,
@@ -47,8 +40,6 @@ import {
   type RemoveKeyPackagesOutput,
   type StoreJoinRequestInput,
   type StoreJoinRequestOutput,
-  type SubscribeGroupMessagesInput,
-  type SubscribeGroupMessagesOutput,
   type SubscribeManyGroupMessagesInput,
   type SubscribeManyGroupMessagesOutput,
   type StoreWelcomeInput,
@@ -77,26 +68,15 @@ export type coordinatorClient = {
   StoreJoinRequest: (
     input: StoreJoinRequestInput,
   ) => Promise<StoreJoinRequestOutput>;
-  FetchPendingJoinRequests: (
-    input: FetchPendingJoinRequestsInput,
-  ) => Promise<FetchPendingJoinRequestsOutput>;
   FetchManyPendingJoinRequests: (
     input: FetchManyPendingJoinRequestsInput,
   ) => Promise<FetchManyPendingJoinRequestsOutput>;
   PostGroupMessage: (
     input: PostGroupMessageInput,
   ) => Promise<PostGroupMessageOutput>;
-  FetchGroupMessages: (
-    input: FetchGroupMessagesInput,
-  ) => Promise<FetchGroupMessagesOutput>;
   FetchManyGroupMessages: (
     input: FetchManyGroupMessagesInput,
   ) => Promise<FetchManyGroupMessagesOutput>;
-  SubscribeGroupMessages: (input: SubscribeGroupMessagesInput) => Promise<{
-    stream: AsyncIterable<GroupMessage>;
-    result: Promise<SubscribeGroupMessagesOutput>;
-    abort: (reason?: string) => Promise<void>;
-  }>;
   SubscribeManyGroupMessages: (
     input: SubscribeManyGroupMessagesInput,
   ) => Promise<{
@@ -327,17 +307,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  async FetchPendingJoinRequests(
-    input: FetchPendingJoinRequestsInput,
-  ): Promise<FetchPendingJoinRequestsOutput> {
-    return this.call(
-      "ephemeral",
-      COORDINATOR_METHODS.fetchPendingJoinRequests,
-      input,
-      fetchPendingJoinRequestsOutputSchema,
-    );
-  }
-
   async FetchManyPendingJoinRequests(
     input: FetchManyPendingJoinRequestsInput,
   ): Promise<FetchManyPendingJoinRequestsOutput> {
@@ -360,17 +329,6 @@ export class cordnClient implements coordinatorClient {
     );
   }
 
-  async FetchGroupMessages(
-    input: FetchGroupMessagesInput,
-  ): Promise<FetchGroupMessagesOutput> {
-    return this.call(
-      "ephemeral",
-      COORDINATOR_METHODS.fetchGroupMessages,
-      input,
-      fetchGroupMessagesOutputSchema,
-    );
-  }
-
   async FetchManyGroupMessages(
     input: FetchManyGroupMessagesInput,
   ): Promise<FetchManyGroupMessagesOutput> {
@@ -379,18 +337,6 @@ export class cordnClient implements coordinatorClient {
       COORDINATOR_METHODS.fetchManyGroupMessages,
       input,
       fetchManyGroupMessagesOutputSchema,
-    );
-  }
-
-  async SubscribeGroupMessages(input: SubscribeGroupMessagesInput): Promise<{
-    stream: AsyncIterable<GroupMessage>;
-    result: Promise<SubscribeGroupMessagesOutput>;
-    abort: (reason?: string) => Promise<void>;
-  }> {
-    return this.subscribe(
-      COORDINATOR_METHODS.subscribeGroupMessages,
-      input,
-      subscribeGroupMessagesOutputSchema,
     );
   }
 

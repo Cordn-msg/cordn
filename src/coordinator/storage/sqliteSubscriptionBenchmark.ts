@@ -87,6 +87,7 @@ function createSeededCoordinator(config: BenchmarkConfig): SeededCoordinator {
       messageIndex += 1
     ) {
       coordinator.postGroupMessage({
+        groupId,
         opaqueMessage: createPrivateMessage({
           groupId,
           epoch: 1n,
@@ -172,6 +173,7 @@ async function benchmarkSingleSubscriptions(
       messageIndex += 1
     ) {
       coordinator.postGroupMessage({
+        groupId,
         opaqueMessage: createPrivateMessage({
           groupId,
           epoch: 1n,
@@ -211,6 +213,7 @@ async function benchmarkMultiSubscription(
       messageIndex += 1
     ) {
       coordinator.postGroupMessage({
+        groupId,
         opaqueMessage: createPrivateMessage({
           groupId,
           epoch: 1n,

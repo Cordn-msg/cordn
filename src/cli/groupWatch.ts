@@ -30,9 +30,13 @@ export function runGroupWatch(params: {
     await callbacks.onMessages(catchup);
 
     const afterCursor = getAfterCursor();
-    const subscription = await client.SubscribeGroupMessages({
-      gid: groupId,
-      after: afterCursor > 0 ? afterCursor : undefined,
+    const subscription = await client.SubscribeManyGroupMessages({
+      groups: [
+        {
+          gid: groupId,
+          after: afterCursor > 0 ? afterCursor : undefined,
+        },
+      ],
     });
     void subscription.result.catch(() => undefined);
 

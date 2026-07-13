@@ -20,15 +20,6 @@ import type { CoordinatorStorage } from "./storage/storage.ts";
 import { InMemoryCoordinatorStorage } from "./storage/inMemoryStorage.ts";
 import { isLastResortKeyPackage } from "../lastResortKeyPackage.ts";
 
-import {
-  contentTypes,
-  mlsMessageDecoder,
-  wireformats,
-  type MlsMessage,
-} from "ts-mls";
-
-const groupIdDecoder = new TextDecoder();
-
 export interface CoordinatorOptions {
   storage?: CoordinatorStorage;
   now?: () => number;
@@ -43,63 +34,6 @@ export interface CoordinatorOptions {
    *  Observation (fetch) never deletes; only explicit `consumed` acks or
    *  this ceiling remove records. */
   maxAgeMs?: number;
-}
-
-/** @deprecated Encrypted messages skip MLS decoding entirely.
- *  Retained for backward compatibility with legacy clients. */
-function decodeOpaqueMessage(opaqueMessage: Uint8Array): MlsMessage {
-  const decoded = mlsMessageDecoder(opaqueMessage, 0);
-  if (!decoded) {
-    throw new Error("Unable to decode MLS message");
-  }
-
-  return decoded[0];
-}
-
-/** @deprecated Encrypted messages skip MLS metadata extraction.
- *  Retained for backward compatibility with legacy clients. */
-function getMessageMetadata(message: MlsMessage): {
-  groupId: string;
-  epoch: bigint;
-  handshakeMessage: boolean;
-} {
-  switch (message.wireformat) {
-    case wireformats.mls_private_message:
-      return {
-        groupId: groupIdDecoder.decode(message.privateMessage.groupId),
-        epoch: message.privateMessage.epoch,
-        handshakeMessage:
-          message.privateMessage.contentType !== contentTypes.application,
-      };
-    case wireformats.mls_public_message:
-      return {
-        groupId: groupIdDecoder.decode(message.publicMessage.content.groupId),
-        epoch: message.publicMessage.content.epoch,
-        handshakeMessage:
-          message.publicMessage.content.contentType !==
-          contentTypes.application,
-      };
-    default:
-      throw new Error(
-        "Group delivery only accepts MLS private or public messages",
-      );
-  }
-}
-
-/** @deprecated Encrypted messages do not track handshake epochs.
- *  Retained for backward compatibility with legacy clients. */
-function resolveLatestHandshakeEpoch(
-  currentRouting: GroupRoutingRecord | null,
-  epoch: bigint,
-  handshakeMessage: boolean,
-): bigint {
-  if (!handshakeMessage) {
-    return currentRouting?.latestHandshakeEpoch ?? epoch;
-  }
-
-  return currentRouting && currentRouting.latestHandshakeEpoch > epoch
-    ? currentRouting.latestHandshakeEpoch
-    : epoch;
 }
 
 class AsyncMessageQueue implements AsyncIterable<GroupMessageRecord> {
@@ -320,56 +254,13 @@ export class Coordinator {
   }
 
   postGroupMessage(input: PostGroupMessageInput): GroupMessageRecord {
-    // Encrypted path: caller supplies the outer delivery gid.
-    // Coordinator skips MLS decoding entirely — it cannot read
-    // epoch, wireformat, or inner MLS group_id from the payload.
-    if (input.groupId !== undefined) {
-      const record = this.storage.appendGroupMessage({
-        groupId: input.groupId,
-        latestHandshakeEpoch: 0n,
-        epoch: 0n,
-        opaqueMessage: input.opaqueMessage,
-        createdAt: this.now(),
-        encrypted: true,
-      });
-
-      this.publishLiveGroupMessage(record);
-      return record;
-    }
-
-    // Legacy path (deprecated): MLS decoding for backward compatibility
-    const decodedMessage = decodeOpaqueMessage(input.opaqueMessage);
-    const { groupId, epoch, handshakeMessage } =
-      getMessageMetadata(decodedMessage);
-    const currentRouting = this.storage.getGroupRouting(groupId);
-
-    if (
-      handshakeMessage &&
-      currentRouting &&
-      epoch < currentRouting.latestHandshakeEpoch
-    ) {
-      throw new Error(
-        `Rejected stale handshake message for group ${groupId}: ${epoch} < ${currentRouting.latestHandshakeEpoch}`,
-      );
-    }
-
-    const latestHandshakeEpoch = resolveLatestHandshakeEpoch(
-      currentRouting,
-      epoch,
-      handshakeMessage,
-    );
-
     const record = this.storage.appendGroupMessage({
-      groupId,
-      latestHandshakeEpoch,
-      epoch,
+      groupId: input.groupId,
       opaqueMessage: input.opaqueMessage,
       createdAt: this.now(),
-      encrypted: false,
     });
 
     this.publishLiveGroupMessage(record);
-
     return record;
   }
 

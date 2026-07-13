@@ -14,24 +14,9 @@ export interface CliSessionOptions {
   defaultCoordinator?: CoordinatorTarget;
   coordinators?: Record<string, CoordinatorTarget>;
   /**
-   * Encrypt outbound group payloads (Marmot-style) before posting.
-   *
-   * - `false` (default): raw MLS bytes are posted so clients that have
-   *   not upgraded can still read messages. Use during the staged
-   *   rollout while the reader population catches up to the `encrypted`
-   *   flag.
-   * - `true`: payloads are encrypted; only clients holding the current
-   *   epoch's exporter secret can decrypt.
-   *
-   * The read path always handles both encrypted and legacy shapes
-   * regardless of this setting, so mixed-version groups interoperate.
-   */
-  encryptOutbound?: boolean;
-
-  /**
    * Content-addressed store used to publish/fetch encrypted media blobs. When
    * unset, `sendMedia` and `decryptMediaMessage` throw. The media layer is
-   * independent of `encryptOutbound` and the coordinator, which never sees
+   * independent of payload encryption and the coordinator, which never sees
    * blobs. See `spec/applications/encrypted-media.md`.
    */
   mediaStore?: MediaStore;

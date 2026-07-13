@@ -45,7 +45,7 @@ import {
 } from "../contracts/index.ts";
 import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";
-import type { FetchPendingJoinRequestsOutput } from "../contracts/index.ts";
+import type { FetchManyPendingJoinRequestsOutput } from "../contracts/index.ts";
 import { runGroupWatch } from "./groupWatch.ts";
 import {
   acceptStoredWelcome,
@@ -152,8 +152,6 @@ export class CliSession {
 
   private readonly store = new CliSessionStore();
   private readonly coordinatorRegistry: CoordinatorClientRegistry;
-  /** Outbound payload encryption gate. See {@link CliSessionOptions.encryptOutbound}. */
-  readonly encryptOutbound: boolean;
   /** Content-addressed store for encrypted media blobs, if configured. */
   private readonly mediaStore?: MediaStore;
   /** Multi-device re-publish hook, if configured. */
@@ -170,7 +168,6 @@ export class CliSession {
       privateKey: this.privateKey,
     });
     this.stablePubkey = deriveStablePubkey(this.privateKey);
-    this.encryptOutbound = options.encryptOutbound ?? false;
     this.mediaStore = options.mediaStore;
     this.onLocalStateAdvance = options.onLocalStateAdvance;
   }
@@ -656,21 +653,22 @@ export class CliSession {
 
   async fetchPendingJoinRequests(
     groupAlias: string,
-  ): Promise<FetchPendingJoinRequestsOutput> {
+  ): Promise<FetchManyPendingJoinRequestsOutput> {
     const group = this.getGroup(groupAlias);
     const client = this.getGroupClient(group);
     const groupId = this.deriveGroupId(group.state);
     const toAck = this.store.peekConsumedJoinRequests(groupId);
-    const result = await client.FetchPendingJoinRequests(
+    const result = await client.FetchManyPendingJoinRequests(
       toAck.length > 0
         ? {
-            gid: groupId,
+            groups: [{ gid: groupId }],
             consumed: toAck.map((ref) => ({
+              gid: groupId,
               pk: ref.requesterStablePubkey,
               at: ref.createdAt,
             })),
           }
-        : { gid: groupId },
+        : { groups: [{ gid: groupId }] },
     );
     this.store.clearConsumedJoinRequests(groupId, toAck);
     this.store.setFetchedJoinRequests(
@@ -1262,24 +1260,19 @@ export class CliSession {
     gid: string;
     postedMsgBase64: string;
   }> {
-    // When encryption is enabled, the serialized MLS message is sealed
-    // with a key derived from the current epoch's exporter secret: all
-    // group members can decrypt, the coordinator cannot. The wrapper we
-    // post is also what we match against the self-echo of a commit
-    // (sealed with the pre-commit secret) when reconciling pending
-    // operations after the session adopts the new state. When disabled,
-    // raw MLS bytes are posted so legacy clients can still read them.
-    const gid = this.encryptOutbound
-      ? this.deriveGroupId(group.state)
-      : undefined;
-    const msg_64 = this.encryptOutbound
-      ? (
-          await encryptGroupPayload({
-            state: group.state,
-            serializedMlsMessage: decodeBase64(mlsMessageBase64),
-          })
-        ).encryptedBase64
-      : mlsMessageBase64;
+    // The serialized MLS message is sealed with a key derived from the
+    // current epoch's exporter secret: all group members can decrypt, the
+    // coordinator cannot. The wrapper we post is also what we match
+    // against the self-echo of a commit (sealed with the pre-commit
+    // secret) when reconciling pending operations after the session
+    // adopts the new state.
+    const gid = this.deriveGroupId(group.state);
+    const msg_64 = (
+      await encryptGroupPayload({
+        state: group.state,
+        serializedMlsMessage: decodeBase64(mlsMessageBase64),
+      })
+    ).encryptedBase64;
     const result = await this.getGroupClient(group).PostGroupMessage({
       msg_64,
       gid,
@@ -1297,9 +1290,13 @@ export class CliSession {
     afterCursor: number,
   ): Promise<FetchGroupMessagesOutput> {
     const group = this.findGroupById(groupId);
-    return this.getGroupClient(group).FetchGroupMessages({
-      gid: groupId,
-      after: this.toOptionalCursor(afterCursor),
+    return this.getGroupClient(group).FetchManyGroupMessages({
+      groups: [
+        {
+          gid: groupId,
+          after: this.toOptionalCursor(afterCursor),
+        },
+      ],
     });
   }
 
@@ -1465,38 +1462,34 @@ export class CliSession {
     for (const message of messages) {
       let opaqueMessageBase64: string;
 
-      if (message.encrypted) {
-        // Self-echo detection: commits are encrypted with the pre-commit
-        // state so all members can decrypt them.  The creator adopts the
-        // new state immediately after posting and can no longer decrypt
-        // the echo, so we match the posted encrypted wrapper against
-        // pending operations instead.
-        const pendingOp = this.findPendingOpByPostedMsg(
-          group.alias,
-          message.msg_64,
-        );
-        if (pendingOp) {
-          opaqueMessageBase64 = pendingOp.commitMessageBase64;
-        } else {
-          try {
-            const { serializedMlsMessage } = await decryptGroupPayload({
-              state: group.state,
-              encryptedBase64: message.msg_64,
-            });
-            opaqueMessageBase64 = encodeBase64(serializedMlsMessage);
-          } catch {
-            // Skip messages from epochs we have not joined — decryption
-            // fails naturally because the exporter secret differs.
-            // Advance the cursor so we do not re-fetch the same
-            // undecryptable message on every sync (e.g. pre-join traffic
-            // when a Welcome lacks an `after` hint).
-            group.fetchCursor = Math.max(group.fetchCursor, message.cursor);
-            group.lastCursor = Math.max(group.lastCursor, message.cursor);
-            continue;
-          }
-        }
+      // Self-echo detection: commits are encrypted with the pre-commit
+      // state so all members can decrypt them.  The creator adopts the
+      // new state immediately after posting and can no longer decrypt
+      // the echo, so we match the posted encrypted wrapper against
+      // pending operations instead.
+      const pendingOp = this.findPendingOpByPostedMsg(
+        group.alias,
+        message.msg_64,
+      );
+      if (pendingOp) {
+        opaqueMessageBase64 = pendingOp.commitMessageBase64;
       } else {
-        opaqueMessageBase64 = message.msg_64;
+        try {
+          const { serializedMlsMessage } = await decryptGroupPayload({
+            state: group.state,
+            encryptedBase64: message.msg_64,
+          });
+          opaqueMessageBase64 = encodeBase64(serializedMlsMessage);
+        } catch {
+          // Skip messages from epochs we have not joined — decryption
+          // fails naturally because the exporter secret differs.
+          // Advance the cursor so we do not re-fetch the same
+          // undecryptable message on every sync (e.g. pre-join traffic
+          // when a Welcome lacks an `after` hint).
+          group.fetchCursor = Math.max(group.fetchCursor, message.cursor);
+          group.lastCursor = Math.max(group.lastCursor, message.cursor);
+          continue;
+        }
       }
 
       // Ingest this single message immediately so that epoch-advancing

@@ -49,21 +49,14 @@ export interface JoinRequestRecord {
 
 export interface GroupRoutingRecord {
   groupId: string;
-  /** @deprecated No longer tracked for encrypted messages. Retained for
-   *  backward compatibility with legacy clients during transition. */
-  latestHandshakeEpoch: bigint;
   lastMessageCursor: number;
 }
 
 export interface GroupMessageRecord {
   cursor: number;
   groupId: string;
-  /** @deprecated NULL for encrypted messages. Retained for legacy
-   *  clients that use server-side since_epoch filtering. */
-  epoch: bigint;
   opaqueMessage: Uint8Array;
   createdAt: number;
-  encrypted: boolean;
 }
 
 export interface PublishKeyPackageInput {
@@ -88,17 +81,14 @@ export interface StoreJoinRequestInput {
 
 export interface PostGroupMessageInput {
   opaqueMessage: Uint8Array;
-  /** Outer delivery group id for encrypted messages. When provided the
-   *  coordinator skips MLS decoding and routes by this gid directly. */
-  groupId?: string;
+  /** Outer delivery group id. The coordinator routes by this gid directly
+   *  and never decodes the MLS payload. */
+  groupId: string;
 }
 
 export interface FetchGroupMessagesInput {
   groupId: string;
   afterCursor?: number;
-  /** @deprecated Replaced by client-side encryption that naturally filters
-   *  messages from epochs the client has not joined. */
-  sinceEpoch?: bigint;
 }
 
 export type SubscribeGroupMessagesInput = FetchGroupMessagesInput;

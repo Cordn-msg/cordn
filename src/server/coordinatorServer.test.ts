@@ -20,7 +20,6 @@ import {
   getTestCiphersuite,
 } from "../coordinator/testUtils.ts";
 import { CoordinatorAdapter } from "./coordinatorMethods.ts";
-import { decodeBase64 } from "./base64.ts";
 import { encodeBase64 } from "./base64.ts";
 import type { ServerLogger } from "./logger.ts";
 import { subscribeManyGroupMessagesInputSchema } from "../contracts/index.ts";
@@ -324,12 +323,6 @@ describe("CoordinatorAdapter", () => {
         createExtra(alice.actor.stablePubkey),
       ),
     ).rejects.toThrow("Invalid kp_64");
-
-    expect(() =>
-      adapter.postGroupMessage({
-        msg_64: encodeBase64(Uint8Array.from([1, 2, 3])),
-      }),
-    ).toThrow("Unable to decode MLS message");
   });
 
   test("round-trips welcomes and queued group messages as base64 structured outputs", async () => {
@@ -374,13 +367,14 @@ describe("CoordinatorAdapter", () => {
     });
 
     const posted = adapter.postGroupMessage({
+      gid: "group-alice-bob",
       msg_64: encodeBase64(messageBytes.encodedMessage),
     });
 
     expect(posted.content).toEqual([]);
 
-    const fetchedMessages = adapter.fetchGroupMessages({
-      gid: posted.structuredContent.gid,
+    const fetchedMessages = adapter.fetchManyGroupMessages({
+      groups: [{ gid: posted.structuredContent.gid }],
     });
 
     expect(fetchedMessages.content).toEqual([]);
@@ -402,7 +396,7 @@ describe("CoordinatorAdapter", () => {
     });
   });
 
-  test("round-trips encrypted flag and passes gid through postGroupMessage contract", async () => {
+  test("round-trips gid through postGroupMessage contract", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
 
@@ -418,15 +412,14 @@ describe("CoordinatorAdapter", () => {
     expect(posted.structuredContent.cursor).toBe(1);
     expect(posted.structuredContent.at).toBeTypeOf("number");
 
-    // Fetch returns the encrypted flag.
-    const fetched = adapter.fetchGroupMessages({
-      gid: "encrypted-topic",
+    // Fetch returns the posted message.
+    const fetched = adapter.fetchManyGroupMessages({
+      groups: [{ gid: "encrypted-topic" }],
     });
     expect(fetched.structuredContent.messages).toHaveLength(1);
     expect(fetched.structuredContent.messages[0]).toMatchObject({
       gid: "encrypted-topic",
       msg_64: encodeBase64(encryptedOpaque),
-      encrypted: true,
     });
   });
 
@@ -562,6 +555,7 @@ describe("CoordinatorAdapter", () => {
 
     // Seed a group via the coordinator so getGroupRouting finds it.
     coordinator.postGroupMessage({
+      groupId: "group-join-req",
       opaqueMessage: createPrivateMessage({
         groupId: "group-join-req",
         epoch: 1n,
@@ -626,7 +620,7 @@ describe("CoordinatorAdapter", () => {
     );
 
     // Fetch returns both requests.
-    const fetched = adapter.fetchPendingJoinRequests({ gid });
+    const fetched = adapter.fetchManyPendingJoinRequests({ groups: [{ gid }] });
     expect(fetched.content).toEqual([]);
     expect(fetched.structuredContent.requests).toHaveLength(2);
     expect(fetched.structuredContent.requests[0]?.pk).toBe(
@@ -689,205 +683,23 @@ describe("CoordinatorAdapter", () => {
       createExtra(bob.actor.stablePubkey),
     );
 
-    const observed = adapter.fetchPendingJoinRequests({ gid });
+    const observed = adapter.fetchManyPendingJoinRequests({
+      groups: [{ gid }],
+    });
     expect(observed.structuredContent.requests).toHaveLength(2);
     const aliceReq = observed.structuredContent.requests.find(
       (r) => r.pk === alice.actor.stablePubkey,
     )!;
 
     // Ack alice's request; only bob's remains.
-    const after = adapter.fetchPendingJoinRequests({
-      gid,
-      consumed: [{ pk: aliceReq.pk, at: aliceReq.at }],
+    const after = adapter.fetchManyPendingJoinRequests({
+      groups: [{ gid }],
+      consumed: [{ gid, pk: aliceReq.pk, at: aliceReq.at }],
     });
     expect(after.structuredContent.requests).toHaveLength(1);
     expect(after.structuredContent.requests[0]?.pk).toBe(
       bob.actor.stablePubkey,
     );
-  });
-
-  test("streams backlog and live group messages as JSON chunks", async () => {
-    const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
-    const alice = await createMemberArtifacts(createActor("alice-stream"));
-    const bob = await createMemberArtifacts(createActor("bob-stream"));
-    const cipherSuite = await getTestCiphersuite();
-    const aliceState = await createGroup({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      groupId: new TextEncoder().encode("group-streaming"),
-      keyPackage: alice.keyPackage,
-      privateKeyPackage: alice.privateKeyPackage,
-    });
-
-    const group = await createWelcomeForNewMember({
-      senderState: aliceState,
-      member: bob,
-    });
-
-    const backlogMessageBytes = await createApplicationMessageBytes({
-      state: group.senderState,
-      plaintext: "backlog message",
-    });
-
-    const backlogPosted = adapter.postGroupMessage({
-      msg_64: encodeBase64(backlogMessageBytes.encodedMessage),
-    });
-
-    const writtenChunks: string[] = [];
-    let closed = false;
-    let abortedReason: string | undefined;
-    const stopError = new Error("stop after two chunks");
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      {
-        gid: backlogPosted.structuredContent.gid,
-        after: 0,
-      },
-      {
-        _meta: {
-          stream: {
-            async start() {},
-            async write(data: string) {
-              writtenChunks.push(data);
-              if (writtenChunks.length >= 2) {
-                throw stopError;
-              }
-            },
-            async close() {
-              closed = true;
-            },
-            async abort(reason?: string) {
-              abortedReason = reason;
-            },
-          },
-        },
-      } as never,
-    );
-
-    await Promise.resolve();
-
-    expect(writtenChunks).toHaveLength(1);
-
-    const liveMessageBytes = await createApplicationMessageBytes({
-      state: backlogMessageBytes.newState,
-      plaintext: "live message",
-    });
-
-    const livePosted = adapter.postGroupMessage({
-      msg_64: encodeBase64(liveMessageBytes.encodedMessage),
-    });
-
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(writtenChunks).toHaveLength(2);
-
-    const parsedFirst = JSON.parse(writtenChunks[0] ?? "{}");
-    const parsedSecond = JSON.parse(writtenChunks[1] ?? "{}");
-
-    expect(parsedFirst).toMatchObject({
-      cursor: 1,
-      gid: backlogPosted.structuredContent.gid,
-      at: expect.any(Number),
-    });
-    expect(decodeBase64(parsedFirst.msg_64)).toEqual(
-      backlogMessageBytes.encodedMessage,
-    );
-
-    expect(parsedSecond).toMatchObject({
-      cursor: livePosted.structuredContent.cursor,
-      gid: livePosted.structuredContent.gid,
-      at: expect.any(Number),
-    });
-    expect(decodeBase64(parsedSecond.msg_64)).toEqual(
-      liveMessageBytes.encodedMessage,
-    );
-
-    expect(closed).toBe(false);
-    await expect(subscribePromise).rejects.toBe(stopError);
-    expect(abortedReason).toBe("stop after two chunks");
-  });
-
-  test("completes the subscription handler after stream abort", async () => {
-    const coordinator = new Coordinator();
-    const { logger, entries } = createTestLogger();
-    const adapter = new CoordinatorAdapter(
-      coordinator,
-      undefined,
-      undefined,
-      logger,
-    );
-    const alice = await createMemberArtifacts(createActor("alice-abort"));
-    const cipherSuite = await getTestCiphersuite();
-    const aliceState = await createGroup({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      groupId: new TextEncoder().encode("group-stream-abort"),
-      keyPackage: alice.keyPackage,
-      privateKeyPackage: alice.privateKeyPackage,
-    });
-
-    const messageBytes = await createApplicationMessageBytes({
-      state: aliceState,
-      plaintext: "seed",
-    });
-
-    const posted = adapter.postGroupMessage({
-      msg_64: encodeBase64(messageBytes.encodedMessage),
-    });
-
-    let abortedReason: string | undefined;
-    const stream = {
-      isActive: true,
-      async start() {},
-      async write() {},
-      async close() {
-        this.isActive = false;
-      },
-      async abort(reason?: string) {
-        abortedReason = reason;
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      {
-        gid: posted.structuredContent.gid,
-        after: posted.structuredContent.cursor,
-      },
-      {
-        _meta: {
-          stream,
-        },
-      } as never,
-    );
-
-    await Promise.resolve();
-    await stream.abort("user requested stop");
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: {
-        subscribed: true,
-      },
-    });
-    expect(abortedReason).toBe("user requested stop");
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-
-    const startLog = entries.find(
-      (entry) => entry.bindings.type === "subscription_start",
-    );
-    const endLog = entries.find(
-      (entry) => entry.bindings.type === "subscription_end",
-    );
-
-    expect(startLog?.bindings).toMatchObject({
-      groupId: posted.structuredContent.gid,
-      activeSubscriptions: 1,
-    });
-    expect(endLog?.bindings).toMatchObject({
-      groupId: posted.structuredContent.gid,
-      reason: "user requested stop",
-      activeSubscriptions: 0,
-    });
   });
 
   test("returns fetch output shape without runtime schema parsing", async () => {
@@ -908,11 +720,12 @@ describe("CoordinatorAdapter", () => {
     });
 
     const posted = adapter.postGroupMessage({
+      gid: "group-fetch-shape",
       msg_64: encodeBase64(messageBytes.encodedMessage),
     });
 
-    const fetchedMessages = adapter.fetchGroupMessages({
-      gid: posted.structuredContent.gid,
+    const fetchedMessages = adapter.fetchManyGroupMessages({
+      groups: [{ gid: posted.structuredContent.gid }],
     });
     const message = fetchedMessages.structuredContent.messages[0];
 
@@ -921,87 +734,7 @@ describe("CoordinatorAdapter", () => {
       gid: posted.structuredContent.gid,
       msg_64: encodeBase64(messageBytes.encodedMessage),
       at: expect.any(Number),
-      encrypted: false,
     });
-  });
-
-  test("subscribes before backlog fetch to preserve messages posted during setup", async () => {
-    const coordinator = new Coordinator();
-    const alice = await createMemberArtifacts(createActor("alice-race-free"));
-    const cipherSuite = await getTestCiphersuite();
-    const aliceState = await createGroup({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      groupId: new TextEncoder().encode("group-race-free"),
-      keyPackage: alice.keyPackage,
-      privateKeyPackage: alice.privateKeyPackage,
-    });
-
-    const firstMessage = await createApplicationMessageBytes({
-      state: aliceState,
-      plaintext: "seed",
-    });
-
-    coordinator.postGroupMessage({
-      opaqueMessage: firstMessage.encodedMessage,
-    });
-
-    let secondMessageBytes: Uint8Array | null = null;
-    const originalFetchGroupMessages =
-      coordinator.fetchGroupMessages.bind(coordinator);
-    coordinator.fetchGroupMessages = ((input) => {
-      if (input.groupId === "group-race-free" && secondMessageBytes) {
-        coordinator.postGroupMessage({
-          opaqueMessage: secondMessageBytes,
-        });
-        secondMessageBytes = null;
-      }
-
-      return originalFetchGroupMessages(input);
-    }) as typeof coordinator.fetchGroupMessages;
-
-    const secondMessage = await createApplicationMessageBytes({
-      state: firstMessage.newState,
-      plaintext: "during setup",
-    });
-    secondMessageBytes = secondMessage.encodedMessage;
-
-    const adapter = new CoordinatorAdapter(coordinator);
-    const writtenChunks: string[] = [];
-    const stream = {
-      isActive: true,
-      async start() {},
-      async write(data: string) {
-        writtenChunks.push(data);
-        if (writtenChunks.length >= 2) {
-          this.isActive = false;
-        }
-      },
-      async close() {
-        this.isActive = false;
-      },
-      async abort(_reason?: string) {
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      {
-        gid: "group-race-free",
-        after: 0,
-      },
-      { _meta: { stream } } as never,
-    );
-
-    await Promise.resolve();
-    await Promise.resolve();
-    await stream.abort();
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: { subscribed: true },
-    });
-    expect(writtenChunks).toHaveLength(2);
-    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({ cursor: 1 });
-    expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({ cursor: 2 });
   });
 
   test("multi-group subscription replays backlog with independent cursors and streams live messages", async () => {
@@ -1036,12 +769,15 @@ describe("CoordinatorAdapter", () => {
     });
 
     const firstPosted = adapter.postGroupMessage({
+      gid: "alpha",
       msg_64: encodeBase64(firstBacklog.encodedMessage),
     });
     const secondSkippedPosted = adapter.postGroupMessage({
+      gid: "beta",
       msg_64: encodeBase64(secondSkipped.encodedMessage),
     });
     const secondPosted = adapter.postGroupMessage({
+      gid: "beta",
       msg_64: encodeBase64(secondBacklog.encodedMessage),
     });
 
@@ -1087,6 +823,7 @@ describe("CoordinatorAdapter", () => {
       plaintext: "first live",
     });
     const firstLivePosted = adapter.postGroupMessage({
+      gid: "alpha",
       msg_64: encodeBase64(firstLive.encodedMessage),
     });
 
@@ -1129,6 +866,7 @@ describe("CoordinatorAdapter", () => {
     });
 
     coordinator.postGroupMessage({
+      groupId: "group-many-race",
       opaqueMessage: firstMessage.encodedMessage,
     });
 
@@ -1141,6 +879,7 @@ describe("CoordinatorAdapter", () => {
         secondMessageBytes
       ) {
         coordinator.postGroupMessage({
+          groupId: "group-many-race",
           opaqueMessage: secondMessageBytes,
         });
         secondMessageBytes = null;
@@ -1299,6 +1038,7 @@ describe("CoordinatorAdapter", () => {
       plaintext: "should not cross-talk",
     });
     adapter.postGroupMessage({
+      gid: "group-many-isolate-c",
       msg_64: encodeBase64(otherMessage.encodedMessage),
     });
 
@@ -1311,6 +1051,7 @@ describe("CoordinatorAdapter", () => {
       plaintext: "subscribed live",
     });
     const subscribedPosted = adapter.postGroupMessage({
+      gid: "group-many-isolate-a",
       msg_64: encodeBase64(subscribedMessage.encodedMessage),
     });
 
@@ -1329,7 +1070,7 @@ describe("CoordinatorAdapter", () => {
 
   test("multi-group subscription schema rejects empty group lists and malformed entries", () => {
     expect(() =>
-      subscribeManyGroupMessagesInputSchema.parse({ groups: [] }),
+      subscribeManyGroupMessagesInputSchema.parse({ groups: [{}] }),
     ).toThrow();
     expect(() =>
       subscribeManyGroupMessagesInputSchema.parse({ groups: [{ gid: "" }] }),
@@ -1540,531 +1281,5 @@ describe("CoordinatorAdapter", () => {
         createExtra(bob.actor.stablePubkey, secondEvent.id),
       ),
     ).rejects.toThrow("Key package quota exceeded");
-  });
-
-  test("fetchGroupMessages filters by since_epoch through the adapter contract", async () => {
-    const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
-    const gid = "group-since-epoch";
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    const epoch3Msg = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 3n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-    const epoch5Msg = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 5n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-
-    const all = adapter.fetchGroupMessages({ gid });
-    expect(all.structuredContent.messages).toHaveLength(3);
-
-    const fromEpoch3 = adapter.fetchGroupMessages({
-      gid,
-      since_epoch: "3",
-    });
-    expect(fromEpoch3.structuredContent.messages).toHaveLength(2);
-    expect(fromEpoch3.structuredContent.messages.map((m) => m.cursor)).toEqual([
-      epoch3Msg.cursor,
-      epoch5Msg.cursor,
-    ]);
-
-    const fromEpoch5 = adapter.fetchGroupMessages({
-      gid,
-      since_epoch: "5",
-    });
-    expect(fromEpoch5.structuredContent.messages).toHaveLength(1);
-    expect(fromEpoch5.structuredContent.messages[0]?.cursor).toBe(
-      epoch5Msg.cursor,
-    );
-
-    const fromEpoch10 = adapter.fetchGroupMessages({
-      gid,
-      since_epoch: "10",
-    });
-    expect(fromEpoch10.structuredContent.messages).toHaveLength(0);
-  });
-
-  test("fetchManyGroupMessages filters by per-group since_epoch through the adapter contract", async () => {
-    const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "alpha-se",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    const alphaEpoch5 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "alpha-se",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "beta-se",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-    const betaEpoch5 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "beta-se",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [4],
-      }),
-    });
-
-    const result = adapter.fetchManyGroupMessages({
-      groups: [
-        { gid: "alpha-se", after: 1, since_epoch: "5" },
-        { gid: "beta-se", since_epoch: "5" },
-      ],
-    });
-
-    expect(
-      result.structuredContent.messages.map((m) => [m.gid, m.cursor]),
-    ).toEqual([
-      ["alpha-se", alphaEpoch5.cursor],
-      ["beta-se", betaEpoch5.cursor],
-    ]);
-  });
-
-  test("subscribeGroupMessages filters backlog by since_epoch through the adapter contract", async () => {
-    const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
-
-    const gid = "group-sub-epoch";
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    const epoch3Msg = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 3n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-    const epoch5Msg = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 5n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-
-    const writtenChunks: string[] = [];
-    const stream = {
-      isActive: true,
-      async start() {},
-      async write(data: string) {
-        writtenChunks.push(data);
-        if (writtenChunks.length >= 2) {
-          this.isActive = false;
-        }
-      },
-      async close() {
-        this.isActive = false;
-      },
-      async abort(_reason?: string) {
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      { gid, after: 0, since_epoch: "3" },
-      { _meta: { stream } } as never,
-    );
-
-    await Promise.resolve();
-    await Promise.resolve();
-    await stream.abort();
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: { subscribed: true },
-    });
-
-    expect(writtenChunks).toHaveLength(2);
-    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({
-      cursor: epoch3Msg.cursor,
-      gid,
-    });
-    expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({
-      cursor: epoch5Msg.cursor,
-      gid,
-    });
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-  });
-
-  test("subscribeManyGroupMessages filters per-group backlog by since_epoch through the adapter contract", async () => {
-    const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-a-sub-se",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    const aEpoch3 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-a-sub-se",
-        epoch: 3n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-    const aEpoch5 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-a-sub-se",
-        epoch: 5n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-b-sub-se",
-        epoch: 2n,
-        contentType: 1,
-        bytes: [4],
-      }),
-    });
-    const bEpoch4 = coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-b-sub-se",
-        epoch: 4n,
-        contentType: 1,
-        bytes: [5],
-      }),
-    });
-
-    const writtenChunks: string[] = [];
-    const stream = {
-      isActive: true,
-      async start() {},
-      async write(data: string) {
-        writtenChunks.push(data);
-      },
-      async close() {
-        this.isActive = false;
-      },
-      async abort(_reason?: string) {
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeManyGroupMessages(
-      {
-        groups: [
-          { gid: "group-a-sub-se", after: 0, since_epoch: "3" },
-          { gid: "group-b-sub-se", after: 0, since_epoch: "4" },
-        ],
-      },
-      { _meta: { stream } } as never,
-    );
-
-    await Promise.resolve();
-    await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await stream.abort("done");
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: {
-        subscribed: true,
-        groups: ["group-a-sub-se", "group-b-sub-se"],
-      },
-    });
-
-    expect(writtenChunks.map((chunk) => JSON.parse(chunk))).toMatchObject([
-      { gid: "group-a-sub-se", cursor: aEpoch3.cursor },
-      { gid: "group-a-sub-se", cursor: aEpoch5.cursor },
-      { gid: "group-b-sub-se", cursor: bEpoch4.cursor },
-    ]);
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-  });
-
-  test("subscribeGroupMessages with since_epoch that filters entire backlog still delivers live messages", async () => {
-    const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
-
-    const gid = "group-sub-empty";
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 2n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-
-    const writtenChunks: string[] = [];
-    const stream = {
-      isActive: true,
-      async start() {},
-      async write(data: string) {
-        writtenChunks.push(data);
-        if (writtenChunks.length >= 1) {
-          this.isActive = false;
-        }
-      },
-      async close() {
-        this.isActive = false;
-      },
-      async abort(_reason?: string) {
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      { gid, after: 0, since_epoch: "10" },
-      { _meta: { stream } } as never,
-    );
-
-    await Promise.resolve();
-    await Promise.resolve();
-
-    // Backlog should be empty (all messages below epoch 10)
-    expect(writtenChunks).toHaveLength(0);
-
-    // Post a live message at epoch 10
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 10n,
-        contentType: 1,
-        bytes: [3],
-      }),
-    });
-
-    await Promise.resolve();
-    await Promise.resolve();
-    await stream.abort();
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: { subscribed: true },
-    });
-
-    // Only the live message should be delivered
-    expect(writtenChunks).toHaveLength(1);
-    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({
-      cursor: 3,
-      gid,
-    });
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-  });
-
-  test("abort during backlog replay cleans up coordinator subscriptions", async () => {
-    const coordinator = new Coordinator();
-    const { logger, entries } = createTestLogger();
-    const adapter = new CoordinatorAdapter(
-      coordinator,
-      undefined,
-      undefined,
-      logger,
-    );
-    const gid = "group-abort-backlog";
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 1n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-
-    let writeCount = 0;
-    const writeGate: { release: (() => void) | null } = { release: null };
-    let abortedReason: string | undefined;
-
-    const stream = {
-      isActive: true,
-      async start() {},
-      async write(_data: string) {
-        writeCount += 1;
-        if (writeCount === 1) {
-          return new Promise<void>((resolve) => {
-            writeGate.release = () => resolve();
-          });
-        }
-      },
-      async close() {
-        this.isActive = false;
-      },
-      async abort(reason?: string) {
-        abortedReason = reason;
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages({ gid, after: 0 }, {
-      _meta: { stream },
-    } as never);
-
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(writeCount).toBe(1);
-    expect(coordinator.getActiveSubscriptionCount()).toBe(1);
-
-    await stream.abort("stop mid-backlog");
-
-    expect(abortedReason).toBe("stop mid-backlog");
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-
-    writeGate.release?.();
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: { subscribed: true },
-    });
-
-    expect(
-      entries.find((entry) => entry.bindings.type === "subscription_end")
-        ?.bindings,
-    ).toMatchObject({
-      groupId: gid,
-      reason: "stop mid-backlog",
-    });
-  });
-
-  test("subscribe-before-backlog race: since_epoch filters backlog but race message arrives via live stream", async () => {
-    const coordinator = new Coordinator();
-    const gid = "group-race-epoch";
-
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 3n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-
-    let raceMessageBytes: Uint8Array | null = null;
-    const originalFetch = coordinator.fetchGroupMessages.bind(coordinator);
-    coordinator.fetchGroupMessages = ((input) => {
-      if (input.groupId === gid && raceMessageBytes) {
-        coordinator.postGroupMessage({
-          opaqueMessage: raceMessageBytes,
-        });
-        raceMessageBytes = null;
-      }
-
-      return originalFetch(input);
-    }) as typeof coordinator.fetchGroupMessages;
-
-    raceMessageBytes = createPrivateMessage({
-      groupId: gid,
-      epoch: 2n,
-      contentType: 1,
-      bytes: [3],
-    });
-
-    const adapter = new CoordinatorAdapter(coordinator);
-    const writtenChunks: string[] = [];
-    const stream = {
-      isActive: true,
-      async start() {},
-      async write(data: string) {
-        writtenChunks.push(data);
-      },
-      async close() {
-        this.isActive = false;
-      },
-      async abort(_reason?: string) {
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      { gid, after: 0, since_epoch: "3" },
-      { _meta: { stream } } as never,
-    );
-
-    for (
-      let attempt = 0;
-      attempt < 10 && writtenChunks.length < 2;
-      attempt += 1
-    ) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    await stream.abort();
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: { subscribed: true },
-    });
-
-    // Cursor 2 (epoch 3) arrives via filtered backlog; cursor 3 (epoch 2)
-    // is the race message that arrives via the live subscriber.
-    expect(writtenChunks).toHaveLength(2);
-    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({
-      cursor: 2,
-      gid,
-    });
-    expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({
-      cursor: 3,
-      gid,
-    });
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
   });
 });

@@ -24,14 +24,11 @@ interface GroupLog {
   messages: GroupMessageRecord[];
 }
 
-/** @deprecated `epoch` parameter only used for legacy mode.
- *  Encrypted groups pass 0n. */
-function createGroupLog(groupId: string, epoch: bigint): GroupLog {
+function createGroupLog(groupId: string): GroupLog {
   return {
     nextCursor: 1,
     routing: {
       groupId,
-      latestHandshakeEpoch: epoch,
       lastMessageCursor: 0,
     },
     messages: [],
@@ -264,21 +261,17 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   appendGroupMessage(params: AppendGroupMessageParams): GroupMessageRecord {
     const group =
-      this.groups.get(params.groupId) ??
-      createGroupLog(params.groupId, params.latestHandshakeEpoch);
+      this.groups.get(params.groupId) ?? createGroupLog(params.groupId);
 
     const record: GroupMessageRecord = {
       cursor: group.nextCursor,
       groupId: params.groupId,
-      epoch: params.encrypted ? 0n : params.epoch,
       opaqueMessage: params.opaqueMessage,
       createdAt: params.createdAt,
-      encrypted: params.encrypted,
     };
     group.nextCursor += 1;
 
     group.messages.push(record);
-    group.routing.latestHandshakeEpoch = params.latestHandshakeEpoch;
     group.routing.lastMessageCursor = record.cursor;
 
     this.groups.set(params.groupId, group);
@@ -288,19 +281,13 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
 
   fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[] {
     const messages = this.groups.get(input.groupId)?.messages ?? [];
-    const sinceEpoch = input.sinceEpoch;
     const afterCursor = input.afterCursor;
 
-    let filtered = messages;
-    if (sinceEpoch !== undefined && sinceEpoch > 0n) {
-      filtered = messages.filter((record) => record.epoch >= sinceEpoch);
-    }
-
     if (afterCursor === undefined) {
-      return filtered;
+      return messages;
     }
 
-    return filtered.filter((record) => record.cursor > afterCursor);
+    return messages.filter((record) => record.cursor > afterCursor);
   }
 
   fetchManyGroupMessages(

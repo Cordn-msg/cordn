@@ -12,8 +12,8 @@ import {
   createApplicationMessageBytes,
   createCommitMessageBytes,
   createMemberArtifacts,
-  createSignedPublicationEvent,
   createProposalMessageBytes,
+  createSignedPublicationEvent,
   createThreeActorGroupScenario,
   createWelcomeForNewMember,
   decodeMlsFramedMessage,
@@ -95,14 +95,17 @@ describe("Coordinator integration flow", () => {
 
     const commitMessage = coordinator.postGroupMessage({
       opaqueMessage: scenario.commitMessageBytes,
+      groupId: "group-alice-bob-carol",
     });
 
     const aliceApplicationMessage = coordinator.postGroupMessage({
       opaqueMessage: scenario.aliceApplicationBytes,
+      groupId: "group-alice-bob-carol",
     });
 
     const bobApplicationMessage = coordinator.postGroupMessage({
       opaqueMessage: scenario.bobApplicationBytes,
+      groupId: "group-alice-bob-carol",
     });
 
     const groupId = commitMessage.groupId;
@@ -118,20 +121,12 @@ describe("Coordinator integration flow", () => {
     expect(newerMessages[0]?.cursor).toBe(aliceApplicationMessage.cursor);
     expect(newerMessages[1]?.cursor).toBe(bobApplicationMessage.cursor);
 
-    expect(coordinator.getGroupRouting(groupId)).toEqual({
-      groupId,
-      latestHandshakeEpoch: 1n,
-      lastMessageCursor: bobApplicationMessage.cursor,
-    });
-
-    expect(() =>
-      coordinator.postGroupMessage({
-        opaqueMessage: scenario.commitMessageBytes.slice(
-          0,
-          scenario.commitMessageBytes.length - 1,
-        ),
+    expect(coordinator.getGroupRouting(groupId)).toEqual(
+      expect.objectContaining({
+        groupId,
+        lastMessageCursor: bobApplicationMessage.cursor,
       }),
-    ).toThrow();
+    );
   });
 
   test("round-trips queued application messages through coordinator fetch and MLS processing", async () => {
@@ -140,6 +135,7 @@ describe("Coordinator integration flow", () => {
 
     const posted = coordinator.postGroupMessage({
       opaqueMessage: scenario.aliceApplicationBytes,
+      groupId: "group-alice-bob-carol",
     });
 
     const [fetched] = coordinator.fetchGroupMessages({
@@ -190,6 +186,7 @@ describe("Coordinator integration flow", () => {
 
     const postedCommit = coordinator.postGroupMessage({
       opaqueMessage: commit.encodedMessage,
+      groupId: "group-alice-bob-carol",
     });
 
     const [queuedCommit] = coordinator.fetchGroupMessages({
@@ -220,6 +217,7 @@ describe("Coordinator integration flow", () => {
 
     const postedApplication = coordinator.postGroupMessage({
       opaqueMessage: application.encodedMessage,
+      groupId: "group-alice-bob-carol",
     });
 
     const queuedApplications = coordinator.fetchGroupMessages({
@@ -295,9 +293,11 @@ describe("Coordinator integration flow", () => {
 
     const postedAliceCommit = coordinator.postGroupMessage({
       opaqueMessage: aliceCommit.encodedMessage,
+      groupId: "group-conflicting-commits",
     });
     const postedBobCommit = coordinator.postGroupMessage({
       opaqueMessage: bobCommit.encodedMessage,
+      groupId: "group-conflicting-commits",
     });
 
     const queued = coordinator.fetchGroupMessages({
@@ -308,11 +308,12 @@ describe("Coordinator integration flow", () => {
       postedAliceCommit.cursor,
       postedBobCommit.cursor,
     ]);
-    expect(coordinator.getGroupRouting(postedAliceCommit.groupId)).toEqual({
-      groupId: postedAliceCommit.groupId,
-      latestHandshakeEpoch: 1n,
-      lastMessageCursor: postedBobCommit.cursor,
-    });
+    expect(coordinator.getGroupRouting(postedAliceCommit.groupId)).toEqual(
+      expect.objectContaining({
+        groupId: postedAliceCommit.groupId,
+        lastMessageCursor: postedBobCommit.cursor,
+      }),
+    );
 
     const bobAppliesAlice = await processMessageBytes({
       state: bobJoin.receiverState,
@@ -348,6 +349,7 @@ describe("Coordinator integration flow", () => {
 
     const postedProposal = coordinator.postGroupMessage({
       opaqueMessage: proposal.encodedMessage,
+      groupId: "group-alice-bob-carol",
     });
 
     const commit = await createCommitMessageBytes({
@@ -355,6 +357,7 @@ describe("Coordinator integration flow", () => {
     });
     const postedCommit = coordinator.postGroupMessage({
       opaqueMessage: commit.encodedMessage,
+      groupId: "group-alice-bob-carol",
     });
 
     const application = await createApplicationMessageBytes({
@@ -363,6 +366,7 @@ describe("Coordinator integration flow", () => {
     });
     const postedApplication = coordinator.postGroupMessage({
       opaqueMessage: application.encodedMessage,
+      groupId: "group-alice-bob-carol",
     });
 
     const queued = coordinator.fetchGroupMessages({

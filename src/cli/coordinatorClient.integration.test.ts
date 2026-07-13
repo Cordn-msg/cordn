@@ -169,21 +169,23 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       ).toHaveLength(1);
 
       const postedCommit = await aliceClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(scenario.commitMessageBytes),
       });
       const postedAliceMessage = await aliceClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
       const postedBobMessage = await bobClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(scenario.bobApplicationBytes),
       });
 
-      const allMessages = await aliceClient.FetchGroupMessages({
-        gid: postedCommit.gid,
+      const allMessages = await aliceClient.FetchManyGroupMessages({
+        groups: [{ gid: postedCommit.gid }],
       });
-      const newerMessages = await aliceClient.FetchGroupMessages({
-        gid: postedCommit.gid,
-        after: postedCommit.cursor,
+      const newerMessages = await aliceClient.FetchManyGroupMessages({
+        groups: [{ gid: postedCommit.gid, after: postedCommit.cursor }],
       });
       const manyMessages = await aliceClient.FetchManyGroupMessages({
         groups: [{ gid: postedCommit.gid, after: postedCommit.cursor }],
@@ -265,6 +267,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
 
       start = relayHub.getEvents().length;
       await aliceClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
       expect(
@@ -275,11 +278,14 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       ).toContain(ephemeralPubkey);
 
       const posted = await aliceClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
 
       start = relayHub.getEvents().length;
-      await aliceClient.FetchGroupMessages({ gid: posted.gid });
+      await aliceClient.FetchManyGroupMessages({
+        groups: [{ gid: posted.gid }],
+      });
       expect(
         getVerifiedClientPubkeys(
           relayHub.getEvents().slice(start),
@@ -341,10 +347,11 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
       clients.push(aliceClient, bobClient, carolClient);
 
       const posted = await aliceClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(scenario.aliceApplicationBytes),
       });
-      const fetched = await bobClient.FetchGroupMessages({
-        gid: posted.gid,
+      const fetched = await bobClient.FetchManyGroupMessages({
+        groups: [{ gid: posted.gid }],
       });
       const [message] = fetched.messages;
 
@@ -413,6 +420,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         wireAsPublicMessage: true,
       });
       const postedProposal = await aliceClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(proposal.encodedMessage),
       });
 
@@ -420,6 +428,7 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         state: proposal.newState,
       });
       const postedCommit = await aliceClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(commit.encodedMessage),
       });
 
@@ -435,11 +444,12 @@ describe("CvmMlsDeliveryServiceClient integration flow", () => {
         plaintext: JSON.stringify(orderedTrafficEvent),
       });
       const postedApplication = await bobClient.PostGroupMessage({
+        gid: "group-alice-bob-carol",
         msg_64: encodeBase64(application.encodedMessage),
       });
 
-      const queued = await bobClient.FetchGroupMessages({
-        gid: postedProposal.gid,
+      const queued = await bobClient.FetchManyGroupMessages({
+        groups: [{ gid: postedProposal.gid }],
       });
       expect(queued.messages.map((message) => message.cursor)).toEqual([
         postedProposal.cursor,

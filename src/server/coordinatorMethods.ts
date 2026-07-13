@@ -25,10 +25,6 @@ import {
   fetchManyGroupMessagesOutputSchema,
   fetchManyPendingJoinRequestsInputSchema,
   fetchManyPendingJoinRequestsOutputSchema,
-  fetchGroupMessagesInputSchema,
-  fetchGroupMessagesOutputSchema,
-  fetchPendingJoinRequestsInputSchema,
-  fetchPendingJoinRequestsOutputSchema,
   fetchPendingWelcomesInputSchema,
   fetchPendingWelcomesOutputSchema,
   groupMessageSchema,
@@ -46,8 +42,6 @@ import {
   storeWelcomeOutputSchema,
   subscribeManyGroupMessagesInputSchema,
   subscribeManyGroupMessagesOutputSchema,
-  subscribeGroupMessagesInputSchema,
-  subscribeGroupMessagesOutputSchema,
 } from "../contracts/index.ts";
 import { decodeExact, decodeWelcome, encodeWelcome } from "../mlsCodec.ts";
 import { assertNonEmptyBase64, encodeBase64 } from "./base64.ts";
@@ -95,22 +89,6 @@ function decodeWelcomeBase64(welcome_64: string): Welcome {
 
 function encodeWelcomeBase64(welcome: Welcome): string {
   return encodeBase64(encodeWelcome(welcome));
-}
-
-/** @deprecated Replaced by client-side payload encryption that naturally
- *  filters messages from epochs the client has not joined. */
-function parseSinceEpoch(sinceEpoch: string | undefined): bigint | undefined {
-  if (sinceEpoch === undefined) {
-    return undefined;
-  }
-
-  try {
-    return BigInt(sinceEpoch);
-  } catch {
-    throw new Error(
-      `Invalid since_epoch value: "${sinceEpoch}". Must be a non-negative integer string.`,
-    );
-  }
 }
 
 function decodeOpaqueMessageBase64(msg_64: string): Uint8Array {
@@ -198,12 +176,11 @@ function getOpenStreamWriter(extra: ToolExtra): OpenStreamWriter {
   return stream;
 }
 
-/** Maps a GroupMessageRecord to the wire format, intentionally omitting
- *  epoch (clients extract it from the decrypted MLS plaintext). */
+/** Maps a GroupMessageRecord to the wire format. */
 function mapGroupMessage(
   record: Pick<
     GroupMessageRecord,
-    "cursor" | "groupId" | "opaqueMessage" | "createdAt" | "encrypted"
+    "cursor" | "groupId" | "opaqueMessage" | "createdAt"
   >,
 ): z.infer<typeof groupMessageSchema> {
   return {
@@ -211,7 +188,6 @@ function mapGroupMessage(
     gid: record.groupId,
     msg_64: encodeBase64(record.opaqueMessage),
     at: record.createdAt,
-    encrypted: record.encrypted,
   };
 }
 
@@ -569,32 +545,6 @@ export class CoordinatorAdapter {
     };
   }
 
-  fetchPendingJoinRequests(
-    input: z.infer<typeof fetchPendingJoinRequestsInputSchema>,
-  ) {
-    // no extra available here; enforced in registration wrapper
-    const records = this.coordinator.fetchPendingJoinRequests(
-      input.gid,
-      input.consumed?.map((c) => ({
-        requesterStablePubkey: c.pk,
-        createdAt: c.at,
-      })),
-    );
-
-    this.recordOperation("fetchPendingJoinRequests");
-
-    return {
-      content: [],
-      structuredContent: {
-        requests: records.map((record) => ({
-          pk: record.requesterStablePubkey,
-          kp_ref: record.keyPackageRef,
-          at: record.createdAt,
-        })),
-      },
-    };
-  }
-
   fetchManyPendingJoinRequests(
     input: z.infer<typeof fetchManyPendingJoinRequestsInputSchema>,
   ) {
@@ -624,54 +574,19 @@ export class CoordinatorAdapter {
   }
 
   postGroupMessage(input: z.infer<typeof postGroupMessageInputSchema>) {
-    try {
-      const record = this.coordinator.postGroupMessage({
-        opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
-        groupId: input.gid,
-      });
-
-      this.recordOperation("postGroupMessage");
-
-      return {
-        content: [],
-        structuredContent: {
-          cursor: record.cursor,
-          gid: record.groupId,
-          at: record.createdAt,
-        },
-      };
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.startsWith("Rejected stale handshake")
-      ) {
-        this.logger.warn(
-          {
-            type: "stale_handshake",
-            error: error.message,
-          },
-          "stale handshake rejected",
-        );
-      }
-
-      throw error;
-    }
-  }
-
-  fetchGroupMessages(input: z.infer<typeof fetchGroupMessagesInputSchema>) {
-    // no extra available here; enforced in registration wrapper
-    const records = this.coordinator.fetchGroupMessages({
+    const record = this.coordinator.postGroupMessage({
+      opaqueMessage: decodeOpaqueMessageBase64(input.msg_64),
       groupId: input.gid,
-      afterCursor: input.after,
-      sinceEpoch: parseSinceEpoch(input.since_epoch),
     });
 
-    this.recordOperation("fetchGroupMessages");
+    this.recordOperation("postGroupMessage");
 
     return {
       content: [],
       structuredContent: {
-        messages: records.map(mapGroupMessage),
+        cursor: record.cursor,
+        gid: record.groupId,
+        at: record.createdAt,
       },
     };
   }
@@ -683,7 +598,6 @@ export class CoordinatorAdapter {
       groups: input.groups.map((group) => ({
         groupId: group.gid,
         afterCursor: group.after,
-        sinceEpoch: parseSinceEpoch(group.since_epoch),
       })),
     });
 
@@ -693,120 +607,6 @@ export class CoordinatorAdapter {
       content: [],
       structuredContent: {
         messages: records.map(mapGroupMessage),
-      },
-    };
-  }
-
-  async subscribeGroupMessages(
-    input: z.infer<typeof subscribeGroupMessagesInputSchema>,
-    extra: ToolExtra,
-  ) {
-    const stream = getOpenStreamWriter(extra);
-    const clientPubkey = extra._meta?.clientPubkey;
-    const groupId = input.gid;
-
-    const sinceEpoch = parseSinceEpoch(input.since_epoch);
-
-    const subscription = this.coordinator.subscribeGroupMessages({
-      groupId,
-      afterCursor: input.after,
-      sinceEpoch,
-    });
-    const backlog = this.coordinator.fetchGroupMessages({
-      groupId,
-      afterCursor: input.after,
-      sinceEpoch,
-    });
-    let lastEmittedCursor = input.after ?? 0;
-    const originalAbort = stream.abort.bind(stream);
-    const clientPubkeyLabel =
-      typeof clientPubkey === "string" && clientPubkey.length > 0
-        ? `${clientPubkey.slice(0, 12)}…`
-        : undefined;
-    let cleanedUp = false;
-    let endLogged = false;
-
-    this.logger.info(
-      {
-        type: "subscription_start",
-        groupId,
-        activeSubscriptions: this.coordinator.getActiveSubscriptionCount(),
-        clientPubkey: clientPubkeyLabel,
-      },
-      "group message subscription started",
-    );
-
-    const cleanupSubscription = (reason: string): void => {
-      if (cleanedUp) {
-        return;
-      }
-
-      cleanedUp = true;
-      subscription.unsubscribe();
-
-      if (endLogged) {
-        return;
-      }
-
-      endLogged = true;
-      this.logger.info(
-        {
-          type: "subscription_end",
-          groupId,
-          reason,
-          activeSubscriptions: this.coordinator.getActiveSubscriptionCount(),
-          clientPubkey: clientPubkeyLabel,
-        },
-        "group message subscription ended",
-      );
-    };
-
-    stream.abort = async (reason?: string): Promise<void> => {
-      cleanupSubscription(reason ?? "abort");
-      await originalAbort(reason);
-    };
-
-    try {
-      await stream.start();
-
-      for (const record of backlog) {
-        await stream.write(encodeWireMessage(record));
-        lastEmittedCursor = record.cursor;
-      }
-
-      for await (const record of subscription.messages) {
-        if (record.cursor <= lastEmittedCursor) {
-          continue;
-        }
-
-        await stream.write(encodeWireMessage(record));
-        lastEmittedCursor = record.cursor;
-      }
-
-      if (stream.isActive) {
-        await stream.close();
-      }
-      cleanupSubscription("complete");
-    } catch (error) {
-      try {
-        await stream.abort(
-          error instanceof Error ? error.message : "Stream aborted",
-        );
-      } catch {
-        // Ignore secondary abort cleanup failures.
-      }
-      throw error;
-    } finally {
-      stream.abort = originalAbort;
-      cleanupSubscription("finally");
-    }
-
-    this.recordOperation("subscribeGroupMessages");
-
-    return {
-      content: [],
-      structuredContent: {
-        subscribed: true,
       },
     };
   }
@@ -825,7 +625,6 @@ export class CoordinatorAdapter {
       groups: input.groups.map((group) => ({
         groupId: group.gid,
         afterCursor: group.after,
-        sinceEpoch: parseSinceEpoch(group.since_epoch),
       })),
     });
     const originalAbort = stream.abort.bind(stream);
@@ -1025,22 +824,6 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    COORDINATOR_METHODS.fetchPendingJoinRequests,
-    {
-      description: "Fetch pending join requests for a group.",
-      inputSchema: fetchPendingJoinRequestsInputSchema,
-      outputSchema: fetchPendingJoinRequestsOutputSchema,
-    },
-    withRateLimit(
-      COORDINATOR_METHODS.fetchPendingJoinRequests,
-      (input, extra) => {
-        void extra;
-        return adapter.fetchPendingJoinRequests(input);
-      },
-    ),
-  );
-
-  server.registerTool(
     COORDINATOR_METHODS.fetchManyPendingJoinRequests,
     {
       description:
@@ -1071,20 +854,6 @@ export function registerCoordinatorMethods(
   );
 
   server.registerTool(
-    COORDINATOR_METHODS.fetchGroupMessages,
-    {
-      description:
-        "Fetch queued MLS opaque group messages by group and optional cursor.",
-      inputSchema: fetchGroupMessagesInputSchema,
-      outputSchema: fetchGroupMessagesOutputSchema,
-    },
-    withRateLimit(COORDINATOR_METHODS.fetchGroupMessages, (input, extra) => {
-      void extra;
-      return adapter.fetchGroupMessages(input);
-    }),
-  );
-
-  server.registerTool(
     COORDINATOR_METHODS.fetchManyGroupMessages,
     {
       description:
@@ -1098,19 +867,6 @@ export function registerCoordinatorMethods(
         void extra;
         return adapter.fetchManyGroupMessages(input);
       },
-    ),
-  );
-
-  server.registerTool(
-    COORDINATOR_METHODS.subscribeGroupMessages,
-    {
-      description:
-        "Replay and stream MLS opaque group messages by group and optional cursor.",
-      inputSchema: subscribeGroupMessagesInputSchema,
-      outputSchema: subscribeGroupMessagesOutputSchema,
-    },
-    withRateLimit(COORDINATOR_METHODS.subscribeGroupMessages, (input, extra) =>
-      adapter.subscribeGroupMessages(input, extra),
     ),
   );
 
