@@ -1,10 +1,14 @@
 export interface ServerLogger {
+  debug(bindings: Record<string, unknown>, message: string): void;
   info(bindings: Record<string, unknown>, message: string): void;
   warn(bindings: Record<string, unknown>, message: string): void;
   error(bindings: Record<string, unknown>, message: string): void;
 }
 
 export const consoleServerLogger: ServerLogger = {
+  debug(bindings, message) {
+    console.debug(message, bindings);
+  },
   info(bindings, message) {
     console.log(message, bindings);
   },

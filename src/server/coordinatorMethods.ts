@@ -191,13 +191,6 @@ function mapGroupMessage(
   };
 }
 
-async function writeGroupMessage(
-  stream: OpenStreamWriter,
-  record: GroupMessageRecord,
-): Promise<void> {
-  await stream.write(encodeWireMessage(record));
-}
-
 // Live messages fan out to every subscribed client; the coordinator pushes the
 // same record reference into each subscriber's queue. Cache the wire string per
 // record so base64 + JSON.stringify run once per message, not once per
@@ -260,7 +253,7 @@ export class CoordinatorAdapter {
   private recordOperation(methodName: string): void {
     const count = (this.metrics.get(methodName) ?? 0) + 1;
     this.metrics.set(methodName, count);
-    this.logger.info(
+    this.logger.debug(
       { type: "operation", method: methodName, count },
       "cordn operation",
     );
@@ -671,6 +664,15 @@ export class CoordinatorAdapter {
       await originalAbort(reason);
     };
 
+    // ponytail: writer.signal (SDK 0.13.8+) fires on every termination incl.
+    // dispose() (transport teardown), which the abort override above misses.
+    // Idempotent; the override still wins for log reasons on abort paths.
+    stream.signal.addEventListener(
+      "abort",
+      () => cleanupSubscriptions("client-disconnect"),
+      { once: true },
+    );
+
     try {
       await stream.start();
 
@@ -679,13 +681,13 @@ export class CoordinatorAdapter {
           break;
         }
 
-        await writeGroupMessage(stream, record);
+        await stream.write(encodeWireMessage(record));
       }
 
+      cleanupSubscriptions("complete");
       if (stream.isActive) {
         await stream.close();
       }
-      cleanupSubscriptions("complete");
     } catch (error) {
       try {
         await stream.abort(

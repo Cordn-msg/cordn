@@ -147,7 +147,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   >;
   private readonly selectGroupRoutingForCursorStatement: Database.Statement<
     [string],
-    Pick<GroupRoutingRow, "last_message_cursor">
+    GroupRoutingRow
   >;
   private readonly fetchGroupMessagesStatement: Database.Statement<
     [string],
@@ -285,6 +285,23 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     ) {
       this.database.exec(
         "ALTER TABLE group_messages DROP COLUMN ephemeral_sender_pubkey",
+      );
+    }
+    // Migration: drop the epoch column. sinceEpoch filtering was replaced
+    // by client-side payload decryption; the coordinator is now opaque.
+    if (groupMessagesColumns.some((col) => col.name === "epoch")) {
+      this.database.exec("ALTER TABLE group_messages DROP COLUMN epoch");
+    }
+    // Migration: drop the latest_handshake_epoch column. Stale-handshake
+    // rejection was removed when the coordinator became fully opaque.
+    const groupRoutingColumns = this.database
+      .prepare("PRAGMA table_info('group_routing')")
+      .all() as Array<{ name: string }>;
+    if (
+      groupRoutingColumns.some((col) => col.name === "latest_handshake_epoch")
+    ) {
+      this.database.exec(
+        "ALTER TABLE group_routing DROP COLUMN latest_handshake_epoch",
       );
     }
 
@@ -450,7 +467,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     `);
     this.selectGroupRoutingForCursorStatement = this.database.prepare<
       [string],
-      Pick<GroupRoutingRow, "last_message_cursor">
+      GroupRoutingRow
     >(`
       SELECT last_message_cursor
       FROM group_routing

@@ -44,8 +44,6 @@ export function partitionConsumedJoinRequests(
  * - different groups may each have a message with cursor 1
  * - `fetchGroupMessages({ groupId, afterCursor })` must interpret
  *   `afterCursor` only within the specified group
- * - `getGroupRouting(groupId)?.lastMessageCursor` must equal the highest
- *   cursor persisted for that same group.
  */
 export interface AppendGroupMessageParams {
   groupId: string;

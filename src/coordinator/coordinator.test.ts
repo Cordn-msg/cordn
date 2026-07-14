@@ -944,7 +944,7 @@ describe("Coordinator group message flow", () => {
       done: false,
       value: { groupId: "group-alpha", cursor: alphaLive.cursor },
     });
-    expect(coordinator.getActiveSubscriptionCount()).toBe(2);
+    expect(coordinator.getActiveSubscriptionCount()).toBe(1);
 
     subscription.unsubscribe();
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);

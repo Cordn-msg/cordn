@@ -96,13 +96,13 @@ function createExtra(clientPubkey?: string, requestEventId?: string) {
 function createTestLogger(): {
   logger: ServerLogger;
   entries: Array<{
-    level: "info" | "warn" | "error";
+    level: "debug" | "info" | "warn" | "error";
     bindings: Record<string, unknown>;
     message: string;
   }>;
 } {
   const entries: Array<{
-    level: "info" | "warn" | "error";
+    level: "debug" | "info" | "warn" | "error";
     bindings: Record<string, unknown>;
     message: string;
   }> = [];
@@ -110,6 +110,9 @@ function createTestLogger(): {
   return {
     entries,
     logger: {
+      debug(bindings, message) {
+        entries.push({ level: "debug", bindings, message });
+      },
       info(bindings, message) {
         entries.push({ level: "info", bindings, message });
       },
@@ -784,6 +787,7 @@ describe("CoordinatorAdapter", () => {
     const writtenChunks: string[] = [];
     const stream = {
       isActive: true,
+      signal: new AbortController().signal,
       async start() {},
       async write(data: string) {
         writtenChunks.push(data);
@@ -898,6 +902,7 @@ describe("CoordinatorAdapter", () => {
     const writtenChunks: string[] = [];
     const stream = {
       isActive: true,
+      signal: new AbortController().signal,
       async start() {},
       async write(data: string) {
         writtenChunks.push(data);
@@ -947,6 +952,7 @@ describe("CoordinatorAdapter", () => {
     );
     const stream = {
       isActive: true,
+      signal: new AbortController().signal,
       async start() {},
       async write() {},
       async close() {
@@ -965,7 +971,7 @@ describe("CoordinatorAdapter", () => {
     );
 
     await Promise.resolve();
-    expect(coordinator.getActiveSubscriptionCount()).toBe(2);
+    expect(coordinator.getActiveSubscriptionCount()).toBe(1);
     await stream.abort("user stop many");
 
     await expect(subscribePromise).resolves.toMatchObject({
@@ -982,6 +988,55 @@ describe("CoordinatorAdapter", () => {
       groupIds: ["group-abort-a", "group-abort-b"],
       groupCount: 2,
       reason: "user stop many",
+    });
+  });
+
+  test("removes subscriber when the writer signal aborts (silent client disconnect)", async () => {
+    const coordinator = new Coordinator();
+    const { logger, entries } = createTestLogger();
+    const adapter = new CoordinatorAdapter(
+      coordinator,
+      undefined,
+      undefined,
+      logger,
+    );
+    const controller = new AbortController();
+    const stream = {
+      isActive: true,
+      signal: controller.signal,
+      async start() {},
+      async write() {},
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeManyGroupMessages(
+      { groups: [{ gid: "group-signal-disconnect" }] },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    // Simulate the SDK firing the writer signal on a silent client disconnect
+    // (dispose/probe-timeout), the path the stream.abort override does not cover.
+    controller.abort();
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: {
+        subscribed: true,
+        groups: ["group-signal-disconnect"],
+      },
+    });
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+
+    expect(
+      entries.find((entry) => entry.bindings.type === "subscription_end")
+        ?.bindings,
+    ).toMatchObject({
+      reason: "client-disconnect",
     });
   });
 
@@ -1008,6 +1063,7 @@ describe("CoordinatorAdapter", () => {
     const writtenChunks: string[] = [];
     const stream = {
       isActive: true,
+      signal: new AbortController().signal,
       async start() {},
       async write(data: string) {
         writtenChunks.push(data);
@@ -1031,7 +1087,7 @@ describe("CoordinatorAdapter", () => {
     );
 
     await Promise.resolve();
-    expect(coordinator.getActiveSubscriptionCount()).toBe(2);
+    expect(coordinator.getActiveSubscriptionCount()).toBe(1);
 
     const otherMessage = await createApplicationMessageBytes({
       state: otherState,

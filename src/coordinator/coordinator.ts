@@ -140,6 +140,13 @@ export class Coordinator {
     string,
     Set<GroupMessageSubscriber>
   >();
+  // Distinct-subscriber refcount. A multi-group sub joins N group Sets with one
+  // subscriber object, so summed Set sizes over-count; this counts each object
+  // once. O(1) for getActiveSubscriptionCount.
+  private readonly subscriberRefcounts = new Map<
+    GroupMessageSubscriber,
+    number
+  >();
   private readonly cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: CoordinatorOptions = {}) {
@@ -361,6 +368,10 @@ export class Coordinator {
     }
 
     subscribers.add(subscriber);
+    this.subscriberRefcounts.set(
+      subscriber,
+      (this.subscriberRefcounts.get(subscriber) ?? 0) + 1,
+    );
   }
 
   private removeGroupSubscriber(
@@ -372,7 +383,14 @@ export class Coordinator {
       return;
     }
 
-    subscribers.delete(subscriber);
+    if (subscribers.delete(subscriber)) {
+      const next = (this.subscriberRefcounts.get(subscriber) ?? 0) - 1;
+      if (next <= 0) {
+        this.subscriberRefcounts.delete(subscriber);
+      } else {
+        this.subscriberRefcounts.set(subscriber, next);
+      }
+    }
     if (subscribers.size === 0) {
       this.groupSubscribers.delete(groupId);
     }
@@ -394,11 +412,7 @@ export class Coordinator {
   }
 
   getActiveSubscriptionCount(): number {
-    let count = 0;
-    for (const subscribers of this.groupSubscribers.values()) {
-      count += subscribers.size;
-    }
-    return count;
+    return this.subscriberRefcounts.size;
   }
 }
 
