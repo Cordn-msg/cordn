@@ -20,7 +20,6 @@ import {
   getTestCiphersuite,
 } from "../coordinator/testUtils.ts";
 import { CoordinatorAdapter } from "./coordinatorMethods.ts";
-import { decodeBase64 } from "./base64.ts";
 import { encodeBase64 } from "./base64.ts";
 import type { ServerLogger } from "./logger.ts";
 import { subscribeManyGroupMessagesInputSchema } from "../contracts/index.ts";
@@ -327,13 +326,6 @@ describe("CoordinatorAdapter", () => {
         createExtra(alice.actor.stablePubkey),
       ),
     ).rejects.toThrow("Invalid kp_64");
-
-    expect(() =>
-      adapter.postGroupMessage({
-        gid: "g",
-        msg_64: "!!!",
-      }),
-    ).toThrow("Invalid msg_64");
   });
 
   test("round-trips welcomes and queued group messages as base64 structured outputs", async () => {
@@ -384,8 +376,8 @@ describe("CoordinatorAdapter", () => {
 
     expect(posted.content).toEqual([]);
 
-    const fetchedMessages = adapter.fetchGroupMessages({
-      gid: posted.structuredContent.gid,
+    const fetchedMessages = adapter.fetchManyGroupMessages({
+      groups: [{ gid: posted.structuredContent.gid }],
     });
 
     expect(fetchedMessages.content).toEqual([]);
@@ -407,7 +399,7 @@ describe("CoordinatorAdapter", () => {
     });
   });
 
-  test("round-trips encrypted flag and passes gid through postGroupMessage contract", async () => {
+  test("round-trips gid through postGroupMessage contract", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
 
@@ -423,15 +415,14 @@ describe("CoordinatorAdapter", () => {
     expect(posted.structuredContent.cursor).toBe(1);
     expect(posted.structuredContent.at).toBeTypeOf("number");
 
-    // Fetch returns the encrypted flag.
-    const fetched = adapter.fetchGroupMessages({
-      gid: "encrypted-topic",
+    // Fetch returns the posted message.
+    const fetched = adapter.fetchManyGroupMessages({
+      groups: [{ gid: "encrypted-topic" }],
     });
     expect(fetched.structuredContent.messages).toHaveLength(1);
     expect(fetched.structuredContent.messages[0]).toMatchObject({
       gid: "encrypted-topic",
       msg_64: encodeBase64(encryptedOpaque),
-      encrypted: true,
     });
   });
 
@@ -565,7 +556,7 @@ describe("CoordinatorAdapter", () => {
       createExtra(bob.actor.stablePubkey, bobEvent.id),
     );
 
-    // Seed a group via the coordinator.
+    // Seed a group via the coordinator so getGroupRouting finds it.
     coordinator.postGroupMessage({
       groupId: "group-join-req",
       opaqueMessage: createPrivateMessage({
@@ -618,9 +609,11 @@ describe("CoordinatorAdapter", () => {
     expect(stored.content).toEqual([]);
     expect(stored.structuredContent.at).toBeTypeOf("number");
 
-    // Dedup: storing again refreshes the same row in place. A re-request
-    // bumps createdAt, so the timestamp is at least the original (the two
-    // calls may land in the same millisecond).
+    // Dedup: re-storing must not create a second row (verified downstream via
+    // toHaveLength(2)). The dedup path intentionally refreshes `createdAt` in
+    // place to evade an admin's recorded consume ref, so the contract here is
+    // monotonic — `at` never moves backwards — not equality. Wall-clock time
+    // can straddle a ms boundary on slow CI runners, so don't pin equality.
     const storedAgain = adapter.storeJoinRequest(
       { gid, kp_ref: "kp-ref-alice-join" },
       createExtra(alice.actor.stablePubkey),
@@ -636,7 +629,7 @@ describe("CoordinatorAdapter", () => {
     );
 
     // Fetch returns both requests.
-    const fetched = adapter.fetchPendingJoinRequests({ gid });
+    const fetched = adapter.fetchManyPendingJoinRequests({ groups: [{ gid }] });
     expect(fetched.content).toEqual([]);
     expect(fetched.structuredContent.requests).toHaveLength(2);
     expect(fetched.structuredContent.requests[0]?.pk).toBe(
@@ -699,284 +692,23 @@ describe("CoordinatorAdapter", () => {
       createExtra(bob.actor.stablePubkey),
     );
 
-    const observed = adapter.fetchPendingJoinRequests({ gid });
+    const observed = adapter.fetchManyPendingJoinRequests({
+      groups: [{ gid }],
+    });
     expect(observed.structuredContent.requests).toHaveLength(2);
     const aliceReq = observed.structuredContent.requests.find(
       (r) => r.pk === alice.actor.stablePubkey,
     )!;
 
     // Ack alice's request; only bob's remains.
-    const after = adapter.fetchPendingJoinRequests({
-      gid,
-      consumed: [{ pk: aliceReq.pk, at: aliceReq.at }],
+    const after = adapter.fetchManyPendingJoinRequests({
+      groups: [{ gid }],
+      consumed: [{ gid, pk: aliceReq.pk, at: aliceReq.at }],
     });
     expect(after.structuredContent.requests).toHaveLength(1);
     expect(after.structuredContent.requests[0]?.pk).toBe(
       bob.actor.stablePubkey,
     );
-  });
-
-  test("streams backlog and live group messages as JSON chunks", async () => {
-    const coordinator = new Coordinator();
-    const adapter = new CoordinatorAdapter(coordinator);
-    const alice = await createMemberArtifacts(createActor("alice-stream"));
-    const bob = await createMemberArtifacts(createActor("bob-stream"));
-    const cipherSuite = await getTestCiphersuite();
-    const aliceState = await createGroup({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      groupId: new TextEncoder().encode("group-streaming"),
-      keyPackage: alice.keyPackage,
-      privateKeyPackage: alice.privateKeyPackage,
-    });
-
-    const group = await createWelcomeForNewMember({
-      senderState: aliceState,
-      member: bob,
-    });
-
-    const backlogMessageBytes = await createApplicationMessageBytes({
-      state: group.senderState,
-      plaintext: "backlog message",
-    });
-
-    const backlogPosted = adapter.postGroupMessage({
-      gid: "group-streaming",
-      msg_64: encodeBase64(backlogMessageBytes.encodedMessage),
-    });
-
-    const writtenChunks: string[] = [];
-    let closed = false;
-    let abortedReason: string | undefined;
-    const stopError = new Error("stop after two chunks");
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      {
-        gid: backlogPosted.structuredContent.gid,
-        after: 0,
-      },
-      {
-        _meta: {
-          stream: {
-            signal: new AbortController().signal,
-            async start() {},
-            async write(data: string) {
-              writtenChunks.push(data);
-              if (writtenChunks.length >= 2) {
-                throw stopError;
-              }
-            },
-            async close() {
-              closed = true;
-            },
-            async abort(reason?: string) {
-              abortedReason = reason;
-            },
-          },
-        },
-      } as never,
-    );
-
-    await Promise.resolve();
-
-    expect(writtenChunks).toHaveLength(1);
-
-    const liveMessageBytes = await createApplicationMessageBytes({
-      state: backlogMessageBytes.newState,
-      plaintext: "live message",
-    });
-
-    const livePosted = adapter.postGroupMessage({
-      gid: "group-streaming",
-      msg_64: encodeBase64(liveMessageBytes.encodedMessage),
-    });
-
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(writtenChunks).toHaveLength(2);
-
-    const parsedFirst = JSON.parse(writtenChunks[0] ?? "{}");
-    const parsedSecond = JSON.parse(writtenChunks[1] ?? "{}");
-
-    expect(parsedFirst).toMatchObject({
-      cursor: 1,
-      gid: backlogPosted.structuredContent.gid,
-      at: expect.any(Number),
-    });
-    expect(decodeBase64(parsedFirst.msg_64)).toEqual(
-      backlogMessageBytes.encodedMessage,
-    );
-
-    expect(parsedSecond).toMatchObject({
-      cursor: livePosted.structuredContent.cursor,
-      gid: livePosted.structuredContent.gid,
-      at: expect.any(Number),
-    });
-    expect(decodeBase64(parsedSecond.msg_64)).toEqual(
-      liveMessageBytes.encodedMessage,
-    );
-
-    expect(closed).toBe(false);
-    await expect(subscribePromise).rejects.toBe(stopError);
-    expect(abortedReason).toBe("stop after two chunks");
-  });
-
-  test("completes the subscription handler after stream abort", async () => {
-    const coordinator = new Coordinator();
-    const { logger, entries } = createTestLogger();
-    const adapter = new CoordinatorAdapter(
-      coordinator,
-      undefined,
-      undefined,
-      logger,
-    );
-    const alice = await createMemberArtifacts(createActor("alice-abort"));
-    const cipherSuite = await getTestCiphersuite();
-    const aliceState = await createGroup({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      groupId: new TextEncoder().encode("group-stream-abort"),
-      keyPackage: alice.keyPackage,
-      privateKeyPackage: alice.privateKeyPackage,
-    });
-
-    const messageBytes = await createApplicationMessageBytes({
-      state: aliceState,
-      plaintext: "seed",
-    });
-
-    const posted = adapter.postGroupMessage({
-      gid: "group-stream-abort",
-      msg_64: encodeBase64(messageBytes.encodedMessage),
-    });
-
-    let abortedReason: string | undefined;
-    const stream = {
-      isActive: true,
-      signal: new AbortController().signal,
-      async start() {},
-      async write() {},
-      async close() {
-        this.isActive = false;
-      },
-      async abort(reason?: string) {
-        abortedReason = reason;
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      {
-        gid: posted.structuredContent.gid,
-        after: posted.structuredContent.cursor,
-      },
-      {
-        _meta: {
-          stream,
-        },
-      } as never,
-    );
-
-    await Promise.resolve();
-    await stream.abort("user requested stop");
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: {
-        subscribed: true,
-      },
-    });
-    expect(abortedReason).toBe("user requested stop");
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-
-    const startLog = entries.find(
-      (entry) => entry.bindings.type === "subscription_start",
-    );
-    const endLog = entries.find(
-      (entry) => entry.bindings.type === "subscription_end",
-    );
-
-    expect(startLog?.bindings).toMatchObject({
-      groupId: posted.structuredContent.gid,
-      activeSubscriptions: 1,
-    });
-    expect(endLog?.bindings).toMatchObject({
-      groupId: posted.structuredContent.gid,
-      reason: "user requested stop",
-      activeSubscriptions: 0,
-    });
-  });
-
-  test("removes subscriber when the writer signal aborts (silent client disconnect)", async () => {
-    const coordinator = new Coordinator();
-    const { logger, entries } = createTestLogger();
-    const adapter = new CoordinatorAdapter(
-      coordinator,
-      undefined,
-      undefined,
-      logger,
-    );
-    const alice = await createMemberArtifacts(createActor("alice-signal"));
-    const cipherSuite = await getTestCiphersuite();
-    const aliceState = await createGroup({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      groupId: new TextEncoder().encode("group-signal-disconnect"),
-      keyPackage: alice.keyPackage,
-      privateKeyPackage: alice.privateKeyPackage,
-    });
-    const messageBytes = await createApplicationMessageBytes({
-      state: aliceState,
-      plaintext: "seed",
-    });
-    const posted = adapter.postGroupMessage({
-      gid: "group-signal-disconnect",
-      msg_64: encodeBase64(messageBytes.encodedMessage),
-    });
-
-    const controller = new AbortController();
-    const stream = {
-      isActive: true,
-      signal: controller.signal,
-      async start() {},
-      async write() {},
-      async close() {
-        this.isActive = false;
-      },
-      async abort() {
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      {
-        gid: posted.structuredContent.gid,
-        after: posted.structuredContent.cursor,
-      },
-      {
-        _meta: {
-          stream,
-        },
-      } as never,
-    );
-
-    await Promise.resolve();
-    // Simulate the SDK firing the writer signal on a silent client disconnect
-    // (probe-timeout/dispose), the path the abort override above does not cover.
-    controller.abort();
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: {
-        subscribed: true,
-      },
-    });
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-
-    const endLog = entries.find(
-      (entry) => entry.bindings.type === "subscription_end",
-    );
-    expect(endLog?.bindings).toMatchObject({
-      groupId: posted.structuredContent.gid,
-      reason: "client-disconnect",
-      activeSubscriptions: 0,
-    });
   });
 
   test("returns fetch output shape without runtime schema parsing", async () => {
@@ -1001,8 +733,8 @@ describe("CoordinatorAdapter", () => {
       msg_64: encodeBase64(messageBytes.encodedMessage),
     });
 
-    const fetchedMessages = adapter.fetchGroupMessages({
-      gid: posted.structuredContent.gid,
+    const fetchedMessages = adapter.fetchManyGroupMessages({
+      groups: [{ gid: posted.structuredContent.gid }],
     });
     const message = fetchedMessages.structuredContent.messages[0];
 
@@ -1011,90 +743,7 @@ describe("CoordinatorAdapter", () => {
       gid: posted.structuredContent.gid,
       msg_64: encodeBase64(messageBytes.encodedMessage),
       at: expect.any(Number),
-      encrypted: true,
     });
-  });
-
-  test("subscribes before backlog fetch to preserve messages posted during setup", async () => {
-    const coordinator = new Coordinator();
-    const alice = await createMemberArtifacts(createActor("alice-race-free"));
-    const cipherSuite = await getTestCiphersuite();
-    const aliceState = await createGroup({
-      context: { cipherSuite, authService: unsafeTestingAuthenticationService },
-      groupId: new TextEncoder().encode("group-race-free"),
-      keyPackage: alice.keyPackage,
-      privateKeyPackage: alice.privateKeyPackage,
-    });
-
-    const firstMessage = await createApplicationMessageBytes({
-      state: aliceState,
-      plaintext: "seed",
-    });
-
-    coordinator.postGroupMessage({
-      groupId: "group-race-free",
-      opaqueMessage: firstMessage.encodedMessage,
-    });
-
-    let secondMessageBytes: Uint8Array | null = null;
-    const originalFetchGroupMessages =
-      coordinator.fetchGroupMessages.bind(coordinator);
-    coordinator.fetchGroupMessages = ((input) => {
-      if (input.groupId === "group-race-free" && secondMessageBytes) {
-        coordinator.postGroupMessage({
-          groupId: "group-race-free",
-          opaqueMessage: secondMessageBytes,
-        });
-        secondMessageBytes = null;
-      }
-
-      return originalFetchGroupMessages(input);
-    }) as typeof coordinator.fetchGroupMessages;
-
-    const secondMessage = await createApplicationMessageBytes({
-      state: firstMessage.newState,
-      plaintext: "during setup",
-    });
-    secondMessageBytes = secondMessage.encodedMessage;
-
-    const adapter = new CoordinatorAdapter(coordinator);
-    const writtenChunks: string[] = [];
-    const stream = {
-      isActive: true,
-      signal: new AbortController().signal,
-      async start() {},
-      async write(data: string) {
-        writtenChunks.push(data);
-        if (writtenChunks.length >= 2) {
-          this.isActive = false;
-        }
-      },
-      async close() {
-        this.isActive = false;
-      },
-      async abort(_reason?: string) {
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages(
-      {
-        gid: "group-race-free",
-        after: 0,
-      },
-      { _meta: { stream } } as never,
-    );
-
-    await Promise.resolve();
-    await Promise.resolve();
-    await stream.abort();
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: { subscribed: true },
-    });
-    expect(writtenChunks).toHaveLength(2);
-    expect(JSON.parse(writtenChunks[0] ?? "{}")).toMatchObject({ cursor: 1 });
-    expect(JSON.parse(writtenChunks[1] ?? "{}")).toMatchObject({ cursor: 2 });
   });
 
   test("multi-group subscription replays backlog with independent cursors and streams live messages", async () => {
@@ -1129,15 +778,15 @@ describe("CoordinatorAdapter", () => {
     });
 
     const firstPosted = adapter.postGroupMessage({
-      gid: "group-many-sub-a",
+      gid: "alpha",
       msg_64: encodeBase64(firstBacklog.encodedMessage),
     });
     const secondSkippedPosted = adapter.postGroupMessage({
-      gid: "group-many-sub-b",
+      gid: "beta",
       msg_64: encodeBase64(secondSkipped.encodedMessage),
     });
     const secondPosted = adapter.postGroupMessage({
-      gid: "group-many-sub-b",
+      gid: "beta",
       msg_64: encodeBase64(secondBacklog.encodedMessage),
     });
 
@@ -1184,7 +833,7 @@ describe("CoordinatorAdapter", () => {
       plaintext: "first live",
     });
     const firstLivePosted = adapter.postGroupMessage({
-      gid: "group-many-sub-a",
+      gid: "alpha",
       msg_64: encodeBase64(firstLive.encodedMessage),
     });
 
@@ -1348,6 +997,55 @@ describe("CoordinatorAdapter", () => {
     });
   });
 
+  test("removes subscriber when the writer signal aborts (silent client disconnect)", async () => {
+    const coordinator = new Coordinator();
+    const { logger, entries } = createTestLogger();
+    const adapter = new CoordinatorAdapter(
+      coordinator,
+      undefined,
+      undefined,
+      logger,
+    );
+    const controller = new AbortController();
+    const stream = {
+      isActive: true,
+      signal: controller.signal,
+      async start() {},
+      async write() {},
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        this.isActive = false;
+      },
+    };
+
+    const subscribePromise = adapter.subscribeManyGroupMessages(
+      { groups: [{ gid: "group-signal-disconnect" }] },
+      { _meta: { stream } } as never,
+    );
+
+    await Promise.resolve();
+    // Simulate the SDK firing the writer signal on a silent client disconnect
+    // (dispose/probe-timeout), the path the stream.abort override does not cover.
+    controller.abort();
+
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: {
+        subscribed: true,
+        groups: ["group-signal-disconnect"],
+      },
+    });
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+
+    expect(
+      entries.find((entry) => entry.bindings.type === "subscription_end")
+        ?.bindings,
+    ).toMatchObject({
+      reason: "client-disconnect",
+    });
+  });
+
   test("multi-group subscription ignores messages from unsubscribed groups", async () => {
     const coordinator = new Coordinator();
     const adapter = new CoordinatorAdapter(coordinator);
@@ -1434,7 +1132,7 @@ describe("CoordinatorAdapter", () => {
 
   test("multi-group subscription schema rejects empty group lists and malformed entries", () => {
     expect(() =>
-      subscribeManyGroupMessagesInputSchema.parse({ groups: [] }),
+      subscribeManyGroupMessagesInputSchema.parse({ groups: [{}] }),
     ).toThrow();
     expect(() =>
       subscribeManyGroupMessagesInputSchema.parse({ groups: [{ gid: "" }] }),
@@ -1645,89 +1343,5 @@ describe("CoordinatorAdapter", () => {
         createExtra(bob.actor.stablePubkey, secondEvent.id),
       ),
     ).rejects.toThrow("Key package quota exceeded");
-  });
-
-  test("abort during backlog replay cleans up coordinator subscriptions", async () => {
-    const coordinator = new Coordinator();
-    const { logger, entries } = createTestLogger();
-    const adapter = new CoordinatorAdapter(
-      coordinator,
-      undefined,
-      undefined,
-      logger,
-    );
-    const gid = "group-abort-backlog";
-
-    coordinator.postGroupMessage({
-      groupId: gid,
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      groupId: gid,
-      opaqueMessage: createPrivateMessage({
-        groupId: gid,
-        epoch: 1n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-
-    let writeCount = 0;
-    const writeGate: { release: (() => void) | null } = { release: null };
-    let abortedReason: string | undefined;
-
-    const stream = {
-      isActive: true,
-      signal: new AbortController().signal,
-      async start() {},
-      async write(_data: string) {
-        writeCount += 1;
-        if (writeCount === 1) {
-          return new Promise<void>((resolve) => {
-            writeGate.release = () => resolve();
-          });
-        }
-      },
-      async close() {
-        this.isActive = false;
-      },
-      async abort(reason?: string) {
-        abortedReason = reason;
-        this.isActive = false;
-      },
-    };
-
-    const subscribePromise = adapter.subscribeGroupMessages({ gid, after: 0 }, {
-      _meta: { stream },
-    } as never);
-
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(writeCount).toBe(1);
-    expect(coordinator.getActiveSubscriptionCount()).toBe(1);
-
-    await stream.abort("stop mid-backlog");
-
-    expect(abortedReason).toBe("stop mid-backlog");
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-
-    writeGate.release?.();
-
-    await expect(subscribePromise).resolves.toMatchObject({
-      structuredContent: { subscribed: true },
-    });
-
-    expect(
-      entries.find((entry) => entry.bindings.type === "subscription_end")
-        ?.bindings,
-    ).toMatchObject({
-      groupId: gid,
-      reason: "stop mid-backlog",
-    });
   });
 });

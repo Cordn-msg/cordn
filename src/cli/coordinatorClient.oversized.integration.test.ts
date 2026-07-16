@@ -89,8 +89,8 @@ async function postOversizedCatchUp(params: {
     state = created.newState;
 
     const posted = await params.sender.PostGroupMessage({
-      gid: "delivery",
       msg_64: encodeBase64(created.encodedMessage),
+      gid: "oversized-catch-up-group",
     });
 
     gid = posted.gid;
@@ -194,7 +194,7 @@ describe("oversized catch-up transfer (CEP-22)", () => {
       });
 
       const fetched = await resolveWithin(
-        bobClient.FetchGroupMessages({ gid: expected.gid }),
+        bobClient.FetchManyGroupMessages({ groups: [{ gid: expected.gid }] }),
         20_000,
         "FetchGroupMessages (encryption disabled)",
       );
@@ -292,7 +292,7 @@ describe("oversized catch-up transfer (CEP-22)", () => {
       });
 
       const fetched = await resolveWithin(
-        bobClient.FetchGroupMessages({ gid: expected.gid }),
+        bobClient.FetchManyGroupMessages({ groups: [{ gid: expected.gid }] }),
         20_000,
         "FetchGroupMessages (gift-wrap encryption)",
       );

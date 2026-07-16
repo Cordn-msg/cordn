@@ -23,7 +23,11 @@ import {
   type MediaMetadata,
 } from "./utils/mediaMessages.ts";
 import type { MediaStore } from "./mediaStore.ts";
-import { decodeBase64, encodeBase64 } from "./utils/mlsBase.ts";
+import {
+  decodeBase64,
+  encodeBase64,
+  getCliCiphersuite,
+} from "./utils/mlsBase.ts";
 import {
   createPrivateKeyHex,
   deriveStablePubkey,
@@ -41,7 +45,7 @@ import {
 } from "../contracts/index.ts";
 import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";
-import type { FetchPendingJoinRequestsOutput } from "../contracts/index.ts";
+import type { FetchManyPendingJoinRequestsOutput } from "../contracts/index.ts";
 import { runGroupWatch } from "./groupWatch.ts";
 import {
   acceptStoredWelcome,
@@ -69,6 +73,19 @@ import {
   rejectPendingEpochOperations,
   type PendingEpochOperation,
 } from "./pendingEpochOperations.ts";
+import {
+  clientStateDecoder,
+  encode,
+  makeKeyPackageRef,
+  privateKeyPackageEncoder,
+} from "ts-mls";
+import { decodeKeyPackage, decodePrivateKeyPackage } from "../mlsCodec.ts";
+import type {
+  ChainStep,
+  GroupDocument,
+  LastResortKeyPackageEntry,
+  Tombstone,
+} from "./multiDevice.ts";
 import {
   MissingLocalKeyPackageForWelcomeError,
   RemovedFromGroupError,
@@ -137,6 +154,8 @@ export class CliSession {
   private readonly coordinatorRegistry: CoordinatorClientRegistry;
   /** Content-addressed store for encrypted media blobs, if configured. */
   private readonly mediaStore?: MediaStore;
+  /** Multi-device re-publish hook, if configured. */
+  private readonly onLocalStateAdvance?: () => void | Promise<void>;
   private readonly groupIdDecoder = new TextDecoder();
   private readonly watchHandles = new Map<string, GroupWatchHandle>();
   private readonly groupEventListeners = new Set<(event: GroupEvent) => void>();
@@ -150,6 +169,28 @@ export class CliSession {
     });
     this.stablePubkey = deriveStablePubkey(this.privateKey);
     this.mediaStore = options.mediaStore;
+    this.onLocalStateAdvance = options.onLocalStateAdvance;
+  }
+
+  /**
+   * Fire-and-forget the multi-device state-advance hook. Never throws and
+   * never blocks: publishing is a client concern, not part of delivery.
+   */
+  private notifyLocalStateAdvance(): void {
+    const hook = this.onLocalStateAdvance;
+    if (!hook) {
+      return;
+    }
+    queueMicrotask(() => {
+      try {
+        const result = hook();
+        if (result && typeof (result as Promise<void>).catch === "function") {
+          (result as Promise<void>).catch(() => undefined);
+        }
+      } catch {
+        // ponytail: publishing must never break delivery.
+      }
+    });
   }
 
   async disconnect(): Promise<void> {
@@ -372,6 +413,8 @@ export class CliSession {
     );
 
     this.store.addGroup(group);
+    // New group: siblings learn of it by seeding from the next published doc.
+    this.notifyLocalStateAdvance();
     return group;
   }
 
@@ -610,21 +653,22 @@ export class CliSession {
 
   async fetchPendingJoinRequests(
     groupAlias: string,
-  ): Promise<FetchPendingJoinRequestsOutput> {
+  ): Promise<FetchManyPendingJoinRequestsOutput> {
     const group = this.getGroup(groupAlias);
     const client = this.getGroupClient(group);
     const groupId = this.deriveGroupId(group.state);
     const toAck = this.store.peekConsumedJoinRequests(groupId);
-    const result = await client.FetchPendingJoinRequests(
+    const result = await client.FetchManyPendingJoinRequests(
       toAck.length > 0
         ? {
-            gid: groupId,
+            groups: [{ gid: groupId }],
             consumed: toAck.map((ref) => ({
+              gid: groupId,
               pk: ref.requesterStablePubkey,
               at: ref.createdAt,
             })),
           }
-        : { gid: groupId },
+        : { groups: [{ gid: groupId }] },
     );
     this.store.clearConsumedJoinRequests(groupId, toAck);
     this.store.setFetchedJoinRequests(
@@ -947,6 +991,254 @@ export class CliSession {
     };
   }
 
+  /**
+   * Multi-device seed (spec/applications/multi-device.md §9). Adopts a shared
+   * MLS leaf from a serialized `ClientState` without going through the Welcome
+   * path, then sets the fetch cursor so a subsequent `syncGroup` catches up
+   * from the document's cursor. Used by {@link applyDocumentEntry} for groups
+   * the device does not already have locally.
+   */
+  async seedGroupFromEntry(
+    entry: GroupDocument,
+    alias?: string,
+  ): Promise<GroupSessionState> {
+    const resolvedAlias = alias ?? `group-${this.store.groupCount + 1}`;
+
+    const decoded = clientStateDecoder(decodeBase64(entry.clientState), 0);
+    if (!decoded) {
+      throw new Error("Failed to decode seeded ClientState");
+    }
+    const state = decoded[0];
+    const group = this.createGroupSessionState(
+      resolvedAlias,
+      state,
+      entry.coordinator,
+    );
+    // Presentation metadata lives in the clientState's GroupContext extension
+    // (spec §4 / spec/01), not the document — derive it from the adopted state.
+    group.metadata = getCordnGroupMetadataExtension(state);
+    // ponytail: cursor is the writer's fetch progression; the seeded device
+    // fetches forward from here. Messages at or before the cursor are not
+    // re-fetched (state-sync trade, see spec §9).
+    group.fetchCursor = entry.cursor;
+    group.lastCursor = entry.cursor;
+
+    this.store.addGroup(group);
+    return group;
+  }
+
+  /**
+   * Multi-device reconciliation per entry (spec §8). Seeds a missing group,
+   * fast-forwards a present group to a strictly newer epoch, or skips. The
+   * newer-epoch check is the rollback defense: a replayed or stale tip can
+   * never downgrade an existing group. Fast-forward is required because a
+   * sibling device's Commit cannot be ingested via the delivery stream (the
+   * shared leaf's UpdatePath invalidates this device's keys); only the
+   * serialized ClientState carries the new private keys (spec §10).
+   */
+  async applyDocumentEntry(
+    entry: GroupDocument,
+  ): Promise<"seeded" | "fast-forwarded" | "skipped"> {
+    const local = this.listGroups().find(
+      (group) => this.deriveGroupId(group.state) === entry.gid,
+    );
+
+    if (!local) {
+      await this.seedGroupFromEntry(entry);
+      return "seeded";
+    }
+
+    const decoded = clientStateDecoder(decodeBase64(entry.clientState), 0);
+    if (!decoded) {
+      return "skipped";
+    }
+    const docEpoch = decoded[0].groupContext.epoch;
+    if (docEpoch <= local.state.groupContext.epoch) {
+      // Not newer: advisory only. Never downgrade local state from the doc.
+      return "skipped";
+    }
+
+    local.state = decoded[0];
+    local.metadata = getCordnGroupMetadataExtension(decoded[0]);
+    local.fetchCursor = Math.max(local.fetchCursor, entry.cursor);
+    local.lastCursor = Math.max(local.lastCursor, entry.cursor);
+
+    // A newer-epoch document means a sibling device's Commit won the epoch.
+    // Any pending Commit I staged against the old epoch is now stale (the
+    // group moved on); discard it. The intended change is lost and the
+    // caller may retry. Spec §10 (concurrent sibling Commits).
+    this.store.pendingOperations.delete(local.alias);
+    return "fast-forwarded";
+  }
+
+  /**
+   * Multi-device tombstone (spec §8 case 4). Drops a local group whose epoch
+   * is ≤ the tombstone epoch; ignores a stale tombstone (local epoch higher)
+   * or one for a group the device does not have. Soft-delete stops the device
+   * *tracking* a group; it is not an MLS Leave (spec §13).
+   */
+  async applyDocumentTombstone(
+    tombstone: Tombstone,
+  ): Promise<"dropped" | "ignored"> {
+    const local = this.listGroups().find(
+      (group) => this.deriveGroupId(group.state) === tombstone.gid,
+    );
+    if (!local) {
+      return "ignored";
+    }
+    if (BigInt(tombstone.epoch) < local.state.groupContext.epoch) {
+      return "ignored"; // stale tombstone (§8 anti-downgrade)
+    }
+    this.store.deleteGroup(local.alias);
+    this.store.pendingOperations.delete(local.alias);
+    if (this.isWatching(local.alias)) {
+      queueMicrotask(() => {
+        void this.unwatchGroup(local.alias).catch(() => undefined);
+      });
+    }
+    return "dropped";
+  }
+
+  /**
+   * Soft-delete a group (spec §8/§10 tombstone). Drops the local group and
+   * returns its `{gid, epoch}` tombstone for the caller to carry in the next
+   * published document's `removed` (per the §10.5 union). Fires the
+   * `onLocalStateAdvance` hook so a client re-publishes and siblings converge.
+   */
+  async softDeleteGroup(groupAlias: string): Promise<Tombstone> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      const gid = this.deriveGroupId(group.state);
+      const epoch = Number(group.state.groupContext.epoch);
+      this.store.deleteGroup(groupAlias);
+      this.store.pendingOperations.delete(groupAlias);
+      if (this.isWatching(groupAlias)) {
+        queueMicrotask(() => {
+          void this.unwatchGroup(groupAlias).catch(() => undefined);
+        });
+      }
+      // Spec §10: re-publish hook fires on soft-delete so siblings converge.
+      this.notifyLocalStateAdvance();
+      return { gid, epoch };
+    });
+  }
+
+  /**
+   * The account's currently-published last-resort key package, for the meta
+   * document (spec §4.2/§11.5). Returns undefined when the device holds none.
+   * Both fields are the base64 TLS wire form (RFC 9420 §3).
+   */
+  getLastResortKeyPackage(): LastResortKeyPackageEntry | undefined {
+    const stored = this.store
+      .listKeyPackages()
+      .find((entry) => entry.isLastResort);
+    if (!stored) return undefined;
+    return {
+      keyPackage: stored.keyPackageBase64,
+      privateKeyPackage: encodeBase64(
+        encode(privateKeyPackageEncoder, stored.privateKeyPackage),
+      ),
+    };
+  }
+
+  /**
+   * Load the account's last-resort key package from a meta document (spec
+   * §11.5) so this device can process a Welcome built against it. Idempotent:
+   * a key package already held (by ref) is not re-added. Returns true if newly
+   * loaded, false if it was already present.
+   */
+  async loadLastResortKeyPackage(
+    entry: LastResortKeyPackageEntry,
+  ): Promise<boolean> {
+    const keyPackage = decodeKeyPackage(decodeBase64(entry.keyPackage));
+    const cipherSuite = await getCliCiphersuite();
+    const keyPackageRef = bytesToHex(
+      await makeKeyPackageRef(keyPackage, cipherSuite.hash),
+    );
+    if (this.store.findKeyPackageByRef(keyPackageRef)) {
+      return false; // already held
+    }
+    const privateKeyPackage = decodePrivateKeyPackage(
+      decodeBase64(entry.privateKeyPackage),
+    );
+    this.store.addKeyPackage({
+      alias: `kp-${this.store.keyPackageCount + 1}`,
+      keyPackage,
+      privateKeyPackage,
+      keyPackageRef,
+      keyPackageBase64: entry.keyPackage,
+      isLastResort: true,
+      consumed: false,
+    });
+    return true;
+  }
+
+  /**
+   * Chained catch-up (spec §8.5). For a group whose local epoch is behind the
+   * tip, replay the message gap epoch-by-epoch: each epoch's application
+   * messages are decrypted with that epoch's `ClientState` from the `prev`
+   * chain, so messages sent during the offline window are NOT lost the way a
+   * single-snapshot fast-forward would lose them. Sibling-Commit epochs come
+   * from the chain; third-party Commits inside a range are replayed in-band by
+   * `applyIncomingMessages` (which advances the state itself). Single-snapshot
+   * fast-forward (§8) remains the fallback when the chain is unavailable.
+   *
+   * `chain` MUST be sorted ascending by cursor and cover every epoch strictly
+   * newer than the local epoch (one gen-0 step each, as `walkSessionChain`
+   * returns); a gap in the chain would mis-partition the message ranges.
+   */
+  async catchUpGroupFromChain(
+    groupAlias: string,
+    chain: ChainStep[],
+  ): Promise<{ received: StoredMessage[]; issues: SyncIssue[] }> {
+    const group = this.getGroup(groupAlias);
+    if (chain.length === 0) {
+      return { received: [], issues: [] };
+    }
+    const localCursor = group.fetchCursor;
+
+    // Fetch the whole gap (messages after the local cursor). ponytail: one
+    // fetch; paginate if real gaps grow large enough to trip a batch limit.
+    const result = await this.fetchRawGroupMessages(
+      this.deriveGroupId(group.state),
+      localCursor,
+    );
+    const gap = result.messages;
+
+    // Per-epoch states: [localState, ...decoded chain states], oldest first.
+    const states: ClientState[] = [group.state];
+    for (const step of chain) {
+      const decoded = clientStateDecoder(decodeBase64(step.clientState), 0);
+      if (!decoded) break;
+      states.push(decoded[0]);
+    }
+
+    // Epoch boundaries: [localCursor, ...chain cursors, +∞).
+    const boundaries: number[] = [
+      localCursor,
+      ...chain.map((step) => step.cursor),
+      Number.POSITIVE_INFINITY,
+    ];
+
+    const allReceived: StoredMessage[] = [];
+    const allIssues: SyncIssue[] = [];
+
+    for (let i = 0; i < states.length; i++) {
+      const lo = boundaries[i]!;
+      const hi = boundaries[i + 1]!;
+      const range = gap.filter((m) => m.cursor > lo && m.cursor <= hi);
+      if (range.length === 0) continue;
+      // Decrypt this epoch's messages with this epoch's state, then advance.
+      group.state = states[i]!;
+      const r = await this.applyIncomingMessages(group, range);
+      allReceived.push(...r.received);
+      allIssues.push(...r.issues);
+    }
+    // group.state and group.fetchCursor are left advanced through the tip
+    // epoch by the final range — the device is now current.
+    return { received: allReceived, issues: allIssues };
+  }
+
   listMessages(groupAlias: string): StoredMessage[] {
     return [...this.getGroup(groupAlias).messages].sort(
       (a, b) => a.cursor - b.cursor,
@@ -970,9 +1262,10 @@ export class CliSession {
   }> {
     // The serialized MLS message is sealed with a key derived from the
     // current epoch's exporter secret: all group members can decrypt, the
-    // coordinator cannot. The wrapper we post is also what we match against
-    // the self-echo of a commit (sealed with the pre-commit secret) when
-    // reconciling pending operations after the session adopts the new state.
+    // coordinator cannot. The wrapper we post is also what we match
+    // against the self-echo of a commit (sealed with the pre-commit
+    // secret) when reconciling pending operations after the session
+    // adopts the new state.
     const gid = this.deriveGroupId(group.state);
     const msg_64 = (
       await encryptGroupPayload({
@@ -997,9 +1290,13 @@ export class CliSession {
     afterCursor: number,
   ): Promise<FetchGroupMessagesOutput> {
     const group = this.findGroupById(groupId);
-    return this.getGroupClient(group).FetchGroupMessages({
-      gid: groupId,
-      after: this.toOptionalCursor(afterCursor),
+    return this.getGroupClient(group).FetchManyGroupMessages({
+      groups: [
+        {
+          gid: groupId,
+          after: this.toOptionalCursor(afterCursor),
+        },
+      ],
     });
   }
 
@@ -1165,38 +1462,34 @@ export class CliSession {
     for (const message of messages) {
       let opaqueMessageBase64: string;
 
-      if (message.encrypted) {
-        // Self-echo detection: commits are encrypted with the pre-commit
-        // state so all members can decrypt them.  The creator adopts the
-        // new state immediately after posting and can no longer decrypt
-        // the echo, so we match the posted encrypted wrapper against
-        // pending operations instead.
-        const pendingOp = this.findPendingOpByPostedMsg(
-          group.alias,
-          message.msg_64,
-        );
-        if (pendingOp) {
-          opaqueMessageBase64 = pendingOp.commitMessageBase64;
-        } else {
-          try {
-            const { serializedMlsMessage } = await decryptGroupPayload({
-              state: group.state,
-              encryptedBase64: message.msg_64,
-            });
-            opaqueMessageBase64 = encodeBase64(serializedMlsMessage);
-          } catch {
-            // Skip messages from epochs we have not joined — decryption
-            // fails naturally because the exporter secret differs.
-            // Advance the cursor so we do not re-fetch the same
-            // undecryptable message on every sync (e.g. pre-join traffic
-            // when a Welcome lacks an `after` hint).
-            group.fetchCursor = Math.max(group.fetchCursor, message.cursor);
-            group.lastCursor = Math.max(group.lastCursor, message.cursor);
-            continue;
-          }
-        }
+      // Self-echo detection: commits are encrypted with the pre-commit
+      // state so all members can decrypt them.  The creator adopts the
+      // new state immediately after posting and can no longer decrypt
+      // the echo, so we match the posted encrypted wrapper against
+      // pending operations instead.
+      const pendingOp = this.findPendingOpByPostedMsg(
+        group.alias,
+        message.msg_64,
+      );
+      if (pendingOp) {
+        opaqueMessageBase64 = pendingOp.commitMessageBase64;
       } else {
-        opaqueMessageBase64 = message.msg_64;
+        try {
+          const { serializedMlsMessage } = await decryptGroupPayload({
+            state: group.state,
+            encryptedBase64: message.msg_64,
+          });
+          opaqueMessageBase64 = encodeBase64(serializedMlsMessage);
+        } catch {
+          // Skip messages from epochs we have not joined — decryption
+          // fails naturally because the exporter secret differs.
+          // Advance the cursor so we do not re-fetch the same
+          // undecryptable message on every sync (e.g. pre-join traffic
+          // when a Welcome lacks an `after` hint).
+          group.fetchCursor = Math.max(group.fetchCursor, message.cursor);
+          group.lastCursor = Math.max(group.lastCursor, message.cursor);
+          continue;
+        }
       }
 
       // Ingest this single message immediately so that epoch-advancing
@@ -1257,6 +1550,10 @@ export class CliSession {
           },
         );
         await this.fetchWelcomes();
+        // A locally-authored Commit just landed on the stream. Notify the
+        // multi-device layer so siblings can fast-forward via a fresh doc
+        // (spec/applications/multi-device.md §10).
+        this.notifyLocalStateAdvance();
       }
 
       if (allRejectedPending.size > 0) {

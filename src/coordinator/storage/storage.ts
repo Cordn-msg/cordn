@@ -6,6 +6,7 @@ import type {
   FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
+  GroupRoutingRecord,
   JoinRequestRecord,
   PublishedKeyPackageRecord,
   WelcomeQueueRecord,
@@ -48,7 +49,6 @@ export interface AppendGroupMessageParams {
   groupId: string;
   opaqueMessage: Uint8Array;
   createdAt: number;
-  encrypted: boolean;
 }
 
 export interface CoordinatorStorage {
@@ -132,5 +132,6 @@ export interface CoordinatorStorage {
   fetchManyGroupMessages(
     input: FetchManyGroupMessagesInput,
   ): GroupMessageRecord[];
+  getGroupRouting(groupId: string): GroupRoutingRecord | null;
   close?(): void;
 }

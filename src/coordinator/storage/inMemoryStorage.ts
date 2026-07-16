@@ -268,7 +268,6 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
       groupId: params.groupId,
       opaqueMessage: params.opaqueMessage,
       createdAt: params.createdAt,
-      encrypted: params.encrypted,
     };
     group.nextCursor += 1;
 
@@ -283,9 +282,11 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
   fetchGroupMessages(input: FetchGroupMessagesInput): GroupMessageRecord[] {
     const messages = this.groups.get(input.groupId)?.messages ?? [];
     const afterCursor = input.afterCursor;
+
     if (afterCursor === undefined) {
       return messages;
     }
+
     return messages.filter((record) => record.cursor > afterCursor);
   }
 
@@ -293,6 +294,10 @@ export class InMemoryCoordinatorStorage implements CoordinatorStorage {
     input: FetchManyGroupMessagesInput,
   ): GroupMessageRecord[] {
     return input.groups.flatMap((group) => this.fetchGroupMessages(group));
+  }
+
+  getGroupRouting(groupId: string): GroupRoutingRecord | null {
+    return this.groups.get(groupId)?.routing ?? null;
   }
 
   close(): void {}

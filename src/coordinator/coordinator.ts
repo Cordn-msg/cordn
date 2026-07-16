@@ -5,6 +5,7 @@ import type {
   FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
+  GroupRoutingRecord,
   JoinRequestRecord,
   PostGroupMessageInput,
   PublishedKeyPackageRecord,
@@ -260,14 +261,10 @@ export class Coordinator {
   }
 
   postGroupMessage(input: PostGroupMessageInput): GroupMessageRecord {
-    // Coordinator is opaque: it routes by the caller-supplied delivery gid
-    // and never decodes the payload. It cannot learn epoch, wireformat,
-    // content type, or the inner MLS group_id.
     const record = this.storage.appendGroupMessage({
       groupId: input.groupId,
       opaqueMessage: input.opaqueMessage,
       createdAt: this.now(),
-      encrypted: true,
     });
 
     this.publishLiveGroupMessage(record);
@@ -408,6 +405,10 @@ export class Coordinator {
     for (const subscriber of subscribers) {
       subscriber.push(record);
     }
+  }
+
+  getGroupRouting(groupId: string): GroupRoutingRecord | null {
+    return this.storage.getGroupRouting(groupId);
   }
 
   getActiveSubscriptionCount(): number {

@@ -14,9 +14,9 @@ import { cordnClient } from "./coordinatorClient.ts";
 import { prepareAddMember } from "./membershipFlow.ts";
 import { updateGroupMetadataExtension } from "./utils/mlsGroupLifecycle.ts";
 import { encryptGroupPayload } from "./utils/mlsMessages.ts";
+import { decodeBase64 } from "./utils/mlsBase.ts";
 import { connectServer } from "../server/coordinatorServer.ts";
 import { MockRelayHub } from "../test/mockRelay.ts";
-import { decodeBase64 } from "../server/base64.ts";
 import { PrivateKeySigner } from "@contextvm/sdk";
 
 async function waitForCondition(
@@ -164,10 +164,10 @@ describe("CliSession", () => {
     });
 
     try {
-      // Both clients encrypt payloads (Marmot-style). This exercises the
+      // Both clients opt into payload encryption. This exercises the
       // encrypted post path, the encrypted self-echo reconciliation of the
-      // add-member commit (matched via postedMsgBase64), and the encrypted
-      // read path.
+      // add-member commit (matched via postedMsgBase64), and the
+      // encrypted read path.
       const alice = new CliSession({
         serverPubkey,
         relayHandler: relayHub.createRelayHandler(),
@@ -1223,15 +1223,13 @@ describe("CliSession", () => {
       });
       attackerClients.push(bobAttacker);
 
-      const forgedEncrypted = (
-        await encryptGroupPayload({
-          state: bob.getGroup("demo").state,
-          serializedMlsMessage: decodeBase64(forged.commitMessageBase64),
-        })
-      ).encryptedBase64;
+      const forgedEncrypted = await encryptGroupPayload({
+        state: bob.getGroup("demo").state,
+        serializedMlsMessage: decodeBase64(forged.commitMessageBase64),
+      });
       await bobAttacker.PostGroupMessage({
         gid: bob.deriveGroupId(bob.getGroup("demo").state),
-        msg_64: forgedEncrypted,
+        msg_64: forgedEncrypted.encryptedBase64,
       });
 
       // Every honest member, including bob's own honest CliSession, must
@@ -1368,15 +1366,13 @@ describe("CliSession", () => {
         deriveGroupId: (state) => bob.deriveGroupId(state),
       });
 
-      const forgedEncrypted = (
-        await encryptGroupPayload({
-          state: bob.getGroup("demo").state,
-          serializedMlsMessage: decodeBase64(forged.commitMessageBase64),
-        })
-      ).encryptedBase64;
+      const forgedEncrypted = await encryptGroupPayload({
+        state: bob.getGroup("demo").state,
+        serializedMlsMessage: decodeBase64(forged.commitMessageBase64),
+      });
       await bobAttacker.PostGroupMessage({
         gid: bob.deriveGroupId(bob.getGroup("demo").state),
-        msg_64: forgedEncrypted,
+        msg_64: forgedEncrypted.encryptedBase64,
       });
 
       // Every honest member rejects the forged add and records one sync

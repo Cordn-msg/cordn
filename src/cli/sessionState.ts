@@ -13,14 +13,24 @@ export interface CliSessionOptions {
   relayHandler?: import("@contextvm/sdk").RelayHandler;
   defaultCoordinator?: CoordinatorTarget;
   coordinators?: Record<string, CoordinatorTarget>;
-
   /**
    * Content-addressed store used to publish/fetch encrypted media blobs. When
    * unset, `sendMedia` and `decryptMediaMessage` throw. The media layer is
-   * independent of the coordinator, which never sees blobs. See
-   * `spec/applications/encrypted-media.md`.
+   * independent of payload encryption and the coordinator, which never sees
+   * blobs. See `spec/applications/encrypted-media.md`.
    */
   mediaStore?: MediaStore;
+
+  /**
+   * Multi-device hook (spec/applications/multi-device.md §10): fired after a
+   * group operation that advances local state in a way sibling devices must
+   * learn about — when a locally-authored Commit is confirmed via self-echo,
+   * and when a new group is created. A multi-device client wires this to
+   * re-publish its session document so siblings can seed/fast-forward. The
+   * callback is fire-and-forget: its result is not awaited and errors are
+   * swallowed, so publishing never blocks delivery.
+   */
+  onLocalStateAdvance?: () => void | Promise<void>;
 }
 
 export interface SessionStatus {

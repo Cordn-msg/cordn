@@ -561,7 +561,7 @@ describe.each<StorageFixture>([
     ).toHaveLength(0);
   });
 
-  test("stores group messages opaquely and tracks routing per group", () => {
+  test("stores group messages and tracks per-group routing", () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     const coordinator = createCoordinatorWithStorage(storage);
@@ -593,9 +593,15 @@ describe.each<StorageFixture>([
         afterCursor: firstMessage.cursor,
       }),
     ).toEqual([expect.objectContaining({ cursor: secondMessage.cursor })]);
+    expect(coordinator.getGroupRouting("group-local")).toEqual(
+      expect.objectContaining({
+        groupId: "group-local",
+        lastMessageCursor: secondMessage.cursor,
+      }),
+    );
   });
 
-  test("stores encrypted messages opaquely with the encrypted flag", () => {
+  test("stores opaque group messages without decoding", () => {
     const storage = createStorage();
     closers.add(() => storage.close?.());
     const coordinator = createCoordinatorWithStorage(storage);
@@ -611,7 +617,6 @@ describe.each<StorageFixture>([
     expect(posted).toEqual(
       expect.objectContaining({
         groupId: "encrypted-topic",
-        encrypted: true,
         opaqueMessage: encryptedBytes,
         cursor: 1,
       }),
@@ -623,36 +628,10 @@ describe.each<StorageFixture>([
     expect(fetched).toHaveLength(1);
     expect(fetched[0]).toEqual(
       expect.objectContaining({
-        encrypted: true,
         groupId: "encrypted-topic",
         opaqueMessage: encryptedBytes,
       }),
     );
-  });
-
-  test("interleaves multiple opaque messages on a shared per-group cursor sequence", () => {
-    const storage = createStorage();
-    closers.add(() => storage.close?.());
-    const coordinator = createCoordinatorWithStorage(storage);
-
-    const first = coordinator.postGroupMessage({
-      groupId: "group-local",
-      opaqueMessage: Uint8Array.from([0xde, 0xad]),
-    });
-    const second = coordinator.postGroupMessage({
-      groupId: "group-local",
-      opaqueMessage: Uint8Array.from([0xc0, 0xff, 0xee]),
-    });
-
-    // Both share one monotonic cursor sequence for the group.
-    expect(first.cursor).toBe(1);
-    expect(second.cursor).toBe(2);
-
-    const fetched = coordinator.fetchGroupMessages({
-      groupId: "group-local",
-    });
-    expect(fetched.map((m) => m.cursor)).toEqual([1, 2]);
-    expect(fetched.map((m) => m.encrypted)).toEqual([true, true]);
   });
 
   test("assigns monotonic cursors independently per group", () => {
@@ -704,6 +683,18 @@ describe.each<StorageFixture>([
         .fetchGroupMessages({ groupId: "group-beta" })
         .map((message) => message.cursor),
     ).toEqual([1]);
+    expect(coordinator.getGroupRouting("group-alpha")).toEqual(
+      expect.objectContaining({
+        groupId: "group-alpha",
+        lastMessageCursor: 2,
+      }),
+    );
+    expect(coordinator.getGroupRouting("group-beta")).toEqual(
+      expect.objectContaining({
+        groupId: "group-beta",
+        lastMessageCursor: 1,
+      }),
+    );
   });
 
   test("treats afterCursor as group-scoped even when another group uses the same cursor values", () => {

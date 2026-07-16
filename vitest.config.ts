@@ -5,6 +5,6 @@ export default defineConfig({
     globals: true,
     testTimeout: 30_000,
     maxConcurrency: 2,
-    exclude: ["**/node_modules/**", "**/.git/**", "dist"],
+    exclude: ["**/node_modules/**", "**/.git/**", "dist", "references"],
   },
 })

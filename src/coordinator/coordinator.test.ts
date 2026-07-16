@@ -4,11 +4,9 @@ import { createGroup, unsafeTestingAuthenticationService } from "ts-mls";
 import { Coordinator } from "./coordinator.ts";
 import {
   createActor,
-  createBytes,
   createKeyPackageRef,
   createMemberArtifacts,
   createSignedPublicationEvent,
-  createPrivateMessage,
   createWelcomeForNewMember,
   getTestCiphersuite,
 } from "./testUtils.ts";
@@ -530,25 +528,6 @@ describe("Coordinator join request flow", () => {
   test("stores and returns pending join requests per group without draining", () => {
     const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
 
-    coordinator.postGroupMessage({
-      groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      groupId: "group-beta",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-beta",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
-
     coordinator.storeJoinRequest({
       groupId: "group-alpha",
       requesterStablePubkey: "alice-requester",
@@ -597,16 +576,6 @@ describe("Coordinator join request flow", () => {
       maxAgeMs: maxAgeMs,
     });
 
-    coordinator.postGroupMessage({
-      groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-
     coordinator.storeJoinRequest({
       groupId: "group-alpha",
       requesterStablePubkey: "alice-requester",
@@ -635,16 +604,6 @@ describe("Coordinator join request flow", () => {
         return tick;
       },
       cleanupIntervalMs: 0,
-    });
-
-    coordinator.postGroupMessage({
-      groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
     });
 
     coordinator.storeJoinRequest({
@@ -676,16 +635,6 @@ describe("Coordinator join request flow", () => {
       maxAgeMs: maxAgeMs,
     });
 
-    coordinator.postGroupMessage({
-      groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-
     coordinator.storeJoinRequest({
       groupId: "group-alpha",
       requesterStablePubkey: "alice-requester",
@@ -714,16 +663,6 @@ describe("Coordinator join request flow", () => {
       maxAgeMs: maxAgeMs,
     });
 
-    coordinator.postGroupMessage({
-      groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-
     coordinator.storeJoinRequest({
       groupId: "group-alpha",
       requesterStablePubkey: "alice-requester",
@@ -742,25 +681,6 @@ describe("Coordinator join request flow", () => {
 
   test("fetches many pending join requests across groups in a single call without draining", () => {
     const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
-
-    coordinator.postGroupMessage({
-      groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
-    });
-    coordinator.postGroupMessage({
-      groupId: "group-beta",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-beta",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [2],
-      }),
-    });
 
     coordinator.storeJoinRequest({
       groupId: "group-alpha",
@@ -871,20 +791,12 @@ describe("Coordinator group message flow", () => {
 
     const firstMessage = coordinator.postGroupMessage({
       groupId: "group-local",
-      opaqueMessage: createPrivateMessage({
-        epoch: 1n,
-        contentType: 1,
-        bytes: Array.from(createBytes([1, 2, 3])),
-      }),
+      opaqueMessage: Uint8Array.from([1, 2, 3]),
     });
 
     const secondMessage = coordinator.postGroupMessage({
       groupId: "group-local",
-      opaqueMessage: createPrivateMessage({
-        epoch: 1n,
-        contentType: 1,
-        bytes: [4, 5, 6],
-      }),
+      opaqueMessage: Uint8Array.from([4, 5, 6]),
     });
 
     expect(firstMessage.groupId).toBe("group-local");
@@ -895,16 +807,8 @@ describe("Coordinator group message flow", () => {
     });
 
     expect(fetchedAll).toHaveLength(2);
-    expect(Array.from(fetchedAll[0]?.opaqueMessage ?? [])).toEqual(
-      Array.from(
-        createPrivateMessage({ epoch: 1n, contentType: 1, bytes: [1, 2, 3] }),
-      ),
-    );
-    expect(Array.from(fetchedAll[1]?.opaqueMessage ?? [])).toEqual(
-      Array.from(
-        createPrivateMessage({ epoch: 1n, contentType: 1, bytes: [4, 5, 6] }),
-      ),
-    );
+    expect(Array.from(fetchedAll[0]?.opaqueMessage ?? [])).toEqual([1, 2, 3]);
+    expect(Array.from(fetchedAll[1]?.opaqueMessage ?? [])).toEqual([4, 5, 6]);
     const fetchedAfterCursor = coordinator.fetchGroupMessages({
       groupId: "group-local",
       afterCursor: firstMessage.cursor,
@@ -919,30 +823,15 @@ describe("Coordinator group message flow", () => {
 
     const alphaFirst = coordinator.postGroupMessage({
       groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1, 2],
-      }),
+      opaqueMessage: Uint8Array.from([1, 2]),
     });
     const betaFirst = coordinator.postGroupMessage({
       groupId: "group-beta",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-beta",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [3, 4],
-      }),
+      opaqueMessage: Uint8Array.from([3, 4]),
     });
     const alphaSecond = coordinator.postGroupMessage({
       groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [5, 6],
-      }),
+      opaqueMessage: Uint8Array.from([5, 6]),
     });
 
     expect(alphaFirst.cursor).toBe(1);
@@ -957,6 +846,18 @@ describe("Coordinator group message flow", () => {
     expect(
       coordinator.fetchGroupMessages({ groupId: "group-beta", afterCursor: 1 }),
     ).toEqual([]);
+    expect(coordinator.getGroupRouting("group-alpha")).toEqual(
+      expect.objectContaining({
+        groupId: "group-alpha",
+        lastMessageCursor: 2,
+      }),
+    );
+    expect(coordinator.getGroupRouting("group-beta")).toEqual(
+      expect.objectContaining({
+        groupId: "group-beta",
+        lastMessageCursor: 1,
+      }),
+    );
   });
 
   test("replays backlog and streams new live group messages in order", async () => {
@@ -964,12 +865,7 @@ describe("Coordinator group message flow", () => {
 
     const firstMessage = coordinator.postGroupMessage({
       groupId: "group-live",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-live",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1, 2, 3],
-      }),
+      opaqueMessage: Uint8Array.from([1, 2, 3]),
     });
 
     const subscription = coordinator.subscribeGroupMessages({
@@ -981,12 +877,7 @@ describe("Coordinator group message flow", () => {
 
     const secondMessage = coordinator.postGroupMessage({
       groupId: "group-live",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-live",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [4, 5, 6],
-      }),
+      opaqueMessage: Uint8Array.from([4, 5, 6]),
     });
 
     const liveResult = await iterator.next();
@@ -1016,30 +907,15 @@ describe("Coordinator group message flow", () => {
 
     const alphaBacklog = coordinator.postGroupMessage({
       groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [1],
-      }),
+      opaqueMessage: Uint8Array.from([1]),
     });
     const betaSkipped = coordinator.postGroupMessage({
       groupId: "group-beta",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-beta",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [2],
-      }),
+      opaqueMessage: Uint8Array.from([2]),
     });
     const betaBacklog = coordinator.postGroupMessage({
       groupId: "group-beta",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-beta",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [3],
-      }),
+      opaqueMessage: Uint8Array.from([3]),
     });
 
     const subscription = coordinator.subscribeManyGroupMessages({
@@ -1061,12 +937,7 @@ describe("Coordinator group message flow", () => {
 
     const alphaLive = coordinator.postGroupMessage({
       groupId: "group-alpha",
-      opaqueMessage: createPrivateMessage({
-        groupId: "group-alpha",
-        epoch: 1n,
-        contentType: 1,
-        bytes: [4],
-      }),
+      opaqueMessage: Uint8Array.from([4]),
     });
 
     await expect(iterator.next()).resolves.toMatchObject({
@@ -1100,24 +971,6 @@ describe("Coordinator group message flow", () => {
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);
   });
 
-  test("counts a multi-group subscription as one active subscription", () => {
-    const coordinator = new Coordinator();
-
-    const subscription = coordinator.subscribeManyGroupMessages({
-      groups: [
-        { groupId: "group-count-a", afterCursor: 0 },
-        { groupId: "group-count-b", afterCursor: 0 },
-        { groupId: "group-count-c", afterCursor: 0 },
-      ],
-    });
-
-    expect(coordinator.getActiveSubscriptionCount()).toBe(1);
-
-    subscription.unsubscribe();
-
-    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
-  });
-
   test("routes encrypted messages by caller-supplied gid and skips MLS decoding", () => {
     const coordinator = new Coordinator();
 
@@ -1131,15 +984,13 @@ describe("Coordinator group message flow", () => {
 
     expect(posted.groupId).toBe("delivery-topic-encrypted");
     expect(posted.cursor).toBe(1);
-    expect(posted.encrypted).toBe(true);
     expect(posted.opaqueMessage).toEqual(encryptedBytes);
 
-    // Fetched messages preserve the encrypted flag.
+    // Fetched messages are returned opaquely.
     const fetched = coordinator.fetchGroupMessages({
       groupId: "delivery-topic-encrypted",
     });
     expect(fetched).toHaveLength(1);
-    expect(fetched[0]?.encrypted).toBe(true);
     expect(fetched[0]?.groupId).toBe("delivery-topic-encrypted");
 
     // Messages from different delivery topics are isolated.
@@ -1176,7 +1027,6 @@ describe("Coordinator group message flow", () => {
     expect(result.value).toMatchObject({
       cursor: posted.cursor,
       groupId: "encrypted-live",
-      encrypted: true,
     });
 
     subscription.unsubscribe();

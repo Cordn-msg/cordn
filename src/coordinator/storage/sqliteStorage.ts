@@ -13,6 +13,7 @@ import type {
   FetchManyPendingJoinRequestsInput,
   FetchGroupMessagesInput,
   GroupMessageRecord,
+  GroupRoutingRecord,
   JoinRequestRecord,
   PublishedKeyPackageRecord,
   WelcomeQueueRecord,
@@ -61,10 +62,10 @@ interface GroupMessageRow {
   group_id: string;
   opaque_message: Buffer;
   created_at: number;
-  encrypted: number;
 }
 
 interface GroupRoutingRow {
+  group_id: string;
   last_message_cursor: number;
 }
 
@@ -137,8 +138,12 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   private readonly upsertGroupRoutingStatement: Database.Statement<
     [string, number]
   >;
+  private readonly selectGroupRoutingStatement: Database.Statement<
+    [string],
+    GroupRoutingRow
+  >;
   private readonly insertGroupMessageStatement: Database.Statement<
-    [number, string, Buffer, number, number]
+    [number, string, Buffer, number]
   >;
   private readonly selectGroupRoutingForCursorStatement: Database.Statement<
     [string],
@@ -259,8 +264,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         cursor INTEGER NOT NULL,
         group_id TEXT NOT NULL,
         opaque_message BLOB NOT NULL,
-        created_at INTEGER NOT NULL,
-        encrypted INTEGER NOT NULL DEFAULT 0
+        created_at INTEGER NOT NULL
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_group_messages_group_cursor_unique
@@ -270,16 +274,9 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       ON group_messages (group_id, cursor);
     `);
 
-    // Migration: add encrypted column for payload encryption support.
-    // 0 = legacy (unencrypted), 1 = encrypted.
     const groupMessagesColumns = this.database
       .prepare("PRAGMA table_info('group_messages')")
       .all() as Array<{ name: string }>;
-    if (!groupMessagesColumns.some((col) => col.name === "encrypted")) {
-      this.database.exec(
-        "ALTER TABLE group_messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0",
-      );
-    }
     // Migration: drop the ephemeral_sender_pubkey column. It was a
     // session-scoped transport handle the coordinator never read (routing
     // is by gid, rate-limiting uses the caller identity at call time).
@@ -453,16 +450,20 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       ON CONFLICT(group_id) DO UPDATE SET
         last_message_cursor = excluded.last_message_cursor
     `);
-    this.insertGroupMessageStatement = this.database.prepare<
-      [number, string, Buffer, number, number]
+    this.selectGroupRoutingStatement = this.database.prepare<
+      [string],
+      GroupRoutingRow
     >(`
-      INSERT INTO group_messages (
-        cursor,
-        group_id,
-        opaque_message,
-        created_at,
-        encrypted
-      ) VALUES (?, ?, ?, ?, ?)
+      SELECT group_id, last_message_cursor
+      FROM group_routing
+      WHERE group_id = ?
+      LIMIT 1
+    `);
+    this.insertGroupMessageStatement = this.database.prepare<
+      [number, string, Buffer, number]
+    >(`
+      INSERT INTO group_messages (cursor, group_id, opaque_message, created_at)
+      VALUES (?, ?, ?, ?)
     `);
     this.selectGroupRoutingForCursorStatement = this.database.prepare<
       [string],
@@ -476,7 +477,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, opaque_message, created_at, encrypted
+      SELECT cursor, group_id, opaque_message, created_at
       FROM group_messages
       WHERE group_id = ?
       ORDER BY cursor ASC
@@ -485,7 +486,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       [string, number],
       GroupMessageRow
     >(`
-      SELECT cursor, group_id, opaque_message, created_at, encrypted
+      SELECT cursor, group_id, opaque_message, created_at
       FROM group_messages
       WHERE group_id = ? AND cursor > ?
       ORDER BY cursor ASC
@@ -624,7 +625,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
           params.groupId,
           Buffer.from(params.opaqueMessage),
           params.createdAt,
-          params.encrypted ? 1 : 0,
         );
 
         this.upsertGroupRoutingStatement.run(params.groupId, cursor);
@@ -634,7 +634,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
           groupId: params.groupId,
           opaqueMessage: params.opaqueMessage,
           createdAt: params.createdAt,
-          encrypted: params.encrypted,
         } satisfies GroupMessageRecord;
       },
     );
@@ -805,7 +804,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
         WITH requested(group_order, group_id, after_cursor) AS (
           VALUES ${values}
         )
-        SELECT gm.cursor, gm.group_id, gm.opaque_message, gm.created_at, gm.encrypted
+        SELECT gm.cursor, gm.group_id, gm.opaque_message, gm.created_at
         FROM requested r
         JOIN group_messages gm
           ON gm.group_id = r.group_id
@@ -844,6 +843,18 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
 
     this.fetchManyPendingJoinRequestsStatements.set(groupCount, statement);
     return statement;
+  }
+
+  getGroupRouting(groupId: string): GroupRoutingRecord | null {
+    const row = this.selectGroupRoutingStatement.get(groupId);
+    if (!row) {
+      return null;
+    }
+
+    return {
+      groupId: row.group_id,
+      lastMessageCursor: row.last_message_cursor,
+    };
   }
 
   close(): void {
@@ -888,7 +899,6 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       groupId: row.group_id,
       opaqueMessage: toUint8Array(row.opaque_message),
       createdAt: row.created_at,
-      encrypted: row.encrypted === 1,
     };
   }
 }

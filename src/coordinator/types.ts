@@ -57,7 +57,6 @@ export interface GroupMessageRecord {
   groupId: string;
   opaqueMessage: Uint8Array;
   createdAt: number;
-  encrypted: boolean;
 }
 
 export interface PublishKeyPackageInput {
@@ -83,7 +82,7 @@ export interface StoreJoinRequestInput {
 export interface PostGroupMessageInput {
   opaqueMessage: Uint8Array;
   /** Outer delivery group id. The coordinator routes by this gid directly
-   *  and never decodes the opaque payload. */
+   *  and never decodes the MLS payload. */
   groupId: string;
 }
 

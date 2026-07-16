@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import type { SubscribeGroupMessagesInput } from "../contracts/index.ts";
+import type { SubscribeManyGroupMessagesInput } from "../contracts/index.ts";
 import { runGroupWatch } from "./groupWatch.ts";
 
 async function waitForCondition(
@@ -43,9 +43,9 @@ describe("runGroupWatch", () => {
 
     const watch = runGroupWatch({
       client: {
-        SubscribeGroupMessages: async () => ({
+        SubscribeManyGroupMessages: async () => ({
           stream,
-          result: Promise.resolve({ subscribed: true }),
+          result: Promise.resolve({ subscribed: true, groups: ["demo"] }),
           abort: async () => undefined,
         }),
       } as never,
@@ -85,12 +85,16 @@ describe("runGroupWatch", () => {
   });
 
   test("subscribes from the cursor after catchup ingestion advances progress", async () => {
-    const subscribeCalls: Array<{ gid: string; after?: number }> = [];
+    const subscribeCalls: Array<{
+      groups: Array<{ gid: string; after?: number }>;
+    }> = [];
     let currentCursor = 3;
 
     const watch = runGroupWatch({
       client: {
-        SubscribeGroupMessages: async (params: SubscribeGroupMessagesInput) => {
+        SubscribeManyGroupMessages: async (
+          params: SubscribeManyGroupMessagesInput,
+        ) => {
           subscribeCalls.push(params);
           return {
             stream: {
@@ -98,7 +102,7 @@ describe("runGroupWatch", () => {
                 // no-op
               },
             },
-            result: Promise.resolve({ subscribed: true }),
+            result: Promise.resolve({ subscribed: true, groups: ["demo"] }),
             abort: async () => undefined,
           };
         },
@@ -130,7 +134,7 @@ describe("runGroupWatch", () => {
 
     await watch.task;
 
-    expect(subscribeCalls).toEqual([{ gid: "demo", after: 8 }]);
+    expect(subscribeCalls).toEqual([{ groups: [{ gid: "demo", after: 8 }] }]);
   });
 
   test("preserves the fetch subscribe seam when the stream starts at the current cursor boundary", async () => {
@@ -138,7 +142,7 @@ describe("runGroupWatch", () => {
 
     const watch = runGroupWatch({
       client: {
-        SubscribeGroupMessages: async () => ({
+        SubscribeManyGroupMessages: async () => ({
           stream: {
             async *[Symbol.asyncIterator]() {
               yield {
@@ -155,7 +159,7 @@ describe("runGroupWatch", () => {
               };
             },
           },
-          result: Promise.resolve({ subscribed: true }),
+          result: Promise.resolve({ subscribed: true, groups: ["demo"] }),
           abort: async () => undefined,
         }),
       } as never,
@@ -201,7 +205,7 @@ describe("runGroupWatch", () => {
 
     const watch = runGroupWatch({
       client: {
-        SubscribeGroupMessages: async () => ({
+        SubscribeManyGroupMessages: async () => ({
           stream: {
             async *[Symbol.asyncIterator]() {
               await new Promise<void>((resolve) => {
@@ -209,7 +213,7 @@ describe("runGroupWatch", () => {
               });
             },
           },
-          result: Promise.resolve({ subscribed: true }),
+          result: Promise.resolve({ subscribed: true, groups: ["demo"] }),
           abort: async (reason?: string) => {
             aborted.push(reason ?? "");
             releaseStream?.();
@@ -238,7 +242,7 @@ describe("runGroupWatch", () => {
 
     const watch = runGroupWatch({
       client: {
-        SubscribeGroupMessages: async () => ({
+        SubscribeManyGroupMessages: async () => ({
           stream: {
             async *[Symbol.asyncIterator]() {
               await new Promise<void>((resolve) => {
@@ -248,7 +252,7 @@ describe("runGroupWatch", () => {
               throw new Error("Open stream aborted: user requested stop");
             },
           },
-          result: Promise.resolve({ subscribed: true }),
+          result: Promise.resolve({ subscribed: true, groups: ["demo"] }),
           abort: async () => {
             releaseStream?.();
           },
@@ -273,13 +277,13 @@ describe("runGroupWatch", () => {
   test("keeps unexpected stream failures fatal", async () => {
     const watch = runGroupWatch({
       client: {
-        SubscribeGroupMessages: async () => ({
+        SubscribeManyGroupMessages: async () => ({
           stream: {
             async *[Symbol.asyncIterator]() {
               throw new Error("relay disconnected");
             },
           },
-          result: Promise.resolve({ subscribed: true }),
+          result: Promise.resolve({ subscribed: true, groups: ["demo"] }),
           abort: async () => undefined,
         }),
       } as never,
