@@ -1,5 +1,11 @@
 # cordn
 
+## 0.5.1
+
+### Patch Changes
+
+- chore(deps): bump @contextvm/sdk and nostr-tools
+
 ## 0.5.0
 
 ### Minor Changes
