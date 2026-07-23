@@ -18,6 +18,19 @@ export function getDefaultRelayUrls(): string[] {
   return [...DEFAULT_RELAY_URLS];
 }
 
+/**
+ * CEP-41 open-stream keepalive window for server-delivered streams.
+ *
+ * A writer is flushed once the client stays quiet for `idleTimeoutMs` AND
+ * then fails to `pong` the liveness probe within `probeTimeoutMs`. The SDK
+ * defaults (30s + 20s = 50s) are too short for cordn's long-lived
+ * subscription streams, which can sit idle between group messages. Bumped to
+ * a 120s total, split evenly: the probe gets the full half so a slow client
+ * has ample room to pong.
+ */
+const OPEN_STREAM_IDLE_TIMEOUT_MS = 60_000;
+const OPEN_STREAM_PROBE_TIMEOUT_MS = 60_000;
+
 export function createServer(
   coordinator?: Coordinator,
   resolveRequestEvent?: ResolveRequestEvent,
@@ -69,6 +82,10 @@ export async function connectServer(
     },
     openStream: {
       enabled: true,
+      policy: {
+        idleTimeoutMs: OPEN_STREAM_IDLE_TIMEOUT_MS,
+        probeTimeoutMs: OPEN_STREAM_PROBE_TIMEOUT_MS,
+      },
     },
   });
 
