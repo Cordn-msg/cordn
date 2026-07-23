@@ -17,7 +17,12 @@ import {
   finalizeCordnMessageEvent,
   type CordnMessageEnvelope,
 } from "../messageEnvelope.ts";
-import { decodeBase64, encodeBase64, getCliCiphersuite } from "./mlsBase.ts";
+import {
+  cliClientConfig,
+  decodeBase64,
+  encodeBase64,
+  getCliCiphersuite,
+} from "./mlsBase.ts";
 import { InvalidMlsMessageError } from "../sessionErrors.ts";
 
 const encoder = new TextEncoder();
@@ -70,7 +75,11 @@ export async function processMessageBase64(params: {
   }
 
   return processMessage({
-    context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+    context: {
+      cipherSuite,
+      authService: unsafeTestingAuthenticationService,
+      clientConfig: cliClientConfig,
+    },
     state: params.state,
     message: decoded[0],
     callback: params.callback,

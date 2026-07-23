@@ -17,7 +17,7 @@ import {
   makeCordnGroupMetadataExtension,
   type CordnGroupMetadata,
 } from "../groupMetadata.ts";
-import { encodeBase64, getCliCiphersuite } from "./mlsBase.ts";
+import { cliClientConfig, encodeBase64, getCliCiphersuite } from "./mlsBase.ts";
 import { MissingCommitWelcomeError } from "../sessionErrors.ts";
 
 const encoder = new TextEncoder();
@@ -87,7 +87,11 @@ export async function replaceMemberInGroup(params: {
 }> {
   const cipherSuite = await getCliCiphersuite();
   const result = await createCommit({
-    context: { cipherSuite, authService: unsafeTestingAuthenticationService },
+    context: {
+      cipherSuite,
+      authService: unsafeTestingAuthenticationService,
+      clientConfig: cliClientConfig,
+    },
     state: params.state,
     ratchetTreeExtension: true,
     extraProposals: [

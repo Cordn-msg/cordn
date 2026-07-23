@@ -30,8 +30,8 @@ importers:
         specifier: ^10.3.1
         version: 10.3.1
       ts-mls:
-        specifier: 2.0.0-rc.12
-        version: 2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
+        specifier: 2.0.0-rc.16
+        version: 2.0.0-rc.16(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -1409,8 +1409,8 @@ packages:
     resolution: {integrity: sha512-sf4i37nQ2LBx4m3wB74y+ubopq6W/dIzXg0FDGjsYnZHVa1Da8FH853wlL2gtUhg+xJXjfk3kUZS3BRoQeoQBQ==}
     engines: {node: '>=6'}
 
-  ts-mls@2.0.0-rc.12:
-    resolution: {integrity: sha512-VAjd6uvRuydk529B/On9GgIinrUiDGGENkf7k8nDCaYZzAN7aOmJIQs9IsG8A2q7o+Ldp1bm0Ds2hhlgeqL7cg==}
+  ts-mls@2.0.0-rc.16:
+    resolution: {integrity: sha512-VmFJfcFL7wl2xb7VsPY48HHQtRBUfgSkaOQjFZu2X0YSIefozCqfBfHbF6NYUq5Mm7l+SrfsUo3lZtfVNXIW4w==}
     peerDependencies:
       '@hpke/chacha20poly1305': 1.8.0
       '@hpke/dhkem-x448': 1.8.0
@@ -2955,7 +2955,7 @@ snapshots:
   totalist@3.0.1:
     optional: true
 
-  ts-mls@2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1):
+  ts-mls@2.0.0-rc.16(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1):
     dependencies:
       '@hpke/core': 1.9.0
       '@noble/ciphers': 2.2.0
