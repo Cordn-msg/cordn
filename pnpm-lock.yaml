@@ -7,41 +7,10 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@contextvm/mcp-sdk':
-        specifier: ^1.30
-        version: 1.30.0(zod@4.4.3)
-      '@contextvm/sdk':
-        specifier: ^0.13.10
-        version: 0.13.10(typescript@5.9.3)
-      '@noble/ciphers':
-        specifier: ^2.2.0
-        version: 2.2.0
-      better-sqlite3:
-        specifier: ^12.9.0
-        version: 12.9.0
-      commander:
-        specifier: ^14.0.3
-        version: 14.0.3
-      nostr-tools:
-        specifier: ^2.23.9
-        version: 2.23.12(typescript@5.9.3)
-      pino:
-        specifier: ^10.3.1
-        version: 10.3.1
-      ts-mls:
-        specifier: 2.0.0-rc.12
-        version: 2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
     devDependencies:
       '@changesets/cli':
         specifier: ^2.31.0
         version: 2.31.0(@types/node@25.6.2)
-      '@types/better-sqlite3':
-        specifier: ^7.6.13
-        version: 7.6.13
       '@types/node':
         specifier: ^25.6.2
         version: 25.6.2
@@ -57,6 +26,126 @@ importers:
       vitest:
         specifier: ^4.1.5
         version: 4.1.5(@types/node@25.6.2)(@vitest/browser-playwright@4.1.5)(@vitest/coverage-v8@4.1.5)(vite@8.0.11(@types/node@25.6.2)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+
+  packages/cli:
+    dependencies:
+      '@contextvm/mcp-sdk':
+        specifier: ^1.30
+        version: 1.30.0(zod@4.4.3)
+      '@contextvm/sdk':
+        specifier: ^0.13.10
+        version: 0.13.10(typescript@5.9.3)
+      '@cordn/core':
+        specifier: workspace:*
+        version: link:../core
+      '@noble/ciphers':
+        specifier: ^2.2.0
+        version: 2.2.0
+      commander:
+        specifier: ^14.0.3
+        version: 14.0.3
+      nostr-tools:
+        specifier: ^2.23.9
+        version: 2.23.12(typescript@5.9.3)
+      ts-mls:
+        specifier: 2.0.0-rc.12
+        version: 2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cordn/server':
+        specifier: workspace:*
+        version: link:../server
+      '@cordn/test-utils':
+        specifier: workspace:*
+        version: link:../test-utils
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.5(@types/node@25.6.2)(@vitest/browser-playwright@4.1.5)(@vitest/coverage-v8@4.1.5)(vite@8.0.11(@types/node@25.6.2)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+
+  packages/coordinator:
+    dependencies:
+      '@cordn/core':
+        specifier: workspace:*
+        version: link:../core
+      better-sqlite3:
+        specifier: ^12.9.0
+        version: 12.9.0
+      nostr-tools:
+        specifier: ^2.23.9
+        version: 2.23.12(typescript@5.9.3)
+      ts-mls:
+        specifier: 2.0.0-rc.12
+        version: 2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
+    devDependencies:
+      '@cordn/test-utils':
+        specifier: workspace:*
+        version: link:../test-utils
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.5(@types/node@25.6.2)(@vitest/browser-playwright@4.1.5)(@vitest/coverage-v8@4.1.5)(vite@8.0.11(@types/node@25.6.2)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+
+  packages/core:
+    dependencies:
+      ts-mls:
+        specifier: 2.0.0-rc.12
+        version: 2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
+  packages/server:
+    dependencies:
+      '@contextvm/mcp-sdk':
+        specifier: ^1.30
+        version: 1.30.0(zod@4.4.3)
+      '@contextvm/sdk':
+        specifier: ^0.13.10
+        version: 0.13.10(typescript@5.9.3)
+      '@cordn/coordinator':
+        specifier: workspace:*
+        version: link:../coordinator
+      '@cordn/core':
+        specifier: workspace:*
+        version: link:../core
+      nostr-tools:
+        specifier: ^2.23.9
+        version: 2.23.12(typescript@5.9.3)
+      pino:
+        specifier: ^10.3.1
+        version: 10.3.1
+      ts-mls:
+        specifier: 2.0.0-rc.12
+        version: 2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cordn/test-utils':
+        specifier: workspace:*
+        version: link:../test-utils
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.5(@types/node@25.6.2)(@vitest/browser-playwright@4.1.5)(@vitest/coverage-v8@4.1.5)(vite@8.0.11(@types/node@25.6.2)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+
+  packages/test-utils:
+    dependencies:
+      '@contextvm/sdk':
+        specifier: ^0.13.10
+        version: 0.13.10(typescript@5.9.3)
+      '@cordn/core':
+        specifier: workspace:*
+        version: link:../core
+      nostr-tools:
+        specifier: ^2.23.9
+        version: 2.23.12(typescript@5.9.3)
+      ts-mls:
+        specifier: 2.0.0-rc.12
+        version: 2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
 
 packages:
 
@@ -2624,7 +2713,7 @@ snapshots:
 
   node-abi@3.92.0:
     dependencies:
-      semver: 7.8.0
+      semver: 7.8.5
 
   nostr-tools@2.19.4(typescript@5.9.3):
     dependencies:
@@ -2842,8 +2931,7 @@ snapshots:
 
   semver@7.8.0: {}
 
-  semver@7.8.5:
-    optional: true
+  semver@7.8.5: {}
 
   shebang-command@2.0.0:
     dependencies:

@@ -5,11 +5,10 @@
     "moduleResolution": "NodeNext",
     "lib": ["ES2023"],
     "types": ["node"],
+    "noEmit": true,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "rootDir": "./src",
-    "outDir": "./dist",
     "strict": true,
     "noImplicitAny": true,
     "noImplicitReturns": true,
@@ -29,8 +28,14 @@
     "noUnusedParameters": true,
     "useUnknownInCatchVariables": true,
     "noPropertyAccessFromIndexSignature": false,
-    "pretty": true
+    "pretty": true,
+    "paths": {
+      "@cordn/core": ["./packages/core/src/index.ts"],
+      "@cordn/coordinator": ["./packages/coordinator/src/index.ts"],
+      "@cordn/server": ["./packages/server/src/index.ts"],
+      "@cordn/test-utils": ["./packages/test-utils/src/index.ts"]
+    }
   },
-  "include": ["src/**/*"],
+  "include": ["packages/*/src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

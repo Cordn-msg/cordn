@@ -29,6 +29,9 @@ Desktop.ini
 .agent/
 .roo/
 .env
+
+# Vendored reference projects (e.g. muxll) used only as design references
+reference/
 **/node_modules/**
 dist/
 # Temporary files

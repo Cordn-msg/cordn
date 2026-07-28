@@ -1,47 +1,34 @@
 {
   "name": "cordn",
   "version": "0.5.1",
-  "module": "src/index.ts",
-  "type": "module",
   "private": true,
+  "type": "module",
   "packageManager": "pnpm@10.17.1",
+  "engines": {
+    "node": ">=20"
+  },
   "pnpm": {
     "onlyBuiltDependencies": [
       "better-sqlite3",
       "esbuild"
     ]
   },
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
     "dev": "pnpm run server:start",
-    "build": "esbuild ./src/server/main.ts --bundle --outdir=./dist --target=node22 --format=esm --packages=external",
+    "build": "esbuild ./packages/server/src/main.ts --bundle --outdir=./dist --target=node22 --format=esm --packages=external",
     "typecheck": "tsc --noEmit",
-    "client:cli": "node ./src/cli/main.ts",
-    "server:start": "node ./src/server/main.ts",
-    "test": "vitest run ./src",
-    "bench:sqlite-subscriptions": "node ./src/coordinator/storage/sqliteSubscriptionBenchmark.ts",
-    "format": "prettier --write ./src ./tsconfig.json ./package.json ./README.md"
+    "client:cli": "node ./packages/cli/src/main.ts",
+    "server:start": "node ./packages/server/src/main.ts",
+    "test": "vitest run packages",
+    "bench:sqlite-subscriptions": "node ./packages/coordinator/src/storage/sqliteSubscriptionBenchmark.ts",
+    "format": "prettier --write \"./packages\" ./tsconfig.json ./package.json ./README.md"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.6.2",
     "esbuild": "^0.27.7",
     "prettier": "^3.8.3",
     "typescript": "^5.9.3",
     "vitest": "^4.1.5"
-  },
-  "dependencies": {
-    "@contextvm/mcp-sdk": "^1.30",
-    "@contextvm/sdk": "^0.13.10",
-    "@noble/ciphers": "^2.2.0",
-    "better-sqlite3": "^12.9.0",
-    "commander": "^14.0.3",
-    "nostr-tools": "^2.23.9",
-    "pino": "^10.3.1",
-    "ts-mls": "2.0.0-rc.12",
-    "zod": "^4.4.3"
   }
 }

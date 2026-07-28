@@ -1,0 +1,19 @@
+{
+  "name": "@cordn/coordinator",
+  "version": "0.5.1",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@cordn/core": "workspace:*",
+    "better-sqlite3": "^12.9.0",
+    "nostr-tools": "^2.23.9",
+    "ts-mls": "2.0.0-rc.12"
+  },
+  "devDependencies": {
+    "@cordn/test-utils": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
+    "vitest": "^4.1.5"
+  }
+}
