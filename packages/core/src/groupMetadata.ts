@@ -6,6 +6,8 @@ import {
   type GroupContextExtension,
 } from "ts-mls";
 
+import { APP_DATA_DICTIONARY_EXTENSION_TYPE } from "./lastResortKeyPackage.ts";
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -208,14 +210,19 @@ export function getCordnGroupMetadataExtension(
   return decodeCordnGroupMetadata(extension.extensionData as Uint8Array);
 }
 
+// Matches the battle-tested web app (chatMlsUtils.ts): advertise BOTH the
+// cordn metadata extension and the app-data-dictionary extension (used by
+// last-resort key packages) unconditionally, so every key package interops.
 export function createCordnMetadataCapabilities(): Capabilities {
   const capabilities = defaultCapabilities();
 
-  if (!capabilities.extensions.includes(CORDN_GROUP_METADATA_EXTENSION_TYPE)) {
-    capabilities.extensions = [
-      ...capabilities.extensions,
-      CORDN_GROUP_METADATA_EXTENSION_TYPE,
-    ];
+  for (const extensionType of [
+    CORDN_GROUP_METADATA_EXTENSION_TYPE,
+    APP_DATA_DICTIONARY_EXTENSION_TYPE,
+  ]) {
+    if (!capabilities.extensions.includes(extensionType)) {
+      capabilities.extensions = [...capabilities.extensions, extensionType];
+    }
   }
 
   return capabilities;

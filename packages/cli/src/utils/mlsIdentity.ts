@@ -12,10 +12,6 @@ import {
 } from "ts-mls";
 
 import {
-  CORDN_GROUP_METADATA_EXTENSION_TYPE,
-  createCordnMetadataCapabilities,
-} from "../groupMetadata.ts";
-import {
   createPrivateKeyHex,
   deriveStablePubkey,
   encodeBase64,
@@ -23,6 +19,8 @@ import {
 } from "./mlsBase.ts";
 import {
   APP_DATA_DICTIONARY_EXTENSION_TYPE,
+  CORDN_GROUP_METADATA_EXTENSION_TYPE,
+  createCordnMetadataCapabilities,
   ensureLastResortKeyPackageExtension,
   isLastResortKeyPackage,
 } from "@cordn/core";

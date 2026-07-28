@@ -4,7 +4,7 @@ import {
 } from "./adminPolicy.ts";
 import type { IncomingMessageCallback } from "ts-mls";
 import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
-import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
+import { getCordnGroupMetadataExtension } from "@cordn/core";
 import { decodeCordnMessageEvent } from "./messageEnvelope.ts";
 import type { GroupSessionState, StoredMessage } from "./sessionState.ts";
 import {

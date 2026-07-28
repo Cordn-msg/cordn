@@ -9,6 +9,7 @@
 export * from "./contracts.ts";
 export * from "./mlsCodec.ts";
 export * from "./lastResortKeyPackage.ts";
+export * from "./groupMetadata.ts";
 export { decodeBase64, encodeBase64, assertNonEmptyBase64 } from "./base64.ts";
 export { loadRuntimeEnv } from "./env.ts";
 export type { ConsumedWelcomeRef, ConsumedJoinRequestRef } from "./refs.ts";

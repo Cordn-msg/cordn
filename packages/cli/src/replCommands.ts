@@ -3,7 +3,7 @@ import { basename, join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 
 import { CliSession } from "./session.ts";
-import type { CordnGroupMetadata } from "./groupMetadata.ts";
+import type { CordnGroupMetadata } from "@cordn/core";
 import {
   ansi,
   colorize,

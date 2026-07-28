@@ -15,9 +15,10 @@ vi.mock("./utils/mlsMessages.ts", () => ({
     new TextDecoder().decode(bytes),
 }));
 
-vi.mock("./groupMetadata.ts", () => ({
-  getCordnGroupMetadataExtension: () => undefined,
-}));
+vi.mock("@cordn/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@cordn/core")>();
+  return { ...actual, getCordnGroupMetadataExtension: () => undefined };
+});
 
 vi.mock("./utils/mlsGroupLifecycle.ts", () => ({
   findMemberLeafIndexByStablePubkey,

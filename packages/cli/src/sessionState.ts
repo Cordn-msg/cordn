@@ -1,9 +1,8 @@
 import type { ClientState, KeyPackage, PrivateKeyPackage } from "ts-mls";
 import type { UnsignedEvent } from "nostr-tools";
 
-import type { PendingWelcome } from "@cordn/core";
+import type { CordnGroupMetadata, PendingWelcome } from "@cordn/core";
 import type { CoordinatorTarget } from "./coordinatorRegistry.ts";
-import type { CordnGroupMetadata } from "./groupMetadata.ts";
 import type { MediaStore } from "./mediaStore.ts";
 
 export interface CliSessionOptions {

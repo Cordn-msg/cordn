@@ -23,7 +23,7 @@ import {
   type MetaDocument,
 } from "./multiDevice.ts";
 import { clientStateEncoder, encode } from "ts-mls";
-import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
+import { getCordnGroupMetadataExtension } from "@cordn/core";
 
 /**
  * Multi-device synchronization scenarios (spec/applications/multi-device.md).

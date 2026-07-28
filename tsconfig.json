@@ -33,7 +33,12 @@
       "@cordn/core": ["./packages/core/src/index.ts"],
       "@cordn/coordinator": ["./packages/coordinator/src/index.ts"],
       "@cordn/server": ["./packages/server/src/index.ts"],
-      "@cordn/test-utils": ["./packages/test-utils/src/index.ts"]
+      "@cordn/test-utils": ["./packages/test-utils/src/index.ts"],
+      "@cordn/sdk": ["./packages/sdk/src/index.ts"],
+      "@cordn/sdk/engine": ["./packages/sdk/src/engine/index.ts"],
+      "@cordn/sdk/extra": ["./packages/sdk/src/extra/index.ts"],
+      "@cordn/sdk/testing": ["./packages/sdk/src/testing/index.ts"],
+      "@cordn/sdk/mls": ["./packages/sdk/src/mls.ts"]
     }
   },
   "include": ["packages/*/src/**/*.ts"],

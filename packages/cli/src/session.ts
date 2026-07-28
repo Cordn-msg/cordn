@@ -1,10 +1,6 @@
 import { type ClientState } from "ts-mls";
 
 import { assertCanAdministerGroup } from "./adminPolicy.ts";
-import {
-  getCordnGroupMetadataExtension,
-  type CordnGroupMetadata,
-} from "./groupMetadata.ts";
 import { createUnsignedCordnMessageEvent } from "./messageEnvelope.ts";
 import {
   createApplicationMessageBase64,
@@ -42,6 +38,8 @@ import {
   type AvailableKeyPackage as ContractAvailableKeyPackage,
   type FetchGroupMessagesOutput,
   type ListAvailableKeyPackagesOutput,
+  getCordnGroupMetadataExtension,
+  type CordnGroupMetadata,
 } from "@cordn/core";
 import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";

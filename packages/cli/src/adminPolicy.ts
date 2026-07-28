@@ -4,7 +4,7 @@ import {
   type IncomingMessageCallback,
 } from "ts-mls";
 
-import { normalizePubkey, type CordnGroupMetadata } from "./groupMetadata.ts";
+import { normalizePubkey, type CordnGroupMetadata } from "@cordn/core";
 import { UnauthorizedGroupAdminActionError } from "./sessionErrors.ts";
 import { listGroupMembers } from "./utils/mlsGroupLifecycle.ts";
 

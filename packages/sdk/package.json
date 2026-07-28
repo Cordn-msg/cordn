@@ -1,0 +1,43 @@
+{
+  "name": "@cordn/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./engine": {
+      "types": "./src/engine/index.ts",
+      "default": "./src/engine/index.ts"
+    },
+    "./extra": {
+      "types": "./src/extra/index.ts",
+      "default": "./src/extra/index.ts"
+    },
+    "./testing": {
+      "types": "./src/testing/index.ts",
+      "default": "./src/testing/index.ts"
+    },
+    "./mls": {
+      "types": "./src/mls.ts",
+      "default": "./src/mls.ts"
+    }
+  },
+  "dependencies": {
+    "@contextvm/mcp-sdk": "^1.30",
+    "@contextvm/sdk": "^0.13.10",
+    "@cordn/core": "workspace:*",
+    "nostr-tools": "^2.23.9",
+    "ts-mls": "2.0.0-rc.12"
+  },
+  "devDependencies": {
+    "@cordn/coordinator": "workspace:*",
+    "@cordn/server": "workspace:*",
+    "@cordn/test-utils": "workspace:*",
+    "vitest": "^4.1.5"
+  }
+}

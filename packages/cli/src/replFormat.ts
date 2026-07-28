@@ -1,7 +1,7 @@
 import { stdout as output } from "node:process";
 
 import { CliSession, type KeyPackageSummary } from "./session.ts";
-import type { CordnGroupMetadata } from "./groupMetadata.ts";
+import type { CordnGroupMetadata } from "@cordn/core";
 import { findImetaTag } from "./utils/mediaMessages.ts";
 
 export const ansi = {

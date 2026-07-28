@@ -14,9 +14,10 @@ import {
 } from "ts-mls";
 
 import {
+  CORDN_GROUP_METADATA_EXTENSION_TYPE,
   makeCordnGroupMetadataExtension,
   type CordnGroupMetadata,
-} from "../groupMetadata.ts";
+} from "@cordn/core";
 import { encodeBase64, getCliCiphersuite } from "./mlsBase.ts";
 import { MissingCommitWelcomeError } from "../sessionErrors.ts";
 
@@ -221,7 +222,8 @@ export async function updateGroupMetadataExtension(params: {
   const cipherSuite = await getCliCiphersuite();
   const extensions = [
     ...params.state.groupContext.extensions.filter(
-      (extension) => extension.extensionType !== 0xc04d,
+      (extension) =>
+        extension.extensionType !== CORDN_GROUP_METADATA_EXTENSION_TYPE,
     ),
     makeCordnGroupMetadataExtension(params.metadata),
   ];
