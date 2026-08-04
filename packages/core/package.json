@@ -1,15 +1,15 @@
 {
   "name": "@cordn/core",
-  "version": "0.5.4",
+  "version": "0.5.3",
   "description": "Shared foundation for cordn: wire contracts (zod), leaf codecs (base64, MLS framing, group-ref bech32), and consumed-ref value types.",
   "type": "module",
   "license": "MIT",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
     }
   },
   "sideEffects": false,
@@ -42,7 +42,15 @@
     "prepublishOnly": "pnpm run build"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
   },
   "dependencies": {
     "@noble/ciphers": "2.2.0",
