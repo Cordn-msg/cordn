@@ -1,6 +1,5 @@
 import { Command } from "commander";
 
-import { loadRuntimeEnv } from "@cordn/core";
 import { startCliRepl } from "./repl.ts";
 import { CliSession } from "./session.ts";
 import { FileMediaStore } from "./mediaStore.ts";
@@ -34,7 +33,21 @@ function readDefaultCoordinatorPubkey(): string | undefined {
   return deriveStablePubkey(configured);
 }
 
-loadRuntimeEnv();
+// Load optional .env then .env.local (first write wins; missing files are
+// ignored). Uses Node's native process.loadEnvFile (>= 20.12), which has
+// identical semantics to the former @cordn/core env helper.
+for (const file of [".env", ".env.local"]) {
+  try {
+    process.loadEnvFile(file);
+  } catch (err) {
+    if (
+      !(err instanceof Error) ||
+      (err as NodeJS.ErrnoException).code !== "ENOENT"
+    ) {
+      throw err;
+    }
+  }
+}
 
 const program = new Command();
 

@@ -48,3 +48,6 @@ coverage/
 **/*.wasm
 **/*.wat
 cordn.sqlite*
+
+# Per-project npm login (contains auth token for besao21)
+.npmrc

@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@10.17.1",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.12"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -16,12 +16,15 @@
   "scripts": {
     "dev": "pnpm run server:start",
     "build": "esbuild ./packages/server/src/main.ts --bundle --outdir=./dist --target=node22 --format=esm --packages=external",
+    "release": "pnpm run build && changeset publish",
+    "version": "changeset version",
     "typecheck": "tsc --noEmit",
     "client:cli": "node ./packages/cli/src/main.ts",
     "server:start": "node ./packages/server/src/main.ts",
     "test": "vitest run packages",
     "bench:sqlite-subscriptions": "node ./packages/coordinator/src/storage/sqliteSubscriptionBenchmark.ts",
-    "format": "prettier --write \"./packages\" ./tsconfig.json ./package.json ./README.md"
+    "format": "prettier --write \"./packages\" ./tsconfig.json ./package.json ./README.md",
+    "login": "npm login --userconfig ./.npmrc"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",

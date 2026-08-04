@@ -2,7 +2,6 @@ import { ApplesauceRelayPool } from "@contextvm/sdk";
 import { nip19 } from "nostr-tools";
 import pino from "pino";
 import { connectServer } from "./coordinatorServer.ts";
-import { loadRuntimeEnv } from "@cordn/core";
 import {
   createConfiguredCoordinator,
   readServerRuntimeConfig,
@@ -49,7 +48,21 @@ function buildStartupBanner(params: {
 }
 
 async function main(): Promise<void> {
-  loadRuntimeEnv();
+  // Load optional .env then .env.local (first write wins; missing files are
+  // ignored). Uses Node's native process.loadEnvFile (>= 20.12), which has
+  // identical semantics to the former @cordn/core env helper.
+  for (const file of [".env", ".env.local"]) {
+    try {
+      process.loadEnvFile(file);
+    } catch (err) {
+      if (
+        !(err instanceof Error) ||
+        (err as NodeJS.ErrnoException).code !== "ENOENT"
+      ) {
+        throw err;
+      }
+    }
+  }
   const runtime = readServerRuntimeConfig();
   const logger = pino({ name: "cordn-server" });
   const serverPubkey = await runtime.signer.getPublicKey();
