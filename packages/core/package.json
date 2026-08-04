@@ -1,15 +1,53 @@
 {
   "name": "@cordn/core",
-  "version": "0.5.2",
-  "private": false,
+  "version": "0.5.3",
+  "description": "Shared foundation for cordn: wire contracts (zod), leaf codecs (base64, MLS framing, group-ref bech32), and consumed-ref value types.",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.12"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "cordn",
+    "mls",
+    "nostr",
+    "contextvm",
+    "mcp",
+    "bech32",
+    "codec"
+  ],
+  "homepage": "https://github.com/Cordn-msg/cordn/tree/master/packages/core",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cordn-msg/cordn.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/Cordn-msg/cordn/issues"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "pnpm run build"
+  },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
-    "@scure/base": "^2.0.0",
+    "@noble/ciphers": "2.2.0",
+    "@noble/hashes": "2.2.0",
+    "@scure/base": "^2.2.0",
     "ts-mls": "2.0.0-rc.12",
     "zod": "^4.4.3"
   }
