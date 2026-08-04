@@ -18,8 +18,8 @@ Packages (`packages/*`):
 
 - [`@cordn/core`](packages/core/src/) — shared foundation: wire contracts
   (zod schemas + types + method names), leaf codecs (base64, MLS framing,
-  last-resort key-package extension), the shared env loader, and consumed-ref
-  value types. Transport-agnostic, dependency-light. Everything depends on this.
+  last-resort key-package extension), and consumed-ref value types.
+  Transport-agnostic, dependency-light. Everything depends on this.
 - [`@cordn/coordinator`](packages/coordinator/src/) — core delivery-service
   state and behavior (key-package store, welcome/join-request queues, per-group
   message cursors, storage backends). Server-only; clients never embed it.
@@ -68,7 +68,7 @@ Coordinator contract notes:
 
 Environment notes for the server:
 
-- Optional `.env` and `.env.local` files are loaded by [`loadRuntimeEnv()`](packages/core/src/env.ts) (shared by server and CLI entrypoints)
+- Optional `.env` and `.env.local` files are loaded by the server and CLI entrypoints via Node's native `process.loadEnvFile` (first write wins; missing files are ignored). Requires Node >= 20.12.
 - Relevant variables include `CORDN_SERVER_PRIVATE_KEY`, `CORDN_RELAY_URLS`, `CORDN_SERVER_NAME`, `CORDN_SERVER_ABOUT`, `CORDN_SERVER_WEBSITE`, `CORDN_ANNOUNCED`, `CORDN_STORAGE_BACKEND`, and `CORDN_SQLITE_PATH`
 
 ## Testing instructions

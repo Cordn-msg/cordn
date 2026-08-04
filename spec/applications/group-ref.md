@@ -88,7 +88,7 @@ A decoder MUST apply the following rules. Any violation makes the string an inva
 | type `0` absent | Reject | `gid` is the reason the entity exists |
 | type `0` present more than once | Reject | A reference names exactly one group |
 | type `0` is empty | Reject | `gid` must be non-empty |
-| type `0` longer than 256 bytes | Reject | Bounds abuse; far above any realistic `gid` |
+| type `0` longer than 255 bytes | Reject | Exceeds the 1-byte TLV length field (see §3) |
 | type `0` is not valid UTF-8 | Reject | `gid` must be portable across clients |
 | type `1` present more than once | Reject | A reference names at most one coordinator |
 | type `1` length is not exactly 32 bytes | Reject | NIP-19 public-key convention |
@@ -96,7 +96,7 @@ A decoder MUST apply the following rules. Any violation makes the string an inva
 | type `2` is not valid UTF-8 | Reject | Relay URLs must be portable |
 | unrecognized TLV type | Ignore (continue) | Forward compatibility |
 
-The 256-byte cap on `gid` is an encoding-time bound imposed by this document for all interoperable group references. It does not relax the coordinator's existing treatment of `gid` as opaque, and it does not constrain how a client derives its `gid`.
+The 255-byte cap on `gid` is not arbitrary: it is the maximum value that fits in the 1-byte TLV length field (see §3), and is therefore the same hard limit NIP-19 imposes on any TLV value. It is an encoding-time bound for all interoperable group references. It does not relax the coordinator's existing treatment of `gid` as opaque, and it does not constrain how a client derives its `gid`.
 
 A producer SHOULD NOT emit an empty `relay` value. Consumers MAY discard empty `relay` values rather than treating them as a validation error.
 

@@ -91,6 +91,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.0.0
       ts-mls:
         specifier: 2.0.0-rc.12
         version: 2.0.0-rc.12(@hpke/chacha20poly1305@1.8.0)(@hpke/dhkem-x448@1.8.0)(@hpke/hybridkem-x-wing@0.7.0)(@hpke/ml-kem@0.3.0)(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)(@noble/post-quantum@0.6.1)
