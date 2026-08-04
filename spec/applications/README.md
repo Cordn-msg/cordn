@@ -93,4 +93,5 @@ Do not write an application specification when:
 - [`encrypted-media.md`](encrypted-media.md) — End-to-end encrypted media sharing via content-addressed storage and NIP-92 `imeta` references
 - [`multi-device.md`](multi-device.md) — Out-of-band synchronization of per-group MLS state across devices of one identity via sealed, content-addressed per-group documents and a shared identity meta document, advertised by an opaque tip
 - [`join-requests.md`](join-requests.md) — Coordinator-mediated join request signaling for shareable group links
+- [`group-ref.md`](group-ref.md) — Bech32-encoded group reference (`cordn1…`) carrying a delivery `gid` plus optional coordinator public key and relay hints for interoperable, checksummed group sharing
 - [`welcome-delivery.md`](welcome-delivery.md) — Coordinator-mediated Welcome delivery and the invitee membership-boundary cursor hint
