@@ -1,6 +1,6 @@
 {
   "name": "@cordn/core",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Shared foundation for cordn: wire contracts (zod), leaf codecs (base64, MLS framing, group-ref bech32), and consumed-ref value types.",
   "type": "module",
   "license": "MIT",
