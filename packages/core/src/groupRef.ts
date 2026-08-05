@@ -1,3 +1,4 @@
+import { bytesToHex, concatBytes, hexToBytes } from "@noble/hashes/utils.js";
 import { bech32 } from "@scure/base";
 
 /**
@@ -68,7 +69,7 @@ export function encodeGroupRef(ref: GroupRef): string {
     );
   }
   const pubkeyBytes = hasPubkey
-    ? Uint8Array.from(Buffer.from(ref.coordinatorPubkey!, "hex"))
+    ? hexToBytes(ref.coordinatorPubkey!)
     : undefined;
 
   const relays = ref.relays ?? [];
@@ -88,7 +89,7 @@ export function encodeGroupRef(ref: GroupRef): string {
   }
   entries.push(encodeTlvEntry(TLV_GID, gidBytes));
 
-  const data = Buffer.concat(entries);
+  const data = concatBytes(...entries);
   return bech32.encode(PREFIX, bech32.toWords(data), MAX_LENGTH);
 }
 
@@ -144,7 +145,7 @@ export function decodeGroupRef(code: string): GroupRef {
   return {
     gid: fatalUtf8Decode(gidBytes),
     ...(pubkeyBytes !== undefined
-      ? { coordinatorPubkey: Buffer.from(pubkeyBytes).toString("hex") }
+      ? { coordinatorPubkey: bytesToHex(pubkeyBytes) }
       : {}),
     ...(relayEntries.length > 0
       ? { relays: relayEntries.map(fatalUtf8Decode) }

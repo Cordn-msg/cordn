@@ -1,5 +1,25 @@
 # @cordn/core
 
+## 0.5.5
+
+### Patch Changes
+
+- fix(core): drop Buffer from public codec, make @cordn/core browser-safe
+
+  groupRef.ts and base64.ts used Node's `Buffer` global (hex decode/encode,
+  concat, base64), so browser consumers without a Buffer polyfill threw
+  `ReferenceError: Buffer is not defined` when calling `encodeGroupRef` /
+  `decodeGroupRef` (or the base64 codec).
+
+  Replace each `Buffer` call with a browser-safe helper from a dependency
+  already in core — no new dependencies:
+  - hex/concat: `bytesToHex` / `hexToBytes` / `concatBytes` from `@noble/hashes/utils.js`
+  - base64: `base64` from `@scure/base`
+
+  npm 0.5.4 carries the Buffer bug; this ships as 0.5.5. Verified: 299/299
+  tests, zero `Buffer` in emitted dist, and a sim with `Buffer` removed
+  from globalThis round-trips groupRef + base64 cleanly.
+
 ## 0.5.4
 
 ### Patch Changes
