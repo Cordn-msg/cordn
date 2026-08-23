@@ -75,7 +75,9 @@ import {
 } from "./pendingEpochOperations.ts";
 import {
   clientStateDecoder,
+  clientStateEncoder,
   encode,
+  keyPackageEncoder,
   makeKeyPackageRef,
   privateKeyPackageEncoder,
 } from "ts-mls";
@@ -139,6 +141,33 @@ export type GroupEvent =
       error?: string;
     };
 
+export interface CliSessionSnapshot {
+  version: 1;
+  privateKey: string;
+  keyPackages: Array<{
+    alias: string;
+    keyPackage: string;
+    privateKeyPackage: string;
+    keyPackageRef: string;
+    keyPackageBase64: string;
+    isLastResort: boolean;
+    publishedAt?: number;
+    consumed: boolean;
+  }>;
+  groups: Array<{
+    alias: string;
+    coordinatorKey: string;
+    clientState: string;
+    status: "active" | "removed";
+    removedAtCursor?: number;
+    lastCursor: number;
+    fetchCursor: number;
+    messages: StoredMessage[];
+    syncIssues: SyncIssue[];
+  }>;
+  welcomes: StoredWelcome[];
+}
+
 interface GroupWatchHandle {
   abort: (reason?: string) => Promise<void>;
   task: Promise<void>;
@@ -170,6 +199,65 @@ export class CliSession {
     this.stablePubkey = deriveStablePubkey(this.privateKey);
     this.mediaStore = options.mediaStore;
     this.onLocalStateAdvance = options.onLocalStateAdvance;
+  }
+
+  exportSnapshot(): CliSessionSnapshot {
+    return {
+      version: 1,
+      privateKey: this.privateKey,
+      keyPackages: this.listKeyPackages().map((entry) => ({
+        ...entry,
+        keyPackage: encodeBase64(encode(keyPackageEncoder, entry.keyPackage)),
+        privateKeyPackage: encodeBase64(
+          encode(privateKeyPackageEncoder, entry.privateKeyPackage),
+        ),
+      })),
+      groups: this.listGroups().map((group) => ({
+        alias: group.alias,
+        coordinatorKey: group.coordinatorKey,
+        clientState: encodeBase64(encode(clientStateEncoder, group.state)),
+        status: group.status,
+        removedAtCursor: group.removedAtCursor,
+        lastCursor: group.lastCursor,
+        fetchCursor: group.fetchCursor,
+        messages: group.messages,
+        syncIssues: group.syncIssues,
+      })),
+      welcomes: this.listWelcomes(),
+    };
+  }
+
+  async restoreSnapshot(snapshot: CliSessionSnapshot): Promise<void> {
+    if (snapshot.version !== 1 || snapshot.privateKey !== this.privateKey) {
+      throw new Error("snapshot identity does not match CLI identity");
+    }
+    for (const entry of snapshot.keyPackages) {
+      this.store.addKeyPackage({
+        ...entry,
+        keyPackage: decodeKeyPackage(decodeBase64(entry.keyPackage)),
+        privateKeyPackage: decodePrivateKeyPackage(
+          decodeBase64(entry.privateKeyPackage),
+        ),
+      });
+    }
+    for (const entry of snapshot.groups) {
+      const decoded = clientStateDecoder(decodeBase64(entry.clientState), 0);
+      if (!decoded) throw new Error(`failed to decode group ${entry.alias}`);
+      const group = this.createGroupSessionState(
+        entry.alias,
+        decoded[0],
+        entry.coordinatorKey,
+      );
+      group.status = entry.status;
+      group.removedAtCursor = entry.removedAtCursor;
+      group.lastCursor = entry.lastCursor;
+      group.fetchCursor = entry.fetchCursor;
+      group.messages = entry.messages;
+      group.syncIssues = entry.syncIssues;
+      group.metadata = getCordnGroupMetadataExtension(decoded[0]);
+      this.store.addGroup(group);
+    }
+    for (const welcome of snapshot.welcomes) this.store.putWelcome(welcome);
   }
 
   /**

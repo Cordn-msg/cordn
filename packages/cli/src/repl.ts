@@ -15,7 +15,10 @@ import {
   printHelp,
 } from "./replFormat.ts";
 
-export async function startCliRepl(session: CliSession): Promise<void> {
+export async function startCliRepl(
+  session: CliSession,
+  persist: () => Promise<void> = async () => undefined,
+): Promise<void> {
   const rl = createInterface({ input, output });
   let selectedGroupAlias: string | undefined;
   let currentPrompt = "cordn> ";
@@ -94,6 +97,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
       if (selectedGroupAlias && !knownCommands.has(command)) {
         try {
           const stored = await session.sendMessage(selectedGroupAlias, line);
+          await persist();
           output.write(`sent cursor=${stored.cursor}\n`);
         } catch (error) {
           output.write(
@@ -111,6 +115,7 @@ export async function startCliRepl(session: CliSession): Promise<void> {
         });
 
         selectedGroupAlias = result.selectedGroupAlias;
+        await persist();
         renderPrompt();
 
         if (result.shouldExit) {

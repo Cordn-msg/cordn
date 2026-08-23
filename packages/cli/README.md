@@ -23,6 +23,48 @@ Start the CLI with:
 pnpm run client:cli
 ```
 
+The default mode is an interactive REPL. A single command can also be run
+non-interactively:
+
+```sh
+pnpm run client:cli -- --private-key-file ./client.key --command "groups"
+```
+
+### Persistent writer mode
+
+The CLI can persist its identity, KeyPackages, Welcome records, MLS group
+state, cursors, and local message history in an AES-256-GCM encrypted file.
+The encryption key is created with mode `0600` when it does not exist.
+
+```sh
+pnpm run client:cli -- \
+  --private-key-file ./client.key \
+  --state-file ./state/session.json \
+  --state-key-file ./state/session.key \
+  --daemon \
+  --group-alias office \
+  --outbox-dir ./outbox \
+  --inbox-dir ./inbox
+```
+
+Daemon mode periodically fetches matching Welcomes, keeps joined groups in
+sync, and processes JSON outbox files in lexical filename order. Each job has
+this shape:
+
+```json
+{ "groupAlias": "office", "message": "hello" }
+```
+
+`groupAlias` may be omitted when `--group-alias` supplies a default. A job is
+removed only after the coordinator accepts the message and the updated MLS
+state has been persisted; failed jobs are returned to the queue for retry.
+Run the daemon under the host's service manager when automatic restart is
+required.
+
+With `--inbox-dir`, decrypted inbound group messages are written as atomic JSON
+jobs containing `groupAlias`, `cursor`, `sender`, `id`, `createdAt`, and
+`content`. Consumers can rename and remove these files after processing.
+
 Useful commands:
 
 - `gen-kp [alias]`
