@@ -206,6 +206,7 @@ export class Coordinator {
   storeWelcome(input: StoreWelcomeInput): WelcomeQueueRecord {
     const record: WelcomeQueueRecord = {
       targetStablePubkey: input.targetStablePubkey,
+      senderStablePubkey: input.senderStablePubkey,
       keyPackageReference: input.keyPackageReference,
       welcome: input.welcome,
       createdAt: this.now(),
