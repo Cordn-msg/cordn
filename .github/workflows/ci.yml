@@ -31,3 +31,9 @@ jobs:
 
       - name: Run typecheck
         run: pnpm run typecheck
+
+      - name: Build distributable artifacts
+        run: pnpm run build:all
+
+      - name: Smoke-test the packed CLI
+        run: pnpm run pack:cli

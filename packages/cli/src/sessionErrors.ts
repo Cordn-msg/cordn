@@ -30,8 +30,16 @@ export class UnknownKeyPackageAliasError extends CliSessionError {
 }
 
 export class UnknownWelcomeReferenceError extends CliSessionError {
-  constructor(keyPackageReference: string) {
-    super(`Unknown welcome key package reference: ${keyPackageReference}`);
+  constructor(identifier: string) {
+    super(`Unknown welcome reference: ${identifier}`);
+  }
+}
+
+export class AmbiguousWelcomeReferenceError extends CliSessionError {
+  constructor(identifier: string) {
+    super(
+      `Multiple welcomes use ${identifier}; choose the full <coordinator>:<kp_ref>:<at> identifier`,
+    );
   }
 }
 

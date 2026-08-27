@@ -16,7 +16,10 @@
   "scripts": {
     "dev": "pnpm run server:start",
     "build": "esbuild ./packages/server/src/main.ts --bundle --outdir=./dist --target=node22 --format=esm --packages=external",
-    "release": "pnpm run build && changeset publish",
+    "build:cli": "pnpm --filter @cordn/cli run build",
+    "build:all": "pnpm run build && pnpm run build:cli",
+    "pack:cli": "pnpm --filter @cordn/cli run pack:check",
+    "release": "pnpm run build:all && changeset publish",
     "version": "changeset version",
     "typecheck": "tsc --noEmit",
     "client:cli": "node ./packages/cli/src/main.ts",

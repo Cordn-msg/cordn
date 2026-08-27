@@ -76,6 +76,14 @@ export class CoordinatorClientRegistry {
     return this.defaultCoordinatorPubkey;
   }
 
+  get defaultCoordinatorTarget(): CoordinatorTarget {
+    const target = this.getTarget(this.defaultCoordinatorPubkey);
+    return {
+      serverPubkey: target.serverPubkey,
+      ...(target.relays ? { relays: [...target.relays] } : {}),
+    };
+  }
+
   register(target: CoordinatorTarget): string {
     const key = target.serverPubkey;
     const existing = this.targets.get(key);

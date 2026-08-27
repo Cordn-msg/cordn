@@ -98,6 +98,7 @@ export async function prepareAddMember(params: {
       keyPackageReference: consumeResult.keyPackage.keyPackageRef,
       targetStablePubkey: consumeResult.keyPackage.stablePubkey,
       welcomeBase64: encodeWelcomeBase64(commitResult.welcome),
+      localStateApplied: false,
       status: "pending",
     },
   };
@@ -156,6 +157,7 @@ export async function prepareRemoveMember(params: {
       groupId: params.deriveGroupId(params.group.state),
       commitMessageBase64: commitResult.commitMessageBase64,
       targetStablePubkey: params.targetStablePubkey,
+      localStateApplied: false,
       status: "pending",
     },
   };

@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
 
-import { CliSessionStore } from "./sessionStore.ts";
+import { CliSessionStore, welcomeIdentifier } from "./sessionStore.ts";
 import {
+  AmbiguousWelcomeReferenceError,
   DuplicateGroupAliasError,
   DuplicateKeyPackageAliasError,
   UnknownGroupAliasError,
@@ -73,6 +74,24 @@ describe("CliSessionStore", () => {
     expect(() => store.getWelcome("missing-ref")).toThrow(
       UnknownWelcomeReferenceError,
     );
+  });
+
+  test("keeps multiple last-resort welcomes with the same kp ref", () => {
+    const store = new CliSessionStore();
+    const first = { ...createWelcome("last-resort"), at: 1 };
+    const second = { ...createWelcome("last-resort"), at: 2 };
+    store.putWelcome(first);
+    store.putWelcome(second);
+
+    expect(store.listWelcomes()).toEqual([first, second]);
+    expect(() => store.getWelcome("last-resort")).toThrow(
+      AmbiguousWelcomeReferenceError,
+    );
+    expect(store.getWelcome(welcomeIdentifier(second))).toEqual(second);
+
+    store.deleteWelcome(welcomeIdentifier(first), first.coordinatorKey!);
+    store.putWelcome(first);
+    expect(store.listWelcomes()).toEqual([second]);
   });
 
   test("finds unconsumed key packages and tracks welcome ordering", () => {

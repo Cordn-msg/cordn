@@ -9,7 +9,7 @@ Minimal MLS delivery service coordinator and ContextVM server adapter implemente
 - [`spec/02.md`](spec/02.md) defines the Nostr-shaped application-message envelope model.
 - [`packages/coordinator/src/`](packages/coordinator/src/) contains the reference coordinator implementation.
 - [`packages/server/src/`](packages/server/src/) exposes that coordinator as a runnable ContextVM server.
-- [`packages/cli/src/`](packages/cli/src/) contains a demo CLI used to demonstrate end-to-end usage and interaction patterns.
+- [`@cordn/cli`](packages/cli/) is the published persistent client for interactive, scripted, and filesystem-queue agent workflows.
 - The same CLI and server flow is also used by the integration-style test coverage under [`packages/`](packages/).
 
 ## Coordinator delivery semantics
@@ -38,7 +38,19 @@ The reference client logic in [`packages/cli/src/`](packages/cli/src/) is intent
 - reconcile self-authored echoed ciphertext by identity instead of reprocessing it through MLS
 - finalize pending local epoch operations only after the matching inbound commit is observed
 
-These rules are documented in more detail in [`packages/cli/README.md`](packages/cli/README.md:54).
+These rules are documented in more detail in [`packages/cli/README.md`](packages/cli/README.md).
+
+## Install the CLI
+
+```bash
+npm install --global @cordn/cli
+cordn --version
+cordn docs quickstart
+```
+
+A fresh client defaults to coordinator `92753cbe63e943d0c4a0c61d745437892af6e98f179ce04a7a863aad4e00b1a5` through `wss://relay.contextvm.org`, `wss://relay2.contextvm.org`, and `wss://relay.primal.net`. Override these with `--server-pubkey` and `--relay`.
+
+The package bundles offline quickstart, command reference, agent, daemon, queue, and security documentation through `cordn docs`.
 
 ## Run the server locally
 

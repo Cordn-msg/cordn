@@ -18,7 +18,14 @@ import type {
 } from "./types.ts";
 import type { CoordinatorStorage } from "./storage/storage.ts";
 import { InMemoryCoordinatorStorage } from "./storage/inMemoryStorage.ts";
-import { isLastResortKeyPackage } from "@cordn/core";
+import { encodeWelcome, isLastResortKeyPackage } from "@cordn/core";
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
 
 export interface CoordinatorOptions {
   storage?: CoordinatorStorage;
@@ -204,11 +211,30 @@ export class Coordinator {
   }
 
   storeWelcome(input: StoreWelcomeInput): WelcomeQueueRecord {
+    // `consumed` identifies a record by (kp_ref, at). Last-resort KPs are
+    // reusable, so make `at` unique within that target/ref even on millisecond
+    // clocks and across coordinator restarts. ponytail: queues are TTL-bounded;
+    // add a storage max query only if this scan becomes measurable.
+    const pending = this.storage.fetchPendingWelcomes(input.targetStablePubkey);
+    const encodedWelcome = encodeWelcome(input.welcome);
+    const duplicate = pending.find(
+      (record) =>
+        record.keyPackageReference === input.keyPackageReference &&
+        record.joinAfterCursor === input.joinAfterCursor &&
+        bytesEqual(encodeWelcome(record.welcome), encodedWelcome),
+    );
+    if (duplicate) return duplicate;
+
+    const createdAt = pending
+      .filter(
+        (record) => record.keyPackageReference === input.keyPackageReference,
+      )
+      .reduce((at, record) => Math.max(at, record.createdAt + 1), this.now());
     const record: WelcomeQueueRecord = {
       targetStablePubkey: input.targetStablePubkey,
       keyPackageReference: input.keyPackageReference,
       welcome: input.welcome,
-      createdAt: this.now(),
+      createdAt,
       joinAfterCursor: input.joinAfterCursor,
     };
 
@@ -227,11 +253,19 @@ export class Coordinator {
   }
 
   storeJoinRequest(input: StoreJoinRequestInput): JoinRequestRecord {
+    // Join-request acks use (requester pk, at), with the same uniqueness need.
+    const createdAt = this.storage
+      .fetchPendingJoinRequests(input.groupId)
+      .filter(
+        (record) =>
+          record.requesterStablePubkey === input.requesterStablePubkey,
+      )
+      .reduce((at, record) => Math.max(at, record.createdAt + 1), this.now());
     const record: JoinRequestRecord = {
       groupId: input.groupId,
       requesterStablePubkey: input.requesterStablePubkey,
       keyPackageRef: input.keyPackageRef,
-      createdAt: this.now(),
+      createdAt,
     };
 
     return this.storage.storeJoinRequest(record);

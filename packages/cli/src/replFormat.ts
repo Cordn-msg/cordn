@@ -138,6 +138,7 @@ export function formatGroupDetails(
   const group = session.getGroup(groupAlias);
   return [
     `alias=${formatGroupAlias(group.alias)}`,
+    `groupId=${session.deriveGroupId(group.state)}`,
     `coordinator=${formatFullCredentialLabel(group.coordinatorKey)}`,
     `cursor=${colorize(String(group.lastCursor), ansi.bold)}`,
     `messages=${colorize(String(group.messages.length), ansi.bold)}`,
@@ -187,49 +188,116 @@ export function formatSyncResult(
   return formatChatHistory(session, groupAlias);
 }
 
+export const REPL_COMMAND_HELP = [
+  { names: ["help"], usage: "help" },
+  { names: ["status"], usage: "status" },
+  { names: ["whoami"], usage: "whoami    (prints the private identity key)" },
+  {
+    names: ["gen-kp"],
+    usage:
+      "gen-kp [alias] [--coordinator <pubkey>] [--last-resort] [--local-only]",
+  },
+  {
+    names: ["publish-kp"],
+    usage: "publish-kp <alias> [--coordinator <pubkey>]",
+  },
+  { names: ["key-packages", "kps"], usage: "key-packages | kps" },
+  {
+    names: ["delete-kp"],
+    usage:
+      "delete-kp <aliasOrKeyPackageRef> [--local-only] [--coordinator <pubkey>]",
+  },
+  {
+    names: ["available-kps"],
+    usage: "available-kps [--coordinator <pubkey>]",
+  },
+  {
+    names: ["create-group"],
+    usage:
+      "create-group <alias> [keyPackageAlias] [--coordinator <pubkey>] [--name <value>] [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]... [--watch]",
+  },
+  {
+    names: ["update-group-metadata"],
+    usage:
+      "update-group-metadata <groupAlias> --name <value> [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
+  },
+  {
+    names: ["set-metadata"],
+    usage:
+      "set-metadata <groupAlias> --name <value> [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
+  },
+  { names: ["groups"], usage: "groups" },
+  { names: ["group-info"], usage: "group-info [groupAlias]" },
+  { names: ["group"], usage: "group <groupAlias> [--watch]" },
+  { names: ["use"], usage: "use <groupAlias> [--watch]" },
+  {
+    names: ["leave"],
+    usage: "leave    (clear selection; does not change group membership)",
+  },
+  { names: ["unwatch"], usage: "unwatch <groupAlias>" },
+  {
+    names: ["add-member"],
+    usage: "add-member <groupAlias> <stablePubkeyOrKeyPackageRef>",
+  },
+  {
+    names: ["remove-member"],
+    usage: "remove-member <groupAlias> <stablePubkey>",
+  },
+  {
+    names: ["fetch-welcomes"],
+    usage: "fetch-welcomes [--coordinator <pubkey>]",
+  },
+  { names: ["welcomes"], usage: "welcomes" },
+  {
+    names: ["accept-welcome"],
+    usage:
+      "accept-welcome <welcomeIdOrKeyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
+  },
+  {
+    names: ["fetch-join-requests"],
+    usage: "fetch-join-requests [groupAlias]",
+  },
+  {
+    names: ["request-join"],
+    usage: "request-join <gid> [keyPackageAlias] [--coordinator <pubkey>]",
+  },
+  { names: ["send"], usage: "send <message...>    (uses selected group)" },
+  { names: ["send-to"], usage: "send-to <groupAlias> <message...>" },
+  {
+    names: ["send-media"],
+    usage:
+      "send-media <filePath> [caption...]   (uses selected group; requires --media-dir)",
+  },
+  {
+    names: ["save-media"],
+    usage:
+      "save-media [groupAlias] <cursor> [destDir]   (decrypts media to destDir, default .)",
+  },
+  { names: ["sync"], usage: "sync [groupAlias]" },
+  { names: ["sync-all"], usage: "sync-all" },
+  { names: ["watch-all"], usage: "watch-all" },
+  { names: ["messages"], usage: "messages [groupAlias]" },
+  { names: ["issues"], usage: "issues [groupAlias]" },
+  { names: ["exit", "quit"], usage: "exit | quit" },
+] as const;
+
 export function printHelp(): void {
   output.write(
     [
       "Commands:",
-      "  help",
-      "  status",
-      "  whoami",
-      "  gen-kp [alias] [--coordinator <pubkey>] [--last-resort] [--local-only]",
-      "  key-packages | kps",
-      "  delete-kp <aliasOrKeyPackageRef> [--local-only] [--coordinator <pubkey>]",
-      "  available-kps [--coordinator <pubkey>]",
-      "  create-group <alias> [keyPackageAlias] [--coordinator <pubkey>] [--name <value>] [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]... [--watch]",
-      "  update-group-metadata <groupAlias> --name <value> [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
-      "  set-metadata <groupAlias> --name <value> [--description <value>] [--icon <value>] [--image-url <value>] [--admin <hex>]...",
-      "  groups",
-      "  group-info [groupAlias]",
-      "  group <groupAlias> [--watch]",
-      "  use <groupAlias> [--watch]",
-      "  leave",
-      "  unwatch <groupAlias>",
-      "  add-member <groupAlias> <stablePubkeyOrKeyPackageRef>",
-      "  fetch-welcomes [--coordinator <pubkey>]",
-      "  welcomes",
-      "  accept-welcome <keyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
-      "  send <message...>    (uses selected group)",
-      "  send-to <groupAlias> <message...>",
-      "  send-media <filePath> [caption...]   (uses selected group; requires --media-dir)",
-      "  save-media [groupAlias] <cursor> [destDir]   (decrypts media to destDir, default .)",
-      "  sync [groupAlias]",
-      "  sync-all",
-      "  watch-all",
-      "  messages [groupAlias]",
-      "  issues [groupAlias]",
-      "  exit",
+      ...REPL_COMMAND_HELP.map(({ usage }) => `  ${usage}`),
       "",
       "Key package notes:",
-      "  gen-kp creates a local key package and publishes it immediately unless --local-only is used.",
-      "  Use gen-kp --coordinator <pubkey> to publish the new key package to that coordinator pubkey.",
-      "  Without --coordinator, gen-kp publishes to the session default coordinator.",
+      "  gen-kp creates and publishes immediately unless --local-only is used.",
+      "  publish-kp publishes a previously local-only key package.",
+      "  --coordinator targets a coordinator other than the session default.",
       "",
       "Selected-group shortcuts:",
       "  <Enter> on an empty line => sync",
       "  plain text without a command => send",
+      "",
+      "More documentation:",
+      "  Exit the REPL, then run: cordn docs commands",
       "",
     ].join("\n"),
   );

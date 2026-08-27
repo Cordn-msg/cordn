@@ -15,7 +15,17 @@ import {
   printHelp,
 } from "./replFormat.ts";
 
-export async function startCliRepl(session: CliSession): Promise<void> {
+export function isReplAbort(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as NodeJS.ErrnoException).code === "ABORT_ERR"
+  );
+}
+
+export async function startCliRepl(
+  session: CliSession,
+  persist: () => Promise<void> = async () => undefined,
+): Promise<void> {
   const rl = createInterface({ input, output });
   let selectedGroupAlias: string | undefined;
   let currentPrompt = "cordn> ";
@@ -29,6 +39,16 @@ export async function startCliRepl(session: CliSession): Promise<void> {
   const redrawAfterAsyncOutput = (): void => {
     output.write("\n");
     rl.prompt(true);
+  };
+
+  const persistSafely = async (): Promise<void> => {
+    try {
+      await persist();
+    } catch (error) {
+      output.write(
+        `${colorize(`state save failed: ${error instanceof Error ? error.message : String(error)}`, ansi.red)}\n`,
+      );
+    }
   };
 
   const unsubscribeWatchEvents = session.onGroupEvent((event) => {
@@ -70,7 +90,13 @@ export async function startCliRepl(session: CliSession): Promise<void> {
     while (true) {
       renderPrompt();
       rl.setPrompt(currentPrompt);
-      const line = (await rl.question(currentPrompt)).trim();
+      let line: string;
+      try {
+        line = (await rl.question(currentPrompt)).trim();
+      } catch (error) {
+        if (isReplAbort(error)) return;
+        throw error;
+      }
 
       if (!line) {
         if (selectedGroupAlias) {
@@ -83,6 +109,8 @@ export async function startCliRepl(session: CliSession): Promise<void> {
             output.write(
               `${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`,
             );
+          } finally {
+            await persistSafely();
           }
         }
         continue;
@@ -99,6 +127,8 @@ export async function startCliRepl(session: CliSession): Promise<void> {
           output.write(
             `${error instanceof Error ? error.message : String(error)}\n`,
           );
+        } finally {
+          await persistSafely();
         }
         continue;
       }
@@ -120,6 +150,8 @@ export async function startCliRepl(session: CliSession): Promise<void> {
         output.write(
           `${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`,
         );
+      } finally {
+        await persistSafely();
       }
     }
   } finally {

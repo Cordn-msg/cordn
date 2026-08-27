@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { CliSession } from "./session.ts";
+import { welcomeIdentifier } from "./sessionStore.ts";
 import { FileMediaStore } from "./mediaStore.ts";
 import {
   NoPublishedKeyPackageError,
@@ -85,6 +86,127 @@ describe("CliSession", () => {
       expect(aliceSynced).toHaveLength(1);
       expect(aliceSynced[0]?.content).toBe("hello alice");
       expect(aliceSynced[0]?.sender).toBe(bob.stablePubkey);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("a restored snapshot acks an accepted welcome instead of re-accepting it", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob);
+
+      await alice.generateKeyPackage("alice-main");
+      await bob.generateKeyPackage("bob-main");
+      await alice.createGroup("demo", { keyPackageAlias: "alice-main" });
+      const invitation = await alice.addMember("demo", bob.stablePubkey);
+      await alice.syncGroup("demo");
+
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "demo");
+      const snapshot = bob.exportSnapshot();
+      await bob.disconnect();
+
+      // Restart: state is restored from the snapshot only.
+      const restoredBob = new CliSession({
+        privateKey: bob.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(restoredBob);
+      await restoredBob.restoreSnapshot(snapshot);
+
+      // The first fetch after restart delivers the pending consumed-welcome
+      // ack, so the coordinator retires the record instead of re-delivering
+      // it (which previously triggered a duplicate re-join).
+      const welcomes = await restoredBob.fetchWelcomes();
+      expect(welcomes).toEqual([]);
+      expect(await restoredBob.fetchWelcomes()).toEqual([]);
+
+      // The restored session keeps participating in the group.
+      await alice.sendMessage("demo", "after restart");
+      const synced = await restoredBob.syncGroup("demo");
+      expect(synced.at(-1)?.content).toBe("after restart");
+      await restoredBob.sendMessage("demo", "still here");
+      const aliceSynced = await alice.syncGroup("demo");
+      expect(aliceSynced.at(-1)?.content).toBe("still here");
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  test("accepts multiple Welcomes backed by one last-resort KeyPackage", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      const carol = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+      sessions.push(alice, bob, carol);
+
+      await alice.generateKeyPackage("alice-main", { localOnly: true });
+      const bobLastResort = await bob.generateKeyPackage("bob-last", {
+        lastResort: true,
+      });
+      await carol.generateKeyPackage("carol-main", { localOnly: true });
+      await alice.createGroup("alice-group", {
+        keyPackageAlias: "alice-main",
+      });
+      await carol.createGroup("carol-group", {
+        keyPackageAlias: "carol-main",
+      });
+
+      await alice.addMember("alice-group", bob.stablePubkey);
+      await alice.syncGroup("alice-group");
+      await carol.addMember("carol-group", bob.stablePubkey);
+      await carol.syncGroup("carol-group");
+
+      const welcomes = await bob.fetchWelcomes();
+      expect(welcomes).toHaveLength(2);
+      expect(new Set(welcomes.map((welcome) => welcome.kp_ref))).toEqual(
+        new Set([bobLastResort.keyPackageRef]),
+      );
+
+      await bob.acceptWelcome(welcomeIdentifier(welcomes[0]!), "from-alice");
+      await bob.acceptWelcome(welcomeIdentifier(welcomes[1]!), "from-carol");
+
+      expect(
+        bob
+          .listGroups()
+          .map((group) => group.alias)
+          .sort(),
+      ).toEqual(["from-alice", "from-carol"]);
+      expect(await bob.fetchWelcomes()).toEqual([]);
     } finally {
       await server.transport.close();
     }
@@ -1748,6 +1870,7 @@ describe("CliSession", () => {
       const inviterSync = await alice.syncGroup("demo");
 
       expect(inviterSync).toEqual([]);
+      await alice.sendMessage("demo", "sent while invite was pending");
 
       await bob.fetchWelcomes();
       const joined = await bob.acceptWelcome(
@@ -1756,9 +1879,10 @@ describe("CliSession", () => {
       );
 
       expect(joined.alias).toBe("demo");
-      expect(bob.getGroup("demo").fetchCursor).toBe(1);
-      expect(bob.listSyncIssues("demo")).toEqual([]);
-
+      expect(bob.getGroup("demo").fetchCursor).toBe(2);
+      expect(
+        bob.listMessages("demo").map((message) => message.content),
+      ).toEqual(["sent while invite was pending"]);
       expect(bob.listSyncIssues("demo")).toEqual([]);
     } finally {
       await server.transport.close();
@@ -1812,10 +1936,15 @@ describe("CliSession", () => {
       });
 
       try {
+        await alice.sendMessage("demo", "backlog before watch");
         await bob.watchGroup("demo");
-        await waitForCondition(() => bob.getWatchStatus("demo") === "watching");
 
+        // Awaiting watchGroup includes backlog ingestion before subscription,
+        // so a daemon cannot send on stale state during the connecting seam.
         expect(bob.getWatchStatus("demo")).toBe("watching");
+        expect(
+          bob.listMessages("demo").map((message) => message.content),
+        ).toContain("backlog before watch");
 
         await bob.sendMessage("demo", "hello alice from bob");
         await alice.syncGroup("demo");
@@ -2422,10 +2551,15 @@ describe("CliSession", () => {
       ]);
       expect(
         survivor.listMessages("demo").map((message) => message.content),
-      ).toEqual([
-        `post-reconcile-from-alice-to-${survivorName}`,
-        `post-reconcile-from-bob-to-${survivorName}`,
-      ]);
+      ).toEqual(
+        expect.arrayContaining([
+          "alice-concurrent-1",
+          "bob-concurrent-1",
+          `post-reconcile-from-alice-to-${survivorName}`,
+          `post-reconcile-from-bob-to-${survivorName}`,
+        ]),
+      );
+      expect(survivor.listMessages("demo")).toHaveLength(4);
 
       await alice.syncGroup("demo");
 
@@ -2536,24 +2670,22 @@ describe("CliSession", () => {
           kp_ref: recoveryInvitation.keyPackageReference,
         }),
       ]);
-      await rejectedSession.acceptWelcome(
+      const recoveredGroup = await rejectedSession.acceptWelcome(
         recoveryInvitation.keyPackageReference,
         "demo-recovery",
       );
+      expect(recoveredGroup.alias).toBe("demo");
 
       await bob.sendMessage("demo", `reinvited-${rejectedName}-hello`);
-      const recoveredMessages =
-        await rejectedSession.syncGroup("demo-recovery");
+      const recoveredMessages = await rejectedSession.syncGroup("demo");
 
       expect(recoveredMessages.map((message) => message.content)).toEqual([
         `reinvited-${rejectedName}-hello`,
       ]);
-      expect(rejectedSession.listGroups()).toHaveLength(2);
+      expect(rejectedSession.listGroups()).toHaveLength(1);
 
       for (const session of [alice, bob, survivor, erin, rejectedSession]) {
-        const history = session.listMessages(
-          session === rejectedSession ? "demo-recovery" : "demo",
-        );
+        const history = session.listMessages("demo");
         const cursors = history.map((message) => message.cursor);
         expect(cursors).toEqual([...cursors].sort((a, b) => a - b));
         expect(new Set(cursors).size).toBe(cursors.length);
@@ -2807,8 +2939,12 @@ describe("CliSession", () => {
       expect(carolGroupAMessages).toEqual([]);
       expect(daveGroupBMessages).toEqual([]);
 
-      expect(carol.listMessages("group-a")).toEqual([]);
-      expect(dave.listMessages("group-b")).toEqual([]);
+      expect(
+        carol.listMessages("group-a").map((message) => message.content),
+      ).toEqual(expect.arrayContaining(["a-msg-1", "a-msg-2"]));
+      expect(
+        dave.listMessages("group-b").map((message) => message.content),
+      ).toEqual(expect.arrayContaining(["b-msg-1", "b-msg-2"]));
 
       await carol.generateKeyPackage("carol-race");
       await erin.generateKeyPackage("erin-race");
@@ -3213,8 +3349,22 @@ describe("CliSession", () => {
         expect(new Set(cursors).size).toBe(cursors.length);
       }
 
-      expect(dave.listMessages("group-a")).toEqual([]);
-      expect(frank.listMessages("group-b")).toEqual([]);
+      expect(
+        dave.listMessages("group-a").map((message) => message.content),
+      ).toEqual(
+        expect.arrayContaining([
+          "a-race-msg-from-alice",
+          "a-race-msg-from-bob",
+        ]),
+      );
+      expect(
+        frank.listMessages("group-b").map((message) => message.content),
+      ).toEqual(
+        expect.arrayContaining([
+          "b-race-msg-from-alice",
+          "b-race-msg-from-bob",
+        ]),
+      );
     } finally {
       await server.transport.close();
     }
@@ -3374,15 +3524,16 @@ describe("CliSession", () => {
       await alice.syncAll();
       await bob.syncAll();
       await carol.fetchWelcomes();
-      await carol.acceptWelcome(
+      const carolRejoined = await carol.acceptWelcome(
         carolReinviteIntoA.keyPackageReference,
         "group-a-rejoin",
       );
+      expect(carolRejoined.alias).toBe("group-a");
 
       await bob.sendMessage("group-a", "a-reinvite-msg");
       const carolRejoinSync = await carol.syncAll();
       expect(
-        carolRejoinSync["group-a-rejoin"]?.map((message) => message.content),
+        carolRejoinSync["group-a"]?.map((message) => message.content),
       ).toEqual(["a-reinvite-msg"]);
 
       const frankIntoA = await bob.addMember("group-a", frank.stablePubkey);
@@ -3409,15 +3560,16 @@ describe("CliSession", () => {
       );
       await bob.syncAll();
       await dave.fetchWelcomes();
-      await dave.acceptWelcome(
+      const daveRejoined = await dave.acceptWelcome(
         daveReinviteIntoB.keyPackageReference,
         "group-b-rejoin",
       );
+      expect(daveRejoined.alias).toBe("group-b");
 
       await bob.sendMessage("group-b", "b-post-dave-rejoin");
       const daveRejoinSync = await dave.syncAll();
       expect(
-        daveRejoinSync["group-b-rejoin"]?.map((message) => message.content),
+        daveRejoinSync["group-b"]?.map((message) => message.content),
       ).toEqual(["b-post-dave-rejoin"]);
 
       await expect(
@@ -3433,10 +3585,10 @@ describe("CliSession", () => {
 
       expect(aliceDrain["group-a"] ?? []).toEqual([]);
       expect(bobDrain["group-b"] ?? []).toEqual([]);
-      expect(
-        carolDrain["group-a-rejoin"]?.map((message) => message.content),
-      ).toEqual(expect.arrayContaining(["a-post-frank-join"]));
-      expect(daveDrain["group-b-rejoin"] ?? []).toEqual([]);
+      expect(carolDrain["group-a"]?.map((message) => message.content)).toEqual(
+        expect.arrayContaining(["a-post-frank-join"]),
+      );
+      expect(daveDrain["group-b"] ?? []).toEqual([]);
       expect(
         erinDrain["group-a-erin"]?.map((message) => message.content),
       ).toEqual(
@@ -3463,13 +3615,13 @@ describe("CliSession", () => {
           .listGroups()
           .map((group) => group.alias)
           .sort(),
-      ).toEqual(["group-a", "group-a-rejoin", "group-b-carol"]);
+      ).toEqual(["group-a", "group-b-carol"]);
       expect(
         dave
           .listGroups()
           .map((group) => group.alias)
           .sort(),
-      ).toEqual(["group-b", "group-b-rejoin"]);
+      ).toEqual(["group-b"]);
       expect(erin.listGroups().map((group) => group.alias)).toEqual([
         "group-a-erin",
       ]);
@@ -3483,8 +3635,7 @@ describe("CliSession", () => {
         [bob, "group-a", "a-reinvite-msg", "b-post-carol-join"],
         [bob, "group-b", "b-post-carol-join", "a-reinvite-msg"],
         [carol, "group-a", "a-round-2-from-alice", "b-post-carol-join"],
-        [dave, "group-b", "b-round-2-from-bob", "a-reinvite-msg"],
-        [dave, "group-b-rejoin", "b-post-dave-rejoin", "a-reinvite-msg"],
+        [dave, "group-b", "b-post-dave-rejoin", "a-reinvite-msg"],
         [erin, "group-a-erin", "a-post-erin-join", "b-post-carol-join"],
         [frank, "group-a-frank", "a-post-frank-join", "b-post-carol-join"],
       ] as const) {
@@ -3502,9 +3653,7 @@ describe("CliSession", () => {
         [bob, "group-b"],
         [carol, "group-a"],
         [carol, "group-b-carol"],
-        [carol, "group-a-rejoin"],
         [dave, "group-b"],
-        [dave, "group-b-rejoin"],
         [erin, "group-a-erin"],
         [frank, "group-a-frank"],
       ] as const) {

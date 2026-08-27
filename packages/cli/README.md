@@ -1,78 +1,152 @@
-# CLI
+# @cordn/cli
 
-This directory contains the local [`cordn`](package.json) CLI client.
+Persistent MLS client for [Cordn](https://github.com/Cordn-msg/cordn). It supports an interactive REPL, one-shot commands, encrypted restart-safe state, live group watches, and durable filesystem queues for local agents and automations.
 
-It is intended for:
-
-- local development against a coordinator
-- integration testing of group creation, invites, welcomes, sync, and messaging
-- manual inspection of MLS-backed group behavior
-
-## Entry points
-
-- [`main.ts`](src/main.ts) — CLI startup
-- [`repl.ts`](src/repl.ts) — interactive terminal interface
-- [`session.ts`](src/session.ts) — in-memory client session model
-- [`groupMetadata.ts`](src/groupMetadata.ts) — `cordn_group_metadata` encoding and decoding
-
-## Usage
-
-Start the CLI with:
+## Install
 
 ```sh
-pnpm run client:cli
+npm install --global @cordn/cli
+cordn --version
+cordn --help
 ```
 
-Useful commands:
+Node.js 20.12 or newer is required.
 
-- `gen-kp [alias]`
-- `key-packages` — inspect local key packages, including publish/consume state and metadata-extension support
-- `publish-kp <alias>`
-- `available-kps` — inspect coordinator-published key packages
-- `create-group <alias> [keyPackageAlias] [--watch]`
-- `create-group <alias> [keyPackageAlias] --name "Demo" --description "Shared group" --icon "🧵" --image-url "https://example.com/group.png"`
-- `update-group-metadata <groupAlias> --name "Demo" [--description "Shared group"] [--icon "🧵"] [--image-url "https://example.com/group.png"] [--admin <hex>]...`
-- `group <groupAlias> [--watch]`
-- `accept-welcome <keyPackageReference> [groupAlias] [--watch]`
-- `groups` — compact list of joined groups, shared metadata, and watch status
-- `group-info [groupAlias]` — inspect one joined group's shared metadata and local state counters
-- `watch-all` — start background subscriptions for all joined groups
-- `unwatch <groupAlias>` — stop one background subscription
-- `add-member <groupAlias> <stablePubkeyOrKeyPackageRef>`
-- `fetch-welcomes`
-- `fetch-join-requests <groupAlias>` — list pending join requests for a group
-- `request-join <gid> [keyPackageAlias] [--coordinator <pubkey>]` — send a join request for a group
-- `send <message...>`
-- `send-media <filePath> [caption...]` — requires `--media-dir <dir>`
-- `save-media [groupAlias] <cursor> [destDir]` — decrypts received media to `destDir` (default `.`)
-- `sync [groupAlias]`
+## Bundled documentation
 
-## Notes
+The package includes version-matched offline documentation. These commands do not require state, network access, or coordinator configuration:
 
-- Group aliases are local convenience labels.
-- Shared group presentation metadata is carried in MLS state through [`groupMetadata.ts`](src/groupMetadata.ts).
-- Key packages advertise support for the shared metadata extension, but they do not contain a group's actual shared metadata values.
-- Watching keeps a CEP-41 subscription alive in the background so watched groups stay locally synchronized without repeated bounded fetches.
-- Live messages are rendered immediately when a watched group is currently selected in the REPL.
-- This client is intentionally small and focused on development workflows rather than polished end-user UX.
+```sh
+cordn docs
+cordn docs quickstart
+cordn docs commands
+cordn docs agent
+cordn docs daemon
+cordn docs queues
+cordn docs security
+```
+
+## Hosted default
+
+A fresh client uses:
+
+```text
+coordinator: 92753cbe63e943d0c4a0c61d745437892af6e98f179ce04a7a863aad4e00b1a5
+relays:
+  wss://relay.contextvm.org
+  wss://relay2.contextvm.org
+  wss://relay.primal.net
+```
+
+Override these with `--server-pubkey` and one or more `--relay` options. Persistent snapshots remember the coordinator and relays used to create them. Local development can continue deriving the coordinator public key from `CORDN_SERVER_PRIVATE_KEY` and reading comma-separated `CORDN_RELAY_URLS`.
+
+## Quickstart
+
+```sh
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/cordn/session.json"
+
+cordn --state-file "$STATE" --command status
+cordn --state-file "$STATE" --command "gen-kp main"
+cordn --state-file "$STATE" --command "create-group office"
+cordn --state-file "$STATE" --command "send-to office hello"
+cordn --state-file "$STATE" --command "messages office"
+```
+
+The first command generates a client identity and creates:
+
+- `$STATE` — AES-256-GCM encrypted identity, MLS state, cursors, and history
+- `$STATE.key` — the hex-encoded 32-byte snapshot encryption key
+
+Back up both files securely. Only one process may use a snapshot at a time.
+
+## Interactive mode
+
+```sh
+cordn --state-file "$STATE"
+```
+
+Useful commands include:
+
+```text
+status
+whoami
+gen-kp [alias] [--last-resort] [--local-only]
+publish-kp <alias> [--coordinator <pubkey>]
+key-packages
+available-kps
+create-group <alias> [keyPackageAlias] [--watch]
+groups
+group-info [groupAlias]
+use <groupAlias> [--watch]
+add-member <groupAlias> <stablePubkeyOrKeyPackageRef>
+remove-member <groupAlias> <stablePubkey>
+fetch-welcomes
+welcomes
+accept-welcome <welcomeIdOrKeyPackageReference> [groupAlias] [--watch]
+send <message...>
+send-to <groupAlias> <message...>
+sync [groupAlias]
+sync-all
+watch-all
+messages [groupAlias]
+issues [groupAlias]
+exit | quit
+```
+
+Run `cordn docs commands` for the complete version-matched command reference.
+
+After selecting a group with `use`, plain text sends a message and an empty line synchronizes it. `whoami` prints the private identity key; prefer `status` unless explicit export is intended.
+
+## One-shot mode
+
+```sh
+cordn --state-file "$STATE" --command "groups"
+cordn --state-file "$STATE" --command "sync office"
+cordn --state-file "$STATE" --command "send-to office hello"
+```
+
+Use `send-to` rather than `send`: selected-group context does not survive between processes.
+
+## Persistent daemon
+
+Bootstrap the identity and publish a KeyPackage before starting a long-running agent:
+
+```sh
+ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/cordn/agent"
+mkdir -p "$ROOT/inbox" "$ROOT/outbox"
+chmod 700 "$ROOT" "$ROOT/inbox" "$ROOT/outbox"
+
+cordn \
+  --state-file "$ROOT/session.json" \
+  --daemon \
+  --group-alias office \
+  --outbox-dir "$ROOT/outbox" \
+  --inbox-dir "$ROOT/inbox"
+```
+
+The daemon fetches matching Welcomes, accepts them using local KeyPackage material, catches groups up before watching, writes decrypted inbound messages to the inbox, and processes ordered JSON outbox jobs. It must be the sole writer of its snapshot.
+
+Both queue directions are at-least-once. Producers must write a non-`.json` temporary file and atomically rename it into the outbox. Consumers must claim inbox records and deduplicate by `groupAlias + cursor + id`.
+
+Run `cordn docs queues` for exact schemas and crash behavior.
 
 ## Encrypted media
 
-The CLI can exchange encrypted media as defined in [`spec/applications/encrypted-media.md`](../../spec/applications/encrypted-media.md).
+Pass `--media-dir <path>` to enable `send-media` and `save-media`. Media is encrypted client-side using an MLS exporter-derived key and stored as an opaque content-addressed blob. Multiple local clients must share the same media directory for filesystem-backed exchange; a network content store is required across hosts.
 
-- Media is encrypted client-side with a key derived from the group's MLS exporter secret and stored as an opaque blob on a content-addressed `MediaStore`.
-- The coordinator is unchanged; only an `imeta` tag travels inside the sealed group message.
-- Pass `--media-dir <dir>` at startup to enable `send-media` / `save-media`. Two CLI processes on the same machine exchange media by pointing at the same directory (via [`FileMediaStore`](src/mediaStore.ts)). Blossom is the recommended production store.
+See the [encrypted-media specification](https://github.com/Cordn-msg/cordn/blob/master/spec/applications/encrypted-media.md).
 
-## Reference client algorithm
+## Development from the monorepo
 
-The CLI is intended to act as a reference client for the core local sync logic.
+```sh
+pnpm install
+pnpm run client:cli -- --state-file /tmp/cordn-session.json
+pnpm --filter @cordn/cli run build
+pnpm --filter @cordn/cli run pack:check
+```
 
-- Every group tracks a monotonic local fetch cursor.
-- Bounded catch-up still uses [`FetchGroupMessages()`](src/coordinatorClient.ts:331) or [`FetchManyGroupMessages()`](src/coordinatorClient.ts:342) as the canonical recovery API.
-- Watch mode follows a strict `fetch first, then subscribe` flow matching [`design/group-message-stream-subscription-plan.md`](design/group-message-stream-subscription-plan.md:200).
-- Clients watching many groups can replace multiple single-group subscribe calls with [`SubscribeManyGroupMessages()`](src/coordinatorClient.ts:371) after catch-up; streamed records keep the same shape and must still be ingested by `gid` with independent cursors.
-- Fetched backlog and streamed live records are both treated as the same raw group-message input and are processed through one shared ingestion pipeline in [`ingestGroupMessages()`](src/groupSync.ts:31).
-- Outbound self-echoes are reconciled by ciphertext identity instead of being MLS-processed again, so local send state is not corrupted by coordinator replay.
-- Pending epoch operations such as add-member commits are only finalized after the corresponding inbound commit is observed and classified by the ingestion pipeline.
-- Inbox records are retired explicitly rather than by observation. Accepting a welcome locally (or an admin resolving a fetched join request) queues a `consumed` ref that the next [`FetchPendingWelcomes()`](src/coordinatorClient.ts) / [`FetchPendingJoinRequests()`](src/coordinatorClient.ts) echoes back, so the coordinator retires the record. Records that are never acked fall to the max-age ceiling, never to a read timer.
+The reference sync implementation follows fetch-first-then-subscribe semantics, independent per-group cursors, one inbound ingestion path for catch-up and live records, ciphertext-based self-echo reconciliation, and inbound confirmation before pending epoch operations are finalized.
+
+## License
+
+MIT

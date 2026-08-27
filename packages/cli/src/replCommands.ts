@@ -20,45 +20,14 @@ import {
   formatSyncResult,
   formatWelcomeKeyPackageReference,
   printHelp,
+  REPL_COMMAND_HELP,
 } from "./replFormat.ts";
 import { CliUsageError, UnknownCommandError } from "./sessionErrors.ts";
+import { welcomeIdentifier } from "./sessionStore.ts";
 
-export const knownCommands = new Set([
-  "help",
-  "status",
-  "whoami",
-  "gen-kp",
-  "key-packages",
-  "delete-kp",
-  "available-kps",
-  "create-group",
-  "update-group-metadata",
-  "set-metadata",
-  "groups",
-  "group-info",
-  "group",
-  "use",
-  "leave",
-  "unwatch",
-  "add-member",
-  "remove-member",
-  "fetch-welcomes",
-  "welcomes",
-  "accept-welcome",
-  "send",
-  "send-to",
-  "send-media",
-  "save-media",
-  "sync",
-  "sync-all",
-  "watch-all",
-  "messages",
-  "issues",
-  "fetch-join-requests",
-  "request-join",
-  "exit",
-  "quit",
-]);
+export const knownCommands = new Set<string>(
+  REPL_COMMAND_HELP.flatMap(({ names }) => [...names]),
+);
 
 export interface ReplCommandContext {
   session: CliSession;
@@ -341,6 +310,21 @@ export async function executeReplCommand(
       );
       break;
     }
+    case "publish-kp": {
+      const alias = positionalArgs[0];
+      if (!alias) {
+        throw new CliUsageError(
+          "Usage: publish-kp <alias> [--coordinator <pubkey>]",
+        );
+      }
+      const result = await session.publishKeyPackage(alias, {
+        coordinatorKey: parseCoordinatorOption(args),
+      });
+      output.write(
+        `${colorize("published", ansi.green)} alias=${result.alias} ref=${formatKeyPackageRef(result.keyPackageRef)} at=${colorize(String(result.publishedAt), ansi.dim)}\n`,
+      );
+      break;
+    }
     case "kps":
     case "key-packages": {
       output.write(
@@ -349,12 +333,13 @@ export async function executeReplCommand(
       break;
     }
     case "delete-kp": {
-      if (!args[0]) {
+      const aliasOrKeyPackageRef = positionalArgs[0];
+      if (!aliasOrKeyPackageRef) {
         throw new CliUsageError(
           "Usage: delete-kp <aliasOrKeyPackageRef> [--local-only] [--coordinator <pubkey>]",
         );
       }
-      const result = await session.deleteKeyPackage(args[0], {
+      const result = await session.deleteKeyPackage(aliasOrKeyPackageRef, {
         localOnly: args.includes("--local-only"),
         coordinatorKey: parseCoordinatorOption(args),
       });
@@ -416,12 +401,14 @@ export async function executeReplCommand(
     }
     case "group":
     case "use": {
-      if (!args[0]) throw new CliUsageError("Usage: use <groupAlias>");
-      const group = session.getGroup(args[0]);
+      const alias = positionalArgs[0];
+      if (!alias)
+        throw new CliUsageError(`Usage: ${command} <groupAlias> [--watch]`);
+      const group = session.getGroup(alias);
       if (args.includes("--watch")) {
-        await session.watchGroup(args[0]);
+        await session.watchGroup(alias);
       }
-      selectedGroupAlias = args[0];
+      selectedGroupAlias = alias;
       output.write(
         `${colorize("selected group", ansi.green)} ${colorize(selectedGroupAlias, ansi.cyan)} ${formatGroupMetadata(group.metadata)}\n`,
       );
@@ -473,13 +460,13 @@ export async function executeReplCommand(
         parseCoordinatorOption(args),
       );
       output.write(
-        `${formatList(welcomes.map((welcome) => `${formatWelcomeKeyPackageReference(welcome.kp_ref)} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)}`))}\n`,
+        `${formatList(welcomes.map((welcome) => `${formatWelcomeKeyPackageReference(welcomeIdentifier(welcome))} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)} at=${welcome.at}`))}\n`,
       );
       break;
     }
     case "welcomes": {
       output.write(
-        `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeKeyPackageReference(welcome.kp_ref)} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)}`))}\n`,
+        `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeKeyPackageReference(welcomeIdentifier(welcome))} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)} at=${welcome.at}`))}\n`,
       );
       break;
     }
@@ -501,14 +488,14 @@ export async function executeReplCommand(
       break;
     }
     case "request-join": {
-      if (!args[0]) {
+      const gid = positionalArgs[0];
+      if (!gid) {
         throw new CliUsageError(
           "Usage: request-join <gid> [keyPackageAlias] [--coordinator <pubkey>]",
         );
       }
-      const gid = args[0];
       const keyPackageAlias =
-        args[1] ?? session.listKeyPackageSummaries()[0]?.alias;
+        positionalArgs[1] ?? session.listKeyPackageSummaries()[0]?.alias;
       if (!keyPackageAlias) {
         throw new CliUsageError(
           "No key package available and none specified. Generate one with gen-kp first.",
@@ -527,7 +514,7 @@ export async function executeReplCommand(
     case "accept-welcome": {
       if (!positionalArgs[0]) {
         throw new CliUsageError(
-          "Usage: accept-welcome <keyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
+          "Usage: accept-welcome <welcomeIdOrKeyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
         );
       }
       const group = await session.acceptWelcome(

@@ -46,6 +46,7 @@ import {
 import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";
 import type { FetchManyPendingJoinRequestsOutput } from "@cordn/core";
+import type { ConsumedJoinRequestRef, ConsumedWelcomeRef } from "@cordn/core";
 import { runGroupWatch } from "./groupWatch.ts";
 import {
   acceptStoredWelcome,
@@ -67,15 +68,17 @@ import type {
 
 import {
   confirmPendingEpochOperations,
+  dropPendingAddMemberForTarget,
   enqueuePendingEpochOperation,
   getPendingEpochOperation,
-  markPendingEpochOperationsConfirmed,
   rejectPendingEpochOperations,
   type PendingEpochOperation,
 } from "./pendingEpochOperations.ts";
 import {
   clientStateDecoder,
+  clientStateEncoder,
   encode,
+  keyPackageEncoder,
   makeKeyPackageRef,
   privateKeyPackageEncoder,
 } from "ts-mls";
@@ -87,11 +90,13 @@ import type {
   Tombstone,
 } from "./multiDevice.ts";
 import {
+  DuplicateGroupAliasError,
   MissingLocalKeyPackageForWelcomeError,
   RemovedFromGroupError,
+  UnknownWelcomeReferenceError,
   SelfRemovalNotSupportedError,
 } from "./sessionErrors.ts";
-import { CliSessionStore } from "./sessionStore.ts";
+import { CliSessionStore, type FetchedJoinRequestRef } from "./sessionStore.ts";
 export type {
   CliSessionOptions,
   ConversationView,
@@ -103,6 +108,16 @@ export type {
   StoredMessage,
   StoredWelcome,
 } from "./sessionState.ts";
+
+function dedupeBy<T>(values: T[], keyOf: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = keyOf(value);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 export type GroupWatchStatus = "connecting" | "watching" | "errored";
 
@@ -139,6 +154,47 @@ export type GroupEvent =
       error?: string;
     };
 
+export interface CliSessionSnapshot {
+  version: 1;
+  privateKey: string;
+  /** Default routing config used when the next process starts without
+   *  repeating --server-pubkey/--relay. Optional for older snapshots. */
+  defaultCoordinator?: { serverPubkey: string; relays?: string[] };
+  keyPackages: Array<{
+    alias: string;
+    keyPackage: string;
+    privateKeyPackage: string;
+    keyPackageRef: string;
+    keyPackageBase64: string;
+    isLastResort: boolean;
+    publishedAt?: number;
+    consumed: boolean;
+  }>;
+  groups: Array<{
+    alias: string;
+    coordinatorKey: string;
+    clientState: string;
+    status: "active" | "removed";
+    removedAtCursor?: number;
+    lastCursor: number;
+    fetchCursor: number;
+    messages: StoredMessage[];
+    syncIssues: SyncIssue[];
+  }>;
+  welcomes: StoredWelcome[];
+  /** Epoch operations awaiting Commit re-ingestion. Persisting them keeps an
+   *  add-member Welcome from being stranded across a restart (the Welcome is
+   *  only delivered to the invitee on confirmation). Optional: snapshots from
+   *  earlier builds predate the field. */
+  pendingEpochOperations?: Record<string, PendingEpochOperation[]>;
+  /** Coordinator acknowledgement and fetched-request state. Without it, a
+   *  restart re-delivers handled records for up to the coordinator max age. */
+  acceptedWelcomeIds?: string[];
+  pendingConsumedWelcomes?: Record<string, ConsumedWelcomeRef[]>;
+  fetchedJoinRequests?: Record<string, FetchedJoinRequestRef[]>;
+  pendingConsumedJoinRequests?: Record<string, ConsumedJoinRequestRef[]>;
+}
+
 interface GroupWatchHandle {
   abort: (reason?: string) => Promise<void>;
   task: Promise<void>;
@@ -170,6 +226,142 @@ export class CliSession {
     this.stablePubkey = deriveStablePubkey(this.privateKey);
     this.mediaStore = options.mediaStore;
     this.onLocalStateAdvance = options.onLocalStateAdvance;
+  }
+
+  /** Waits for in-flight group mutations before taking the process-wide
+   *  snapshot, avoiding a pre-Commit state paired with a post-Commit cursor. */
+  async exportSnapshotWhenIdle(): Promise<CliSessionSnapshot> {
+    while (this.groupOperations.size > 0) {
+      await Promise.allSettled([...this.groupOperations.values()]);
+    }
+    return this.exportSnapshot();
+  }
+
+  exportSnapshot(): CliSessionSnapshot {
+    return {
+      version: 1,
+      privateKey: this.privateKey,
+      defaultCoordinator: this.coordinatorRegistry.defaultCoordinatorTarget,
+      keyPackages: this.listKeyPackages().map((entry) => ({
+        ...entry,
+        keyPackage: encodeBase64(encode(keyPackageEncoder, entry.keyPackage)),
+        privateKeyPackage: encodeBase64(
+          encode(privateKeyPackageEncoder, entry.privateKeyPackage),
+        ),
+      })),
+      groups: this.listGroups().map((group) => ({
+        alias: group.alias,
+        coordinatorKey: group.coordinatorKey,
+        clientState: encodeBase64(encode(clientStateEncoder, group.state)),
+        status: group.status,
+        removedAtCursor: group.removedAtCursor,
+        lastCursor: group.lastCursor,
+        fetchCursor: group.fetchCursor,
+        messages: group.messages,
+        syncIssues: group.syncIssues,
+      })),
+      welcomes: this.listWelcomes(),
+      pendingEpochOperations: Object.fromEntries(this.store.pendingOperations),
+      acceptedWelcomeIds: this.store.listAcceptedWelcomeIds(),
+      pendingConsumedWelcomes: this.store.listPendingConsumedWelcomes(),
+      fetchedJoinRequests: this.store.listFetchedJoinRequests(),
+      pendingConsumedJoinRequests: this.store.listPendingConsumedJoinRequests(),
+    };
+  }
+
+  async restoreSnapshot(snapshot: CliSessionSnapshot): Promise<void> {
+    if (
+      snapshot.version !== 1 ||
+      snapshot.privateKey.toLowerCase() !== this.privateKey.toLowerCase()
+    ) {
+      throw new Error("snapshot identity does not match CLI identity");
+    }
+    // Transient delivery state first: putWelcome below skips records already
+    // accepted, while restored acks retire them coordinator-side.
+    this.store.restoreTransientState({
+      acceptedWelcomeIds: snapshot.acceptedWelcomeIds,
+      pendingConsumedWelcomes: snapshot.pendingConsumedWelcomes,
+      fetchedJoinRequests: snapshot.fetchedJoinRequests,
+      pendingConsumedJoinRequests: snapshot.pendingConsumedJoinRequests,
+    });
+    for (const entry of snapshot.keyPackages) {
+      this.store.addKeyPackage({
+        ...entry,
+        keyPackage: decodeKeyPackage(decodeBase64(entry.keyPackage)),
+        privateKeyPackage: decodePrivateKeyPackage(
+          decodeBase64(entry.privateKeyPackage),
+        ),
+      });
+    }
+    const canonicalAliases = new Map<string, string>();
+    for (const entry of snapshot.groups) {
+      const decoded = clientStateDecoder(decodeBase64(entry.clientState), 0);
+      if (!decoded) throw new Error(`failed to decode group ${entry.alias}`);
+      const group = this.createGroupSessionState(
+        entry.alias,
+        decoded[0],
+        entry.coordinatorKey,
+      );
+      group.status = entry.status;
+      group.removedAtCursor = entry.removedAtCursor;
+      group.lastCursor = entry.lastCursor;
+      group.fetchCursor = entry.fetchCursor;
+      group.messages = entry.messages;
+      group.syncIssues = entry.syncIssues;
+      group.metadata = getCordnGroupMetadataExtension(decoded[0]);
+
+      const groupId = this.deriveGroupId(group.state);
+      const existing = this.listGroups().find(
+        (candidate) => this.deriveGroupId(candidate.state) === groupId,
+      );
+      if (!existing) {
+        this.store.addGroup(group);
+        canonicalAliases.set(entry.alias, entry.alias);
+        continue;
+      }
+
+      // Older CLI snapshots could contain one alias per re-invite. Collapse
+      // them to one logical group, keeping the newest epoch and all history.
+      canonicalAliases.set(entry.alias, existing.alias);
+      if (group.state.groupContext.epoch > existing.state.groupContext.epoch) {
+        existing.state = group.state;
+        existing.metadata = group.metadata;
+        existing.coordinatorKey = group.coordinatorKey;
+        existing.status = group.status;
+        existing.removedAtCursor = group.removedAtCursor;
+      }
+      existing.lastCursor = Math.max(existing.lastCursor, group.lastCursor);
+      existing.fetchCursor = Math.max(existing.fetchCursor, group.fetchCursor);
+      existing.messages = dedupeBy(
+        [...existing.messages, ...group.messages],
+        (message) => `${message.cursor}:${message.id}`,
+      ).sort((left, right) => left.cursor - right.cursor);
+      existing.syncIssues = dedupeBy(
+        [...existing.syncIssues, ...group.syncIssues],
+        (issue) => `${issue.cursor}:${issue.detail}`,
+      ).sort((left, right) => left.cursor - right.cursor);
+    }
+    for (const [alias, operations] of Object.entries(
+      snapshot.pendingEpochOperations ?? {},
+    )) {
+      const canonicalAlias = canonicalAliases.get(alias) ?? alias;
+      for (const operation of operations) {
+        if (
+          getPendingEpochOperation(
+            this.store.pendingOperations,
+            canonicalAlias,
+            operation.commitMessageBase64,
+          )
+        ) {
+          continue;
+        }
+        enqueuePendingEpochOperation(this.store.pendingOperations, {
+          ...operation,
+          groupAlias: canonicalAlias,
+        });
+      }
+    }
+    for (const welcome of snapshot.welcomes) this.store.putWelcome(welcome);
   }
 
   /**
@@ -357,15 +549,6 @@ export class CliSession {
     const keyPackageRef =
       byRef?.keyPackageRef ?? byAlias?.keyPackageRef ?? aliasOrKeyPackageRef;
 
-    let removedLocal = false;
-    if (byRef) {
-      this.store.deleteKeyPackageByRef(keyPackageRef);
-      removedLocal = true;
-    } else if (byAlias) {
-      this.store.deleteKeyPackage(aliasOrKeyPackageRef);
-      removedLocal = true;
-    }
-
     if (!options.localOnly) {
       if (!byRef && !byAlias) {
         const available = await this.listAvailableKeyPackages(
@@ -387,7 +570,12 @@ export class CliSession {
       );
     }
 
-    return { keyPackageRef, removedLocal };
+    // Keep private material until remote deletion succeeds; losing it locally
+    // while the coordinator still advertises the KP strands future Welcomes.
+    if (byRef) this.store.deleteKeyPackageByRef(keyPackageRef);
+    else if (byAlias) this.store.deleteKeyPackage(aliasOrKeyPackageRef);
+
+    return { keyPackageRef, removedLocal: Boolean(byRef || byAlias) };
   }
 
   async createGroup(
@@ -472,6 +660,7 @@ export class CliSession {
       prepared.pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
       this.adoptGroupState(group, prepared.newState);
+      prepared.pendingOperation.localStateApplied = true;
 
       // If this add resolved a pending join request the admin had fetched,
       // queue it for retirement on the next fetchPendingJoinRequests. The
@@ -479,6 +668,7 @@ export class CliSession {
       const handledRequest = this.store.findFetchedJoinRequest(
         this.deriveGroupId(group.state),
         prepared.pendingOperation.targetStablePubkey,
+        prepared.keyPackageReference,
       );
       if (handledRequest) {
         this.store.queueConsumedJoinRequest(
@@ -528,6 +718,14 @@ export class CliSession {
       prepared.pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
       this.adoptGroupState(group, prepared.newState);
+      prepared.pendingOperation.localStateApplied = true;
+      // If add+remove happen before the add self-echo is finalized, never
+      // deliver a stale Welcome to the member we just removed.
+      dropPendingAddMemberForTarget(
+        this.store.pendingOperations,
+        groupAlias,
+        targetStablePubkey,
+      );
 
       return { targetStablePubkey };
     });
@@ -552,26 +750,27 @@ export class CliSession {
         metadata,
       });
 
-      enqueuePendingEpochOperation(this.store.pendingOperations, {
+      const pendingOperation: PendingEpochOperation = {
         kind: "update-group-metadata",
         groupAlias,
         groupId: this.deriveGroupId(group.state),
         commitMessageBase64: prepared.commitMessageBase64,
+        localStateApplied: false,
         status: "pending",
-      });
+      };
+      enqueuePendingEpochOperation(
+        this.store.pendingOperations,
+        pendingOperation,
+      );
 
       const posted = await this.postOutboundGroupMessage(
         group,
         prepared.commitMessageBase64,
       );
-      const pendingOp = this.store.pendingOperations
-        .get(groupAlias)
-        ?.find((op) => op.commitMessageBase64 === prepared.commitMessageBase64);
-      if (pendingOp) {
-        pendingOp.postedMsgBase64 = posted.postedMsgBase64;
-      }
+      pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
       this.adoptGroupState(group, prepared.newState);
+      pendingOperation.localStateApplied = true;
 
       return { metadata: group.metadata ?? metadata };
     });
@@ -579,7 +778,7 @@ export class CliSession {
 
   async fetchWelcomes(coordinatorKey?: string): Promise<StoredWelcome[]> {
     const resolvedCoordinatorKey = this.resolveCoordinatorKey(coordinatorKey);
-    const toAck = this.store.peekConsumedWelcomes();
+    const toAck = this.store.peekConsumedWelcomes(resolvedCoordinatorKey);
     const result = await this.getCoordinatorClient(
       resolvedCoordinatorKey,
     ).FetchPendingWelcomes(
@@ -594,19 +793,19 @@ export class CliSession {
     );
     // Clear only after a successful fetch; a throw leaves the refs queued so
     // the next fetch retries. The ack is idempotent, so re-sends are safe.
-    this.store.clearConsumedWelcomes(toAck);
+    this.store.clearConsumedWelcomes(resolvedCoordinatorKey, toAck);
 
     for (const welcome of result.welcomes) {
-      // Skip welcomes that were already accepted (their kp_ref was deleted
-      // from the local store after acceptance). With non-destructive
-      // FetchPendingWelcomes on the coordinator, the same welcome may be
-      // returned across multiple fetches.
-      if (!this.store.hasWelcome(welcome.kp_ref)) {
-        this.store.putWelcome({
-          ...welcome,
-          coordinatorKey: resolvedCoordinatorKey,
-        });
+      const stored = { ...welcome, coordinatorKey: resolvedCoordinatorKey };
+      // A normal KP is single-use. If an older snapshot lost its consumed ack,
+      // retire the replay instead of presenting it as a fresh invitation.
+      const keyPackage = this.store.findKeyPackageByRef(stored.kp_ref);
+      if (keyPackage?.consumed && !keyPackage.isLastResort) {
+        this.store.retireWelcome(stored, resolvedCoordinatorKey);
+        continue;
       }
+      // Last-resort KPs can back multiple Welcomes, so identity includes `at`.
+      if (!this.store.hasWelcome(stored)) this.store.putWelcome(stored);
     }
 
     return this.listWelcomes();
@@ -675,6 +874,7 @@ export class CliSession {
       groupId,
       result.requests.map((req) => ({
         requesterStablePubkey: req.pk,
+        keyPackageReference: req.kp_ref,
         createdAt: req.at,
       })),
     );
@@ -682,12 +882,18 @@ export class CliSession {
   }
 
   async acceptWelcome(
-    keyPackageReference: string,
+    welcomeIdentifier: string,
     groupAlias?: string,
     coordinatorKey?: string,
   ): Promise<GroupSessionState> {
-    await this.fetchWelcomes(coordinatorKey);
-    const welcome = this.store.getWelcome(keyPackageReference);
+    let welcome: StoredWelcome;
+    try {
+      welcome = this.store.getWelcome(welcomeIdentifier);
+    } catch (error) {
+      if (!(error instanceof UnknownWelcomeReferenceError)) throw error;
+      await this.fetchWelcomes(coordinatorKey);
+      welcome = this.store.getWelcome(welcomeIdentifier);
+    }
     const keyPackage = this.store.findKeyPackageByRef(welcome.kp_ref);
 
     if (!keyPackage) {
@@ -695,9 +901,12 @@ export class CliSession {
     }
 
     const alias = groupAlias ?? `group-${this.store.groupCount + 1}`;
-
-    const group = await acceptStoredWelcome({
-      keyPackageReference,
+    const resolvedCoordinatorKey = this.resolveCoordinatorKey(
+      coordinatorKey ?? welcome.coordinatorKey,
+    );
+    const wasConsumed = keyPackage.consumed;
+    const joined = await acceptStoredWelcome({
+      keyPackageReference: welcome.kp_ref,
       groupAlias: alias,
       welcome,
       keyPackage,
@@ -705,23 +914,72 @@ export class CliSession {
         this.createGroupSessionState(
           resolvedAlias,
           state,
-          this.resolveCoordinatorKey(coordinatorKey ?? welcome.coordinatorKey),
+          resolvedCoordinatorKey,
         ),
     });
-
-    // Use the welcome cursor hint for efficient post-join sync.
-    // If the inviter stored the commit cursor, skip messages sent
-    // before the new member was added.
-    if (welcome.after !== undefined && welcome.after > 0) {
-      group.fetchCursor = welcome.after;
-      group.lastCursor = welcome.after;
+    const groupId = this.deriveGroupId(joined.state);
+    const existing = this.listGroups().find(
+      (candidate) => this.deriveGroupId(candidate.state) === groupId,
+    );
+    if (
+      existing &&
+      existing.state.groupContext.epoch >= joined.state.groupContext.epoch
+    ) {
+      // Exact StoreWelcome retry or stale replay: acknowledge it, but keep the
+      // one local state already representing this group.
+      this.store.deleteWelcome(welcomeIdentifier, resolvedCoordinatorKey);
+      return existing;
     }
 
-    this.store.addGroup(group);
-    await this.establishPostWelcomeBaseline(group, welcome.at);
-    this.store.deleteWelcome(keyPackageReference);
+    let group = joined;
+    if (existing) {
+      // A re-invite/key rotation is a newer state for the same logical group,
+      // not a second conversation. Preserve local history and alias.
+      if (this.isWatching(existing.alias))
+        await this.unwatchGroup(existing.alias);
+      existing.state = joined.state;
+      existing.metadata = joined.metadata;
+      existing.coordinatorKey = resolvedCoordinatorKey;
+      existing.status = "active";
+      existing.removedAtCursor = undefined;
+      this.store.pendingOperations.delete(existing.alias);
+      group = existing;
+    } else {
+      if (this.listGroups().some((candidate) => candidate.alias === alias)) {
+        keyPackage.consumed = wasConsumed;
+        throw new DuplicateGroupAliasError(alias);
+      }
+      this.store.addGroup(group);
+    }
 
-    return this.getGroup(alias);
+    // The inviter's Commit cursor skips traffic from before this leaf joined.
+    if (welcome.after !== undefined && welcome.after > 0) {
+      group.fetchCursor = Math.max(group.fetchCursor, welcome.after);
+      group.lastCursor = Math.max(group.lastCursor, welcome.after);
+    }
+
+    const baseline = await this.runGroupOperation(group.alias, async () => {
+      // Joining is complete once the Welcome is processed. Retire it before
+      // best-effort catch-up so a transient fetch error cannot leave a valid
+      // group paired with a Welcome that looks unaccepted.
+      this.store.deleteWelcome(welcomeIdentifier, resolvedCoordinatorKey);
+      try {
+        return await this.establishPostWelcomeBaseline(group, welcome.at);
+      } catch (error) {
+        const issue: SyncIssue = {
+          cursor: group.fetchCursor,
+          createdAt: Date.now(),
+          detail: `Post-welcome catch-up failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+        group.syncIssues.push(issue);
+        return { received: [], issues: [issue] };
+      }
+    });
+    if (baseline.received.length > 0 || baseline.issues.length > 0) {
+      this.emitMessageEvent(group.alias, baseline.received, baseline.issues);
+    }
+
+    return group;
   }
 
   async sendMessage(
@@ -883,7 +1141,7 @@ export class CliSession {
   }
 
   async syncGroup(groupAlias: string): Promise<StoredMessage[]> {
-    if (this.isWatching(groupAlias)) {
+    if (this.getWatchStatus(groupAlias) === "watching") {
       return [];
     }
 
@@ -902,12 +1160,22 @@ export class CliSession {
   }
 
   async watchGroup(groupAlias: string): Promise<void> {
-    if (this.watchHandles.has(groupAlias)) {
+    const existing = this.watchHandles.get(groupAlias);
+    if (existing?.status === "errored") {
+      await this.unwatchGroup(groupAlias);
+    } else if (existing) {
       return;
     }
 
     const group = this.getGroup(groupAlias);
+    this.assertGroupIsActive(group);
     const groupId = this.deriveGroupId(group.state);
+    let resolveReady!: () => void;
+    let rejectReady!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
 
     this.watchHandles.set(groupAlias, {
       abort: async () => undefined,
@@ -929,6 +1197,7 @@ export class CliSession {
         },
         onWatching: () => {
           this.setWatchStatus(groupAlias, "watching");
+          resolveReady();
         },
         onMessages: async (messages) => {
           await this.runGroupOperation(groupAlias, async () => {
@@ -939,17 +1208,29 @@ export class CliSession {
       },
     });
 
-    const task = watch.task.catch((error) => {
-      const reason = error instanceof Error ? error.message : String(error);
-      this.setWatchStatus(groupAlias, "errored", reason);
-      throw error;
-    });
+    let task!: Promise<void>;
+    task = watch.task
+      .then(() => {
+        if (this.watchHandles.get(groupAlias)?.task === task) {
+          this.setWatchStatus(groupAlias, "errored", "watch stream ended");
+        }
+      })
+      .catch((error) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.setWatchStatus(groupAlias, "errored", reason);
+        rejectReady(error);
+        throw error;
+      });
+    // The handle retains the rejection for unwatch/disconnect, while this sink
+    // prevents a background stream failure becoming an unhandled rejection.
+    void task.catch(() => undefined);
 
     const handle = this.watchHandles.get(groupAlias);
     if (handle) {
       handle.abort = watch.abort;
       handle.task = task;
     }
+    await ready;
   }
 
   async unwatchGroup(groupAlias: string): Promise<void> {
@@ -965,9 +1246,11 @@ export class CliSession {
   }
 
   async watchAllGroups(): Promise<void> {
-    for (const group of this.listGroups()) {
-      await this.watchGroup(group.alias);
-    }
+    await Promise.all(
+      this.listGroups()
+        .filter((group) => group.status !== "removed")
+        .map((group) => this.watchGroup(group.alias).catch(() => undefined)),
+    );
   }
 
   async syncAll(): Promise<Record<string, StoredMessage[]>> {
@@ -1408,7 +1691,7 @@ export class CliSession {
   }
 
   private async catchUpGroupIfNeeded(group: GroupSessionState): Promise<void> {
-    if (this.isWatching(group.alias)) {
+    if (this.getWatchStatus(group.alias) === "watching") {
       return;
     }
 
@@ -1441,8 +1724,6 @@ export class CliSession {
     messages: FetchGroupMessagesOutput["messages"],
     options: {
       suppressIssue?: (issue: SyncIssue) => boolean;
-      finalizePendingOperations?: boolean;
-      recordReceivedMessages?: boolean;
     } = {},
   ): Promise<{
     received: StoredMessage[];
@@ -1451,7 +1732,6 @@ export class CliSession {
     // Process messages one-at-a-time so that state-advancing commits
     // update the exporter secret before subsequent messages from the
     // new epoch are decrypted.
-    const previousMessageCount = group.messages.length;
     const allReceived: StoredMessage[] = [];
     const allIssues: SyncIssue[] = [];
     const allAppliedPending = new Set<string>();
@@ -1508,9 +1788,7 @@ export class CliSession {
         localStablePubkey: this.stablePubkey,
       });
 
-      if (options.recordReceivedMessages !== false) {
-        allReceived.push(...sync.received);
-      }
+      allReceived.push(...sync.received);
       allIssues.push(...sync.issues);
       for (const m of sync.appliedPendingCommitMessages) {
         allAppliedPending.add(m);
@@ -1526,42 +1804,28 @@ export class CliSession {
       }
     }
 
-    if (options.recordReceivedMessages === false) {
-      group.messages.splice(previousMessageCount);
+    // Retry already-confirmed finalizers even when this fetch is empty. A
+    // transient StoreWelcome failure happens after the cursor advances, so the
+    // self-echo will not appear again to trigger another attempt.
+    const finalized = await confirmPendingEpochOperations(
+      this.store.pendingOperations,
+      this.getGroupClient(group),
+      {
+        groupAlias: group.alias,
+        opaqueMessageBase64s: [...allAppliedPending],
+      },
+    );
+    if (finalized > 0) {
+      // A locally-authored Commit just landed on the stream. Notify the
+      // multi-device layer so siblings can fast-forward via a fresh doc.
+      this.notifyLocalStateAdvance();
     }
 
-    // Only mark (don't finalize) when the caller asks for deferred
-    // finalization (e.g. during catch-up before a group operation).
-    if (options.finalizePendingOperations === false) {
-      if (allAppliedPending.size > 0) {
-        markPendingEpochOperationsConfirmed(this.store.pendingOperations, {
-          groupAlias: group.alias,
-          opaqueMessageBase64s: [...allAppliedPending],
-        });
-      }
-    } else {
-      if (allAppliedPending.size > 0) {
-        await confirmPendingEpochOperations(
-          this.store.pendingOperations,
-          this.getGroupClient(group),
-          {
-            groupAlias: group.alias,
-            opaqueMessageBase64s: [...allAppliedPending],
-          },
-        );
-        await this.fetchWelcomes();
-        // A locally-authored Commit just landed on the stream. Notify the
-        // multi-device layer so siblings can fast-forward via a fresh doc
-        // (spec/applications/multi-device.md §10).
-        this.notifyLocalStateAdvance();
-      }
-
-      if (allRejectedPending.size > 0) {
-        await rejectPendingEpochOperations(this.store.pendingOperations, {
-          groupAlias: group.alias,
-          opaqueMessageBase64s: [...allRejectedPending],
-        });
-      }
+    if (allRejectedPending.size > 0) {
+      rejectPendingEpochOperations(this.store.pendingOperations, {
+        groupAlias: group.alias,
+        opaqueMessageBase64s: [...allRejectedPending],
+      });
     }
 
     return {
@@ -1579,14 +1843,15 @@ export class CliSession {
   private async establishPostWelcomeBaseline(
     group: GroupSessionState,
     welcomeCreatedAt: number,
-  ): Promise<void> {
+  ): Promise<{ received: StoredMessage[]; issues: SyncIssue[] }> {
     const result = await this.fetchRawGroupMessages(
       this.deriveGroupId(group.state),
       group.fetchCursor,
     );
 
-    await this.applyIncomingMessages(group, result.messages, {
-      recordReceivedMessages: false,
+    // Pre-join payloads fail exporter decryption and are skipped naturally;
+    // retain decryptable messages sent after the member was added.
+    return this.applyIncomingMessages(group, result.messages, {
       suppressIssue: (issue) =>
         issue.createdAt <= welcomeCreatedAt &&
         (issue.detail ===
