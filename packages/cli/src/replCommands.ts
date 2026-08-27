@@ -30,6 +30,7 @@ export const knownCommands = new Set([
   "whoami",
   "gen-kp",
   "key-packages",
+  "kps",
   "delete-kp",
   "available-kps",
   "create-group",

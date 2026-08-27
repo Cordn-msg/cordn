@@ -48,6 +48,8 @@ import {
   removeKeyPackagesOutputSchema,
 } from "@cordn/core";
 
+import { DEFAULT_RELAY_URLS } from "./defaults.ts";
+
 export type coordinatorClient = {
   PublishKeyPackage: (
     input: PublishKeyPackageInput,
@@ -87,8 +89,7 @@ export type coordinatorClient = {
 };
 
 export class cordnClient implements coordinatorClient {
-  static readonly DEFAULT_RELAYS = ["ws://localhost:10547"];
-  // static readonly DEFAULT_RELAYS = ["wss://relay.contextvm.org"];
+  static readonly DEFAULT_RELAYS = [...DEFAULT_RELAY_URLS];
   private readonly stableClient: Client;
   private readonly stableTransport: NostrClientTransport;
   private readonly stableConnected: Promise<void>;

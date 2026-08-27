@@ -138,6 +138,7 @@ export function formatGroupDetails(
   const group = session.getGroup(groupAlias);
   return [
     `alias=${formatGroupAlias(group.alias)}`,
+    `groupId=${session.deriveGroupId(group.state)}`,
     `coordinator=${formatFullCredentialLabel(group.coordinatorKey)}`,
     `cursor=${colorize(String(group.lastCursor), ansi.bold)}`,
     `messages=${colorize(String(group.messages.length), ansi.bold)}`,
@@ -208,9 +209,12 @@ export function printHelp(): void {
       "  leave",
       "  unwatch <groupAlias>",
       "  add-member <groupAlias> <stablePubkeyOrKeyPackageRef>",
+      "  remove-member <groupAlias> <stablePubkey>",
       "  fetch-welcomes [--coordinator <pubkey>]",
       "  welcomes",
       "  accept-welcome <welcomeIdOrKeyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
+      "  fetch-join-requests <groupAlias>",
+      "  request-join <gid> [keyPackageAlias] [--coordinator <pubkey>]",
       "  send <message...>    (uses selected group)",
       "  send-to <groupAlias> <message...>",
       "  send-media <filePath> [caption...]   (uses selected group; requires --media-dir)",

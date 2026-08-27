@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { stdout } from "node:process";
 import { dirname, resolve } from "node:path";
 
@@ -17,6 +18,12 @@ import { executeReplCommand, tokenizeInput } from "./replCommands.ts";
 import { processOutbox } from "./outbox.ts";
 import { enqueueInboundMessages } from "./inbox.ts";
 import { welcomeIdentifier } from "./sessionStore.ts";
+import { DEFAULT_COORDINATOR_PUBKEY, DEFAULT_RELAY_URLS } from "./defaults.ts";
+import { readCliDoc } from "./docs.ts";
+
+const { version: cliVersion } = createRequire(import.meta.url)(
+  "../package.json",
+) as { version: string };
 
 function readOptionalStringEnv(name: string): string | undefined {
   const value = process.env[name]?.trim();
@@ -46,35 +53,22 @@ function readDefaultCoordinatorPubkey(): string | undefined {
   return deriveStablePubkey(configured);
 }
 
-// Load optional .env then .env.local (first write wins; missing files are
-// ignored). Uses Node's native process.loadEnvFile (>= 20.12), which has
-// identical semantics to the former @cordn/core env helper.
-for (const file of [".env", ".env.local"]) {
-  try {
-    process.loadEnvFile(file);
-  } catch (err) {
-    if (
-      !(err instanceof Error) ||
-      (err as NodeJS.ErrnoException).code !== "ENOENT"
-    ) {
-      throw err;
-    }
-  }
-}
-
 const program = new Command();
 
 program
-  .name("cordn-cli")
+  .name("cordn")
   .description("Persistent MLS coordinator CLI")
+  .version(cliVersion)
   .option("--private-key <hex>", "hex private key for the client identity")
   .option("--private-key-file <path>", "file containing the client private key")
-  .option("--server-pubkey <hex>", "target ContextVM server public key")
+  .option(
+    "--server-pubkey <hex>",
+    `target ContextVM server public key (default: ${DEFAULT_COORDINATOR_PUBKEY})`,
+  )
   .option(
     "--relay <url>",
-    "relay URL to use",
-    (value, current: string[]) => [...current, value],
-    [],
+    `relay URL to use; repeatable (defaults: ${DEFAULT_RELAY_URLS.join(", ")})`,
+    (value, current?: string[]) => [...(current ?? []), value],
   )
   .option(
     "--media-dir <path>",
@@ -98,7 +92,48 @@ program
   .option(
     "--inbox-dir <path>",
     "write received group messages as atomic JSON jobs while in daemon mode",
+  )
+  .addHelpText(
+    "after",
+    "\nDocumentation:\n  cordn docs [topic]  print bundled quickstart, agent, daemon, queues, or security docs",
   );
+
+const cliArgs = process.argv.slice(2);
+if (cliArgs[0] === "docs") {
+  const topic = ["--help", "-h"].includes(cliArgs[1] ?? "")
+    ? undefined
+    : cliArgs[1];
+  try {
+    if (cliArgs.length > 2) throw new Error("usage: cordn docs [topic]");
+    const content = await readCliDoc(topic);
+    await new Promise<void>((resolve, reject) => {
+      stdout.write(
+        content.endsWith("\n") ? content : `${content}\n`,
+        (error) => (error ? reject(error) : resolve()),
+      );
+    });
+    process.exit(0);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+// Load optional .env then .env.local (first write wins; missing files are
+// ignored). Uses Node's native process.loadEnvFile (>= 20.12), which has
+// identical semantics to the former @cordn/core env helper.
+for (const file of [".env", ".env.local"]) {
+  try {
+    process.loadEnvFile(file);
+  } catch (err) {
+    if (
+      !(err instanceof Error) ||
+      (err as NodeJS.ErrnoException).code !== "ENOENT"
+    ) {
+      throw err;
+    }
+  }
+}
 
 program.parse();
 
@@ -106,7 +141,7 @@ const options = program.opts<{
   privateKey?: string;
   privateKeyFile?: string;
   serverPubkey?: string;
-  relay: string[];
+  relay?: string[];
   mediaDir?: string;
   stateFile?: string;
   stateKeyFile?: string;
@@ -199,12 +234,13 @@ try {
     serverPubkey:
       options.serverPubkey ??
       savedCoordinator?.serverPubkey ??
-      readDefaultCoordinatorPubkey(),
+      readDefaultCoordinatorPubkey() ??
+      DEFAULT_COORDINATOR_PUBKEY,
     relays:
-      options.relay.length > 0
+      options.relay && options.relay.length > 0
         ? options.relay
         : ((useSavedRelays ? savedCoordinator?.relays : undefined) ??
-          readDefaultRelayUrls()),
+          readDefaultRelayUrls() ?? [...DEFAULT_RELAY_URLS]),
     mediaStore: options.mediaDir
       ? new FileMediaStore(options.mediaDir)
       : undefined,

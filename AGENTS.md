@@ -25,9 +25,10 @@ Packages (`packages/*`):
   message cursors, storage backends). Server-only; clients never embed it.
 - [`@cordn/server`](packages/server/src/) — ContextVM/MCP server bindings over
   the coordinator and the runnable server entrypoint.
-- [`@cordn/cli`](packages/cli/src/) — terminal client (REPL + session model) and
-  integration helpers. A leaf consumer; depends on `@cordn/core` (and on
-  `@cordn/server` + `@cordn/test-utils` in its integration tests).
+- [`@cordn/cli`](packages/cli/src/) — published `cordn` terminal client (REPL +
+  session model), persistent daemon, and integration helpers. A leaf consumer;
+  depends on `@cordn/core` (and on `@cordn/server` + `@cordn/test-utils` in its
+  integration tests).
 - [`@cordn/test-utils`](packages/test-utils/src/) — shared test fixtures: MLS
   artifact builders (`testUtils.ts`) and the mock Nostr relay (`mockRelay.ts`).
   A `devDependency` of every package whose tests need fixtures.
@@ -55,6 +56,7 @@ Coordinator contract notes:
 - Start the CLI client: `pnpm run client:cli`
 - Type-check: `pnpm run typecheck`
 - Build the server bundle: `pnpm run build`
+- Build the published CLI bundle: `pnpm run build:cli`
 - Run all tests: `pnpm run test`
 - Format source files: `pnpm run format`
 
@@ -64,7 +66,7 @@ Coordinator contract notes:
 - Runtime: Node.js (≥20) — runs `.ts` source directly via type-stripping
 - Main server entrypoint: [`packages/server/src/main.ts`](packages/server/src/main.ts)
 - Public exports: each package's `src/index.ts` barrel (e.g. [`packages/core/src/index.ts`](packages/core/src/index.ts)); there is no single root barrel
-- Build output: `dist/` (server bundle only)
+- Build outputs: `dist/main.js` (server) and `packages/cli/dist/cli.js` (published CLI)
 
 Environment notes for the server:
 
@@ -102,8 +104,8 @@ Agent expectations:
 
 ## Build and deployment
 
-- Production build uses [`pnpm run build`](package.json) and bundles [`packages/server/src/main.ts`](packages/server/src/main.ts) with esbuild (`--packages=external`). esbuild follows the root `tsconfig.json` `paths`, so `@cordn/*` packages are **inlined from source** into `dist/main.js`; only npm dependencies remain external.
-- Output is written to `dist/`
+- [`pnpm run build`](package.json) bundles the server to `dist/main.js`; `pnpm run build:cli` bundles the npm CLI to `packages/cli/dist/cli.js`. The release script runs both through `pnpm run build:all`.
+- The server bundle follows the root `tsconfig.json` `paths`, so `@cordn/*` packages are **inlined from source**. The CLI keeps published `@cordn/core` external and bundles its own source.
 - There is no separate deployment automation in this repository; deployment is currently a manual server-start flow
 
 ## PR and change guidance

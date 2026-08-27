@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from "vitest";
 
 import {
   executeReplCommand,
+  knownCommands,
   parseCreateGroupArgs,
   parseUpdateGroupMetadataArgs,
 } from "./replCommands.ts";
@@ -214,6 +215,7 @@ describe("executeReplCommand", () => {
     });
 
     expect(listKeyPackageSummaries).toHaveBeenCalledOnce();
+    expect(knownCommands.has("kps")).toBe(true);
   });
 
   test("supports delete-kp", async () => {
