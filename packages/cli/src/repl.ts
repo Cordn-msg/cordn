@@ -15,6 +15,13 @@ import {
   printHelp,
 } from "./replFormat.ts";
 
+export function isReplAbort(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as NodeJS.ErrnoException).code === "ABORT_ERR"
+  );
+}
+
 export async function startCliRepl(
   session: CliSession,
   persist: () => Promise<void> = async () => undefined,
@@ -83,7 +90,13 @@ export async function startCliRepl(
     while (true) {
       renderPrompt();
       rl.setPrompt(currentPrompt);
-      const line = (await rl.question(currentPrompt)).trim();
+      let line: string;
+      try {
+        line = (await rl.question(currentPrompt)).trim();
+      } catch (error) {
+        if (isReplAbort(error)) return;
+        throw error;
+      }
 
       if (!line) {
         if (selectedGroupAlias) {

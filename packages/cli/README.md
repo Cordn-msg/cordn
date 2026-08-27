@@ -19,6 +19,7 @@ The package includes version-matched offline documentation. These commands do no
 ```sh
 cordn docs
 cordn docs quickstart
+cordn docs commands
 cordn docs agent
 cordn docs daemon
 cordn docs queues
@@ -70,6 +71,7 @@ Useful commands include:
 status
 whoami
 gen-kp [alias] [--last-resort] [--local-only]
+publish-kp <alias> [--coordinator <pubkey>]
 key-packages
 available-kps
 create-group <alias> [keyPackageAlias] [--watch]
@@ -88,7 +90,10 @@ sync-all
 watch-all
 messages [groupAlias]
 issues [groupAlias]
+exit | quit
 ```
+
+Run `cordn docs commands` for the complete version-matched command reference.
 
 After selecting a group with `use`, plain text sends a message and an empty line synchronizes it. `whoami` prints the private identity key; prefer `status` unless explicit export is intended.
 

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, test, vi } from "vitest";
@@ -96,6 +97,24 @@ describe("parseUpdateGroupMetadataArgs", () => {
     expect(() =>
       parseUpdateGroupMetadataArgs(["demo", "--description", "hello"]),
     ).toThrow(CliUsageError);
+  });
+});
+
+describe("REPL command catalog", () => {
+  test("matches every executable switch branch", async () => {
+    const source = await readFile(
+      new URL("./replCommands.ts", import.meta.url),
+      "utf8",
+    );
+    const start = source.indexOf("switch (command)");
+    const end = source.indexOf("    default: {", start);
+    const implemented = new Set(
+      [...source.slice(start, end).matchAll(/case \"([^\"]+)\"/g)].map(
+        (match) => match[1],
+      ),
+    );
+
+    expect(implemented).toEqual(knownCommands);
   });
 });
 
@@ -218,6 +237,26 @@ describe("executeReplCommand", () => {
     expect(knownCommands.has("kps")).toBe(true);
   });
 
+  test("publishes a previously local-only key package", async () => {
+    const output = new PassThrough();
+    const publishKeyPackage = vi.fn().mockResolvedValue({
+      alias: "alice-main",
+      keyPackageRef: "alice-ref",
+      publishedAt: 123,
+    });
+    const session = { publishKeyPackage } as never;
+
+    await executeReplCommand(
+      "publish-kp",
+      ["alice-main", "--coordinator", "coordinator-a"],
+      { session, output },
+    );
+
+    expect(publishKeyPackage).toHaveBeenCalledWith("alice-main", {
+      coordinatorKey: "coordinator-a",
+    });
+  });
+
   test("supports delete-kp", async () => {
     const output = new PassThrough();
     const deleteKeyPackage = vi.fn().mockResolvedValue({
@@ -261,6 +300,27 @@ describe("executeReplCommand", () => {
 
     expect(listAvailableKeyPackageSummaries).toHaveBeenCalledWith(
       "a".repeat(64),
+    );
+  });
+
+  test("does not treat request-join options as its key package alias", async () => {
+    const output = new PassThrough();
+    const storeJoinRequest = vi.fn().mockResolvedValue({
+      keyPackageRef: "alice-ref",
+      at: 123,
+    });
+    const session = { storeJoinRequest } as never;
+
+    await executeReplCommand(
+      "request-join",
+      ["group-id", "--coordinator", "coordinator-a", "alice-main"],
+      { session, output },
+    );
+
+    expect(storeJoinRequest).toHaveBeenCalledWith(
+      "group-id",
+      "alice-main",
+      "coordinator-a",
     );
   });
 

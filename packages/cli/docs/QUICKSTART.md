@@ -94,6 +94,7 @@ A newer re-invite refreshes the existing protocol group and retains its local al
 
 ## Next
 
+- `cordn docs commands`
 - `cordn docs agent`
 - `cordn docs daemon`
 - `cordn docs queues`

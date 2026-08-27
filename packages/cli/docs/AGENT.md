@@ -8,6 +8,7 @@ Use the CLI directly for bounded operations and its filesystem queues for a cont
 cordn --version
 cordn --help
 cordn docs
+cordn docs commands
 cordn docs queues
 ```
 

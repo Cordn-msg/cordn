@@ -95,7 +95,7 @@ program
   )
   .addHelpText(
     "after",
-    "\nDocumentation:\n  cordn docs [topic]  print bundled quickstart, agent, daemon, queues, or security docs",
+    "\nDocumentation:\n  cordn docs [topic]  print bundled quickstart, commands, agent, daemon, queues, or security docs",
   );
 
 const cliArgs = process.argv.slice(2);
@@ -385,6 +385,11 @@ try {
     }
     await durableQueue;
   } else {
+    if (!stateFile) {
+      console.error(
+        "warning: this session is ephemeral; restart with --state-file <path> to preserve identity and MLS state",
+      );
+    }
     await startCliRepl(activeSession, persist);
   }
 

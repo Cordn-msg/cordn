@@ -33,6 +33,7 @@ try {
   for (const required of [
     "package/dist/cli.js",
     "package/docs/AGENT.md",
+    "package/docs/COMMANDS.md",
     "package/README.md",
     "package/LICENSE",
   ]) {
@@ -74,6 +75,12 @@ try {
   });
   if (!agentDocs.startsWith("# Agent usage")) {
     throw new Error("installed CLI could not read bundled agent docs");
+  }
+  const { stdout: commandDocs } = await exec(executable, ["docs", "commands"], {
+    cwd: installDir,
+  });
+  if (!commandDocs.includes("publish-kp <alias>")) {
+    throw new Error("installed CLI command reference is incomplete");
   }
 
   const stateFile = join(installDir, "state", "session.json");

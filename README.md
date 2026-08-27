@@ -50,7 +50,7 @@ cordn docs quickstart
 
 A fresh client defaults to coordinator `92753cbe63e943d0c4a0c61d745437892af6e98f179ce04a7a863aad4e00b1a5` through `wss://relay.contextvm.org`, `wss://relay2.contextvm.org`, and `wss://relay.primal.net`. Override these with `--server-pubkey` and `--relay`.
 
-The package bundles offline quickstart, agent, daemon, queue, and security documentation through `cordn docs`.
+The package bundles offline quickstart, command reference, agent, daemon, queue, and security documentation through `cordn docs`.
 
 ## Run the server locally
 

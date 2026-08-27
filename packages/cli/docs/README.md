@@ -15,6 +15,7 @@ Override them with `--server-pubkey` and one or more `--relay` options. A persis
 
 ```sh
 cordn docs quickstart  # installation and first group
+cordn docs commands    # complete REPL and one-shot command reference
 cordn docs agent       # safe non-interactive and agent usage
 cordn docs daemon      # daemon lifecycle and recovery
 cordn docs queues      # inbox/outbox schemas and atomic file protocol

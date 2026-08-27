@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 
 const DOC_FILES = {
   quickstart: "QUICKSTART.md",
+  commands: "COMMANDS.md",
   agent: "AGENT.md",
   daemon: "DAEMON.md",
   queues: "QUEUES.md",
