@@ -7,7 +7,7 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@contextvm/mcp-sdk": "^1.30",
-    "@contextvm/sdk": "^0.13.10",
+    "@contextvm/sdk": "^0.13.11",
     "@cordn/coordinator": "workspace:*",
     "@cordn/core": "workspace:*",
     "nostr-tools": "^2.23.9",
