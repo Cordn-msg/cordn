@@ -1,5 +1,11 @@
 # @cordn/cli
 
+## 0.6.1
+
+### Patch Changes
+
+- d5bf583: Exit the interactive REPL cleanly on Ctrl+C, add the missing `publish-kp` command, fix option parsing for join requests, and keep command detection, help output, and bundled command documentation consistent from one catalog.
+
 ## 0.6.0
 
 ### Minor Changes
