@@ -14,6 +14,11 @@ export interface PendingEpochOperationBase {
    *  Used to match self-echos before decryption so the creator
    *  can confirm the operation even after adopting the new state. */
   postedMsgBase64?: string;
+  /** False while PostGroupMessage is unresolved. If a restart observes the
+   *  self-echo from this state, it must apply the Commit instead of assuming
+   *  the post-Commit ClientState was already adopted. Older snapshots omit it
+   *  and therefore retain the historical "already applied" behavior. */
+  localStateApplied?: boolean;
   status: PendingEpochOperationStatus;
 }
 
@@ -44,43 +49,17 @@ export interface PendingUpdateGroupMetadataOperation extends PendingEpochOperati
   kind: "update-group-metadata";
 }
 
-export interface PendingEpochOperationFinalizerContext {
-  client: cordnClient;
-}
-
-type PendingEpochOperationFinalizer = (
-  operation: PendingEpochOperation,
-  context: PendingEpochOperationFinalizerContext,
-) => Promise<void>;
-
-const pendingEpochOperationFinalizers: Record<
-  PendingEpochOperationKind,
-  PendingEpochOperationFinalizer
-> = {
-  "add-member": async (operation, context) => {
-    if (operation.kind !== "add-member") {
-      throw new Error("Expected add-member pending operation");
-    }
-
-    await context.client.StoreWelcome({
-      target_pk: operation.targetStablePubkey,
-      kp_ref: operation.keyPackageReference,
-      welcome_64: operation.welcomeBase64,
-      after: operation.joinAfterCursor,
-    });
-  },
-  // Remove commits require no coordinator-side finalization
-  // because there is no welcome to store.
-  "remove-member": async () => undefined,
-  // Metadata updates require no coordinator-side finalization.
-  "update-group-metadata": async () => undefined,
-};
-
 async function finalizePendingEpochOperation(
   operation: PendingEpochOperation,
-  context: PendingEpochOperationFinalizerContext,
+  client: cordnClient,
 ): Promise<void> {
-  await pendingEpochOperationFinalizers[operation.kind](operation, context);
+  if (operation.kind !== "add-member") return;
+  await client.StoreWelcome({
+    target_pk: operation.targetStablePubkey,
+    kp_ref: operation.keyPackageReference,
+    welcome_64: operation.welcomeBase64,
+    after: operation.joinAfterCursor,
+  });
 }
 
 function partitionPendingEpochOperations(
@@ -118,11 +97,11 @@ export async function confirmPendingEpochOperations(
     groupAlias: string;
     opaqueMessageBase64s: string[];
   },
-): Promise<void> {
+): Promise<number> {
   const pending = pendingEpochOperations.get(params.groupAlias);
 
   if (!pending || pending.length === 0) {
-    return;
+    return 0;
   }
 
   if (params.opaqueMessageBase64s.length > 0) {
@@ -136,50 +115,23 @@ export async function confirmPendingEpochOperations(
     }
   }
 
-  const remaining: PendingEpochOperation[] = [];
-
-  for (const operation of pending) {
-    if (operation.status === "confirmed") {
-      await finalizePendingEpochOperation(operation, { client });
-      continue;
+  let finalized = 0;
+  for (const operation of [...pending]) {
+    if (operation.status !== "confirmed") continue;
+    await finalizePendingEpochOperation(operation, client);
+    // Commit each successful finalizer immediately. If a later Welcome fails,
+    // retry only that one rather than duplicating records already stored.
+    const remaining = (
+      pendingEpochOperations.get(params.groupAlias) ?? []
+    ).filter((candidate) => candidate !== operation);
+    if (remaining.length === 0) {
+      pendingEpochOperations.delete(params.groupAlias);
+    } else {
+      pendingEpochOperations.set(params.groupAlias, remaining);
     }
-
-    remaining.push(operation);
+    finalized += 1;
   }
-
-  if (remaining.length === 0) {
-    pendingEpochOperations.delete(params.groupAlias);
-    return;
-  }
-
-  pendingEpochOperations.set(params.groupAlias, remaining);
-}
-
-export function markPendingEpochOperationsConfirmed(
-  pendingEpochOperations: Map<string, PendingEpochOperation[]>,
-  params: {
-    groupAlias: string;
-    opaqueMessageBase64s: string[];
-  },
-): void {
-  const pending = pendingEpochOperations.get(params.groupAlias);
-
-  if (
-    !pending ||
-    pending.length === 0 ||
-    params.opaqueMessageBase64s.length === 0
-  ) {
-    return;
-  }
-
-  const { matched } = partitionPendingEpochOperations(
-    pending,
-    params.opaqueMessageBase64s,
-  );
-
-  for (const operation of matched) {
-    operation.status = "confirmed";
-  }
+  return finalized;
 }
 
 export function getPendingEpochOperation(
@@ -198,13 +150,29 @@ export function getPendingEpochOperation(
   );
 }
 
-export async function rejectPendingEpochOperations(
+export function dropPendingAddMemberForTarget(
+  pendingEpochOperations: Map<string, PendingEpochOperation[]>,
+  groupAlias: string,
+  targetStablePubkey: string,
+): void {
+  const pending = pendingEpochOperations.get(groupAlias);
+  if (!pending?.length) return;
+  const remaining = pending.filter(
+    (operation) =>
+      operation.kind !== "add-member" ||
+      operation.targetStablePubkey !== targetStablePubkey,
+  );
+  if (remaining.length === 0) pendingEpochOperations.delete(groupAlias);
+  else pendingEpochOperations.set(groupAlias, remaining);
+}
+
+export function rejectPendingEpochOperations(
   pendingEpochOperations: Map<string, PendingEpochOperation[]>,
   params: {
     groupAlias: string;
     opaqueMessageBase64s: string[];
   },
-): Promise<void> {
+): void {
   const pending = pendingEpochOperations.get(params.groupAlias);
 
   if (

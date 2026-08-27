@@ -27,14 +27,19 @@ The default mode is an interactive REPL. A single command can also be run
 non-interactively:
 
 ```sh
-pnpm run client:cli -- --private-key-file ./client.key --command "groups"
+pnpm run client:cli -- --server-pubkey <hex> --state-file ./state/session.json --command "groups"
 ```
 
 ### Persistent writer mode
 
 The CLI can persist its identity, KeyPackages, Welcome records, MLS group
-state, cursors, and local message history in an AES-256-GCM encrypted file.
-The encryption key is created with mode `0600` when it does not exist.
+state, cursors, local message history, pending epoch operations, coordinator
+routing, and acknowledgement state in an AES-256-GCM encrypted file. The
+hex-encoded 32-byte encryption key is created with mode `0600` when it does
+not exist. Startup fails if `--private-key`/`--private-key-file` conflicts with
+the stored identity. A state file is exclusively locked while in use: send
+work to a running daemon through its outbox instead of starting a second CLI
+against the same snapshot.
 
 ```sh
 pnpm run client:cli -- \
@@ -47,35 +52,41 @@ pnpm run client:cli -- \
   --inbox-dir ./inbox
 ```
 
-Daemon mode periodically fetches matching Welcomes, keeps joined groups in
-sync, and processes JSON outbox files in lexical filename order. Each job has
+Daemon mode requires `--state-file`, periodically fetches matching Welcomes,
+keeps joined groups in sync, and processes JSON outbox files in lexical
+filename order. Each job has
 this shape:
 
 ```json
 { "groupAlias": "office", "message": "hello" }
 ```
 
-`groupAlias` may be omitted when `--group-alias` supplies a default. A job is
-removed only after the coordinator accepts the message and the updated MLS
-state has been persisted; failed jobs are returned to the queue for retry.
-Run the daemon under the host's service manager when automatic restart is
-required.
+`groupAlias` may be omitted when `--group-alias` supplies a default. Use
+dedicated, separate inbox/outbox directories and never place state/key files
+in either queue. Producers must write to a non-`.json` temporary file and atomically
+rename it into the outbox when complete. A job is removed only after the coordinator accepts the
+message and the updated MLS state has been persisted; transient send failures
+are returned to the queue for retry, while malformed jobs are renamed to
+`<name>.json.invalid` so they cannot block later jobs. Jobs left behind as
+`<name>.json.processing` by a crash are adopted on the next pass. Delivery is
+at-least-once: a crash between send and removal can resend a job. Run the
+daemon under the host's service manager when automatic restart is required.
 
 With `--inbox-dir`, decrypted inbound group messages are written as atomic JSON
 jobs containing `groupAlias`, `cursor`, `sender`, `id`, `createdAt`, and
-`content`. Consumers can rename and remove these files after processing.
+`content`. Inbox delivery is also at-least-once: consumers should deduplicate by
+`groupAlias` + `cursor` + `id`, then rename and remove files after processing.
 
 Useful commands:
 
 - `gen-kp [alias]`
 - `key-packages` — inspect local key packages, including publish/consume state and metadata-extension support
-- `publish-kp <alias>`
 - `available-kps` — inspect coordinator-published key packages
 - `create-group <alias> [keyPackageAlias] [--watch]`
 - `create-group <alias> [keyPackageAlias] --name "Demo" --description "Shared group" --icon "🧵" --image-url "https://example.com/group.png"`
 - `update-group-metadata <groupAlias> --name "Demo" [--description "Shared group"] [--icon "🧵"] [--image-url "https://example.com/group.png"] [--admin <hex>]...`
 - `group <groupAlias> [--watch]`
-- `accept-welcome <keyPackageReference> [groupAlias] [--watch]`
+- `accept-welcome <welcomeIdOrKeyPackageReference> [groupAlias] [--watch]` — use the displayed `<coordinator>:<kp_ref>:<at>` ID when a reusable last-resort KeyPackage has multiple Welcomes
 - `groups` — compact list of joined groups, shared metadata, and watch status
 - `group-info [groupAlias]` — inspect one joined group's shared metadata and local state counters
 - `watch-all` — start background subscriptions for all joined groups
@@ -91,12 +102,12 @@ Useful commands:
 
 ## Notes
 
-- Group aliases are local convenience labels.
+- Group aliases are local convenience labels. A newer re-invite refreshes the existing group state and keeps its alias instead of creating a duplicate group ID.
 - Shared group presentation metadata is carried in MLS state through [`groupMetadata.ts`](src/groupMetadata.ts).
 - Key packages advertise support for the shared metadata extension, but they do not contain a group's actual shared metadata values.
 - Watching keeps a CEP-41 subscription alive in the background so watched groups stay locally synchronized without repeated bounded fetches.
 - Live messages are rendered immediately when a watched group is currently selected in the REPL.
-- This client is intentionally small and focused on development workflows rather than polished end-user UX.
+- This client is intentionally small and focused on reference/agent workflows rather than polished end-user UX.
 
 ## Encrypted media
 

@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -10,6 +10,7 @@ export async function enqueueInboundMessages(
   messages: StoredMessage[],
 ): Promise<void> {
   await mkdir(inboxDir, { recursive: true, mode: 0o700 });
+  let wrote = false;
   for (const message of messages.filter(
     (item) => item.direction === "inbound",
   )) {
@@ -26,8 +27,17 @@ export async function enqueueInboundMessages(
         id: message.id,
         content: message.content,
       })}\n`,
-      { mode: 0o600 },
+      { mode: 0o600, flush: true },
     );
     await rename(temporaryPath, finalPath);
+    wrote = true;
+  }
+  if (wrote) {
+    const directory = await open(inboxDir, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   }
 }

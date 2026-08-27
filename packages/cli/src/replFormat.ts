@@ -210,7 +210,7 @@ export function printHelp(): void {
       "  add-member <groupAlias> <stablePubkeyOrKeyPackageRef>",
       "  fetch-welcomes [--coordinator <pubkey>]",
       "  welcomes",
-      "  accept-welcome <keyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
+      "  accept-welcome <welcomeIdOrKeyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
       "  send <message...>    (uses selected group)",
       "  send-to <groupAlias> <message...>",
       "  send-media <filePath> [caption...]   (uses selected group; requires --media-dir)",

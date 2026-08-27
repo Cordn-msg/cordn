@@ -107,7 +107,11 @@ export async function ingestGroupMessages(params: {
     );
     const isPendingOperationMessage = pendingOperation !== undefined;
 
-    if (isPendingOperationMessage) {
+    // Normal pending ops already adopted the post-Commit state immediately
+    // after posting, so their self-echo is confirmation only. A snapshot taken
+    // while posting records `localStateApplied: false`; that echo must actually
+    // apply the Commit to recover the state after restart.
+    if (pendingOperation && pendingOperation.localStateApplied !== false) {
       group.fetchCursor = message.cursor;
       group.lastCursor = Math.max(group.lastCursor, message.cursor);
       appliedPendingCommitMessages.add(message.opaqueMessageBase64);
@@ -160,6 +164,7 @@ export async function ingestGroupMessages(params: {
           pendingOperation !== undefined &&
           (isRemovedMemberCommitIssue(detail) || isFormerEpochIssue(detail))
         ) {
+          pendingOperation.localStateApplied = true;
           appliedPendingCommitMessages.add(message.opaqueMessageBase64);
         } else if (
           isRemovedMemberCommitIssue(detail) &&
@@ -272,15 +277,15 @@ export async function ingestGroupMessages(params: {
     group.fetchCursor = message.cursor;
     group.lastCursor = Math.max(group.lastCursor, message.cursor);
 
-    if (isPendingOperationMessage) {
-      appliedPendingCommitMessages.add(message.opaqueMessageBase64);
-    }
-
     if (processed.kind !== "newState") {
       continue;
     }
 
     group.state = processed.newState;
+    if (pendingOperation) {
+      pendingOperation.localStateApplied = true;
+      appliedPendingCommitMessages.add(message.opaqueMessageBase64);
+    }
     group.metadata = getCordnGroupMetadataExtension(processed.newState);
 
     if (

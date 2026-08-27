@@ -56,4 +56,74 @@ describe("persistent outbox", () => {
     });
     expect(await readdir(directory)).toEqual(["001.json"]);
   });
+
+  test("quarantines invalid jobs without blocking later jobs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cordn-outbox-"));
+    await writeFile(join(directory, "001.json"), "null");
+    await writeFile(
+      join(directory, "002.json"),
+      JSON.stringify({ groupAlias: "office", message: 42 }),
+    );
+    await writeFile(
+      join(directory, "003.json"),
+      JSON.stringify({ groupAlias: 42, message: "wrong target" }),
+    );
+    await writeFile(
+      join(directory, "004.json"),
+      JSON.stringify({ groupAlias: "office", message: "ok" }),
+    );
+    const sendMessage = vi.fn().mockResolvedValue({ cursor: 1 });
+
+    await processOutbox(directory, { sendMessage }, {});
+
+    expect(sendMessage.mock.calls).toEqual([["office", "ok"]]);
+    expect(await readdir(directory)).toEqual([
+      "001.json.invalid",
+      "002.json.invalid",
+      "003.json.invalid",
+    ]);
+  });
+
+  test("finishes an orphan before a new job reusing its base name", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cordn-outbox-"));
+    await writeFile(
+      join(directory, "001.json.processing"),
+      JSON.stringify({ message: "orphan" }),
+    );
+    await writeFile(
+      join(directory, "001.json"),
+      JSON.stringify({ message: "new" }),
+    );
+    const sendMessage = vi.fn().mockResolvedValue({ cursor: 4 });
+
+    await processOutbox(
+      directory,
+      { sendMessage },
+      { defaultGroupAlias: "office" },
+    );
+
+    expect(sendMessage.mock.calls).toEqual([
+      ["office", "orphan"],
+      ["office", "new"],
+    ]);
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  test("adopts a job orphaned mid-processing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cordn-outbox-"));
+    await writeFile(
+      join(directory, "001.json.processing"),
+      JSON.stringify({ message: "resumed" }),
+    );
+    const sendMessage = vi.fn().mockResolvedValue({ cursor: 4 });
+
+    await processOutbox(
+      directory,
+      { sendMessage },
+      { defaultGroupAlias: "office" },
+    );
+
+    expect(sendMessage.mock.calls).toEqual([["office", "resumed"]]);
+    expect(await readdir(directory)).toEqual([]);
+  });
 });

@@ -34,6 +34,16 @@ export async function startCliRepl(
     rl.prompt(true);
   };
 
+  const persistSafely = async (): Promise<void> => {
+    try {
+      await persist();
+    } catch (error) {
+      output.write(
+        `${colorize(`state save failed: ${error instanceof Error ? error.message : String(error)}`, ansi.red)}\n`,
+      );
+    }
+  };
+
   const unsubscribeWatchEvents = session.onGroupEvent((event) => {
     if (event.groupAlias !== selectedGroupAlias) {
       return;
@@ -86,6 +96,8 @@ export async function startCliRepl(
             output.write(
               `${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`,
             );
+          } finally {
+            await persistSafely();
           }
         }
         continue;
@@ -97,12 +109,13 @@ export async function startCliRepl(
       if (selectedGroupAlias && !knownCommands.has(command)) {
         try {
           const stored = await session.sendMessage(selectedGroupAlias, line);
-          await persist();
           output.write(`sent cursor=${stored.cursor}\n`);
         } catch (error) {
           output.write(
             `${error instanceof Error ? error.message : String(error)}\n`,
           );
+        } finally {
+          await persistSafely();
         }
         continue;
       }
@@ -115,7 +128,6 @@ export async function startCliRepl(
         });
 
         selectedGroupAlias = result.selectedGroupAlias;
-        await persist();
         renderPrompt();
 
         if (result.shouldExit) {
@@ -125,6 +137,8 @@ export async function startCliRepl(
         output.write(
           `${colorize(error instanceof Error ? error.message : String(error), ansi.red)}\n`,
         );
+      } finally {
+        await persistSafely();
       }
     }
   } finally {

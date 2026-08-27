@@ -307,8 +307,11 @@ describe("Coordinator welcome flow", () => {
     ).toHaveLength(0);
   });
 
-  test("consumed ack retires a welcome atomically on fetch", async () => {
-    const coordinator = new Coordinator({ cleanupIntervalMs: 0 });
+  test("StoreWelcome retries are idempotent", async () => {
+    const coordinator = new Coordinator({
+      cleanupIntervalMs: 0,
+      now: () => 100,
+    });
     const alice = await createMemberArtifacts(createActor("alice-unit"));
     const bob = await createMemberArtifacts(createActor("bob-unit"));
     const cipherSuite = await getTestCiphersuite();
@@ -323,34 +326,67 @@ describe("Coordinator welcome flow", () => {
       member: bob,
     });
 
-    coordinator.storeWelcome({
-      targetStablePubkey: bob.actor.stablePubkey,
-      keyPackageReference: fixture.keyPackageRefHex,
-      welcome: fixture.welcome,
-    });
+    for (let index = 0; index < 2; index += 1) {
+      coordinator.storeWelcome({
+        targetStablePubkey: bob.actor.stablePubkey,
+        keyPackageReference: fixture.keyPackageRefHex,
+        welcome: fixture.welcome,
+      });
+    }
 
-    const observed = coordinator.fetchPendingWelcomes(
-      bob.actor.stablePubkey,
-    )[0]!;
+    const observed = coordinator.fetchPendingWelcomes(bob.actor.stablePubkey);
+    expect(observed).toHaveLength(1);
+    expect(observed[0]?.createdAt).toBe(100);
 
-    // Ack the observed welcome; it is retired and not echoed back.
-    const after = coordinator.fetchPendingWelcomes(bob.actor.stablePubkey, [
-      {
-        keyPackageReference: observed.keyPackageReference,
-        createdAt: observed.createdAt,
-      },
-    ]);
-    expect(after).toHaveLength(0);
-
-    // Re-acking an unknown ref is a no-op (idempotent).
     expect(
       coordinator.fetchPendingWelcomes(bob.actor.stablePubkey, [
         {
-          keyPackageReference: observed.keyPackageReference,
-          createdAt: observed.createdAt,
+          keyPackageReference: observed[0]!.keyPackageReference,
+          createdAt: observed[0]!.createdAt,
         },
       ]),
     ).toHaveLength(0);
+  });
+
+  test("same-millisecond last-resort Welcomes get distinct consumed refs", async () => {
+    const coordinator = new Coordinator({
+      cleanupIntervalMs: 0,
+      now: () => 100,
+    });
+    const alice = await createMemberArtifacts(createActor("alice-unit"));
+    const bob = await createMemberArtifacts(createActor("bob-unit"), {
+      lastResort: true,
+    });
+    const cipherSuite = await getTestCiphersuite();
+    const makeFixture = async (groupId: string) =>
+      createWelcomeForNewMember({
+        senderState: await createGroup({
+          context: {
+            cipherSuite,
+            authService: unsafeTestingAuthenticationService,
+          },
+          groupId: new TextEncoder().encode(groupId),
+          keyPackage: alice.keyPackage,
+          privateKeyPackage: alice.privateKeyPackage,
+        }),
+        member: bob,
+      });
+    const first = await makeFixture("last-resort-one");
+    const second = await makeFixture("last-resort-two");
+
+    for (const fixture of [first, second]) {
+      coordinator.storeWelcome({
+        targetStablePubkey: bob.actor.stablePubkey,
+        keyPackageReference: fixture.keyPackageRefHex,
+        welcome: fixture.welcome,
+      });
+    }
+
+    expect(
+      coordinator
+        .fetchPendingWelcomes(bob.actor.stablePubkey)
+        .map((record) => record.createdAt),
+    ).toEqual([100, 101]);
   });
 
   test("does not delete welcomes regardless of age when maxAgeMs is disabled (0)", async () => {
@@ -747,6 +783,37 @@ describe("Coordinator join request flow", () => {
     ]);
     expect(after).toHaveLength(1);
     expect(after[0]?.requesterStablePubkey).toBe("bob-requester");
+  });
+
+  test("same-requester join requests get distinct consumed refs", () => {
+    const coordinator = new Coordinator({
+      cleanupIntervalMs: 0,
+      now: () => 100,
+    });
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-1",
+    });
+    coordinator.storeJoinRequest({
+      groupId: "group-alpha",
+      requesterStablePubkey: "alice-requester",
+      keyPackageRef: "kp-ref-2",
+    });
+
+    const observed = coordinator.fetchPendingJoinRequests("group-alpha");
+    expect(observed).toEqual([
+      expect.objectContaining({ keyPackageRef: "kp-ref-2", createdAt: 101 }),
+    ]);
+    // An ack captured for the previous request cannot consume the refresh.
+    expect(
+      coordinator.fetchPendingJoinRequests("group-alpha", [
+        {
+          requesterStablePubkey: "alice-requester",
+          createdAt: 100,
+        },
+      ]),
+    ).toEqual(observed);
   });
 
   test("consumed ack retires join requests across groups via fetchMany", () => {

@@ -125,6 +125,45 @@ describe("ingestGroupMessages", () => {
     expect(group.lastCursor).toBe(7);
   });
 
+  test("applies a pending Commit restored before local state adoption", async () => {
+    const group = createGroupState();
+    const newState = {
+      groupActiveState: { kind: "active" },
+    } as unknown as GroupSessionState["state"];
+    const pending = {
+      kind: "update-group-metadata" as const,
+      groupAlias: "demo",
+      groupId: "gid",
+      commitMessageBase64: "pending-commit",
+      localStateApplied: false,
+      status: "pending" as const,
+    };
+    processMessageBase64.mockResolvedValueOnce({
+      kind: "newState",
+      newState,
+    });
+
+    const result = await ingestGroupMessages({
+      group,
+      messages: [
+        {
+          cursor: 8,
+          createdAt: 80,
+          opaqueMessageBase64: "pending-commit",
+        },
+      ],
+      getPendingEpochOperation: () => pending,
+      localStablePubkey: "alice",
+    });
+
+    expect(processMessageBase64).toHaveBeenCalledOnce();
+    expect(group.state).toBe(newState);
+    expect(pending.localStateApplied).toBe(true);
+    expect(result.appliedPendingCommitMessages).toEqual(
+      new Set(["pending-commit"]),
+    );
+  });
+
   test("records stale-epoch issues and advances fetch progress", async () => {
     const group = createGroupState();
 

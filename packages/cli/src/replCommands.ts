@@ -22,6 +22,7 @@ import {
   printHelp,
 } from "./replFormat.ts";
 import { CliUsageError, UnknownCommandError } from "./sessionErrors.ts";
+import { welcomeIdentifier } from "./sessionStore.ts";
 
 export const knownCommands = new Set([
   "help",
@@ -473,13 +474,13 @@ export async function executeReplCommand(
         parseCoordinatorOption(args),
       );
       output.write(
-        `${formatList(welcomes.map((welcome) => `${formatWelcomeKeyPackageReference(welcome.kp_ref)} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)}`))}\n`,
+        `${formatList(welcomes.map((welcome) => `${formatWelcomeKeyPackageReference(welcomeIdentifier(welcome))} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)} at=${welcome.at}`))}\n`,
       );
       break;
     }
     case "welcomes": {
       output.write(
-        `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeKeyPackageReference(welcome.kp_ref)} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)}`))}\n`,
+        `${formatList(session.listWelcomes().map((welcome) => `${formatWelcomeKeyPackageReference(welcomeIdentifier(welcome))} keyPackageRef=${formatKeyPackageRef(welcome.kp_ref)} at=${welcome.at}`))}\n`,
       );
       break;
     }
@@ -527,7 +528,7 @@ export async function executeReplCommand(
     case "accept-welcome": {
       if (!positionalArgs[0]) {
         throw new CliUsageError(
-          "Usage: accept-welcome <keyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
+          "Usage: accept-welcome <welcomeIdOrKeyPackageReference> [groupAlias] [--coordinator <pubkey>] [--watch]",
         );
       }
       const group = await session.acceptWelcome(

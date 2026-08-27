@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import { loadEncryptedState, saveEncryptedState } from "./localState.ts";
+import {
+  acquireStateLock,
+  loadEncryptedState,
+  saveEncryptedState,
+} from "./localState.ts";
 
 describe("encrypted local state", () => {
   test("round-trips state without storing plaintext and protects the key", async () => {
@@ -33,12 +37,24 @@ describe("encrypted local state", () => {
     await expect(loadEncryptedState(statePath, keyPath)).rejects.toThrow();
   });
 
-  test("supports concurrent atomic saves", async () => {
+  test("captures mutable input before yielding", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cordn-state-"));
+    const statePath = join(directory, "session.json");
+    const keyPath = join(directory, "session.key");
+    const value = { cursor: 1 };
+
+    const saving = saveEncryptedState(statePath, keyPath, value);
+    value.cursor = 2;
+    await saving;
+
+    expect(await loadEncryptedState(statePath, keyPath)).toEqual({ cursor: 1 });
+  });
+
+  test("supports concurrent first saves with one atomic key", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cordn-state-"));
     const statePath = join(directory, "session.json");
     const keyPath = join(directory, "session.key");
 
-    await saveEncryptedState(statePath, keyPath, { cursor: -1 });
     await Promise.all(
       Array.from({ length: 10 }, (_, cursor) =>
         saveEncryptedState(statePath, keyPath, { cursor }),
@@ -51,5 +67,19 @@ describe("encrypted local state", () => {
     );
     expect(restored?.cursor).toBeGreaterThanOrEqual(0);
     expect(restored?.cursor).toBeLessThan(10);
+  });
+
+  test("allows only one process writer per state file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cordn-state-"));
+    const statePath = join(directory, "session.json");
+    const release = await acquireStateLock(statePath);
+
+    await expect(acquireStateLock(statePath)).rejects.toThrow(
+      `state file is already in use by pid ${process.pid}`,
+    );
+    await release();
+
+    const releaseAgain = await acquireStateLock(statePath);
+    await releaseAgain();
   });
 });

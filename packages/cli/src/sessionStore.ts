@@ -6,6 +6,7 @@ import type {
 import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
 import type { ConsumedJoinRequestRef, ConsumedWelcomeRef } from "@cordn/core";
 import {
+  AmbiguousWelcomeReferenceError,
   DuplicateGroupAliasError,
   DuplicateKeyPackageAliasError,
   UnknownGroupAliasError,
@@ -13,14 +14,32 @@ import {
   UnknownWelcomeReferenceError,
 } from "./sessionErrors.ts";
 
-const MAX_ACCEPTED_WELCOME_REFS = 1000;
+const MAX_ACCEPTED_WELCOME_IDS = 1000;
 
 function welcomeAckKey(ref: ConsumedWelcomeRef): string {
   return `${ref.keyPackageReference}@${ref.createdAt}`;
 }
 
+/** Stable identifier accepted by CLI commands. `kp_ref` remains accepted when
+ *  it identifies exactly one pending Welcome. */
+export function welcomeIdentifier(
+  welcome: Pick<StoredWelcome, "coordinatorKey" | "kp_ref" | "at">,
+): string {
+  return `${welcome.coordinatorKey?.toLowerCase() ?? "default"}:${welcome.kp_ref}:${welcome.at}`;
+}
+
+function welcomeStorageKey(
+  welcome: Pick<StoredWelcome, "coordinatorKey" | "kp_ref" | "at">,
+): string {
+  return welcomeIdentifier(welcome);
+}
+
 function joinAckKey(ref: ConsumedJoinRequestRef): string {
   return `${ref.requesterStablePubkey}@${ref.createdAt}`;
+}
+
+export interface FetchedJoinRequestRef extends ConsumedJoinRequestRef {
+  keyPackageReference: string;
 }
 
 /** A capped Set that evicts the oldest entry when the cap is exceeded. */
@@ -35,6 +54,11 @@ class CappedRefSet {
 
   has(ref: string): boolean {
     return this.refs.has(ref);
+  }
+
+  /** Insertion-ordered contents, oldest first. */
+  values(): string[] {
+    return [...this.insertionOrder];
   }
 
   add(ref: string): void {
@@ -57,20 +81,19 @@ class CappedRefSet {
 export class CliSessionStore {
   private readonly keyPackages = new Map<string, StoredKeyPackage>();
   private readonly welcomes = new Map<string, StoredWelcome>();
-  private readonly acceptedWelcomeRefs = new CappedRefSet(
-    MAX_ACCEPTED_WELCOME_REFS,
+  private readonly acceptedWelcomeIds = new CappedRefSet(
+    MAX_ACCEPTED_WELCOME_IDS,
   );
-  /** Welcomes accepted locally (joined), awaiting the next fetch's
-   *  `consumed` ack to retire them on the coordinator. */
+  /** Accepted Welcomes awaiting a coordinator-scoped `consumed` ack. */
   private readonly pendingConsumedWelcomes = new Map<
     string,
-    ConsumedWelcomeRef
+    Map<string, ConsumedWelcomeRef>
   >();
-  /** Join requests seen via the last fetch, keyed by groupId then requester
-   *  pk, so addMember can resolve the `createdAt` to ack once handled. */
+  /** Join requests seen via the last fetch, including the kp ref needed to
+   *  match the exact request consumed by addMember. */
   private readonly fetchedJoinRequestsByGroup = new Map<
     string,
-    Map<string, ConsumedJoinRequestRef>
+    Map<string, FetchedJoinRequestRef>
   >();
   /** Join requests handled locally (admin added/rejected), awaiting the next
    *  fetch's `consumed` ack, keyed by groupId then ack key. */
@@ -150,42 +173,43 @@ export class CliSessionStore {
   }
 
   putWelcome(welcome: StoredWelcome): void {
-    // Skip re-adding welcomes whose key package reference was already
-    // accepted (deleted after joining the group).
-    if (this.acceptedWelcomeRefs.has(welcome.kp_ref)) {
-      return;
-    }
-
-    this.welcomes.set(welcome.kp_ref, welcome);
+    const key = welcomeStorageKey(welcome);
+    if (this.acceptedWelcomeIds.has(key)) return;
+    this.welcomes.set(key, welcome);
   }
 
-  hasWelcome(keyPackageReference: string): boolean {
-    return (
-      this.welcomes.has(keyPackageReference) ||
-      this.acceptedWelcomeRefs.has(keyPackageReference)
+  hasWelcome(welcome: StoredWelcome): boolean {
+    const key = welcomeStorageKey(welcome);
+    return this.welcomes.has(key) || this.acceptedWelcomeIds.has(key);
+  }
+
+  getWelcome(identifier: string): StoredWelcome {
+    const matches = this.listWelcomes().filter(
+      (welcome) =>
+        welcomeIdentifier(welcome) === identifier ||
+        welcome.kp_ref === identifier,
     );
+    if (matches.length > 1) {
+      throw new AmbiguousWelcomeReferenceError(identifier);
+    }
+    if (!matches[0]) {
+      throw new UnknownWelcomeReferenceError(identifier);
+    }
+    return matches[0];
   }
 
-  getWelcome(keyPackageReference: string): StoredWelcome {
-    const welcome = this.welcomes.get(keyPackageReference);
-
-    if (!welcome) {
-      throw new UnknownWelcomeReferenceError(keyPackageReference);
-    }
-
-    return welcome;
+  deleteWelcome(identifier: string, coordinatorKey: string): void {
+    this.retireWelcome(this.getWelcome(identifier), coordinatorKey);
   }
 
-  deleteWelcome(keyPackageReference: string): void {
-    const welcome = this.welcomes.get(keyPackageReference);
-    if (welcome) {
-      this.queueConsumedWelcome({
-        keyPackageReference,
-        createdAt: welcome.at,
-      });
-    }
-    this.welcomes.delete(keyPackageReference);
-    this.acceptedWelcomeRefs.add(keyPackageReference);
+  retireWelcome(welcome: StoredWelcome, coordinatorKey: string): void {
+    const key = welcomeStorageKey(welcome);
+    this.queueConsumedWelcome(coordinatorKey, {
+      keyPackageReference: welcome.kp_ref,
+      createdAt: welcome.at,
+    });
+    this.welcomes.delete(key);
+    this.acceptedWelcomeIds.add(key);
   }
 
   listGroups(): GroupSessionState[] {
@@ -234,40 +258,71 @@ export class CliSessionStore {
     return this.pendingEpochOperations;
   }
 
-  queueConsumedWelcome(ref: ConsumedWelcomeRef): void {
-    this.pendingConsumedWelcomes.set(welcomeAckKey(ref), ref);
-  }
-
-  peekConsumedWelcomes(): ConsumedWelcomeRef[] {
-    return [...this.pendingConsumedWelcomes.values()];
-  }
-
-  clearConsumedWelcomes(refs: ConsumedWelcomeRef[]): void {
-    for (const ref of refs) {
-      this.pendingConsumedWelcomes.delete(welcomeAckKey(ref));
+  queueConsumedWelcome(coordinatorKey: string, ref: ConsumedWelcomeRef): void {
+    let bucket = this.pendingConsumedWelcomes.get(coordinatorKey);
+    if (!bucket) {
+      bucket = new Map();
+      this.pendingConsumedWelcomes.set(coordinatorKey, bucket);
     }
+    bucket.set(welcomeAckKey(ref), ref);
   }
 
-  /** Replace the cached pending join requests for a group with the result of
-   *  the latest fetch. */
-  setFetchedJoinRequests(
-    groupId: string,
-    refs: ConsumedJoinRequestRef[],
+  listAcceptedWelcomeIds(): string[] {
+    return this.acceptedWelcomeIds.values();
+  }
+
+  peekConsumedWelcomes(coordinatorKey: string): ConsumedWelcomeRef[] {
+    return [
+      ...(this.pendingConsumedWelcomes.get(coordinatorKey)?.values() ?? []),
+    ];
+  }
+
+  listPendingConsumedWelcomes(): Record<string, ConsumedWelcomeRef[]> {
+    return Object.fromEntries(
+      [...this.pendingConsumedWelcomes.entries()].map(([key, bucket]) => [
+        key,
+        [...bucket.values()],
+      ]),
+    );
+  }
+
+  clearConsumedWelcomes(
+    coordinatorKey: string,
+    refs: ConsumedWelcomeRef[],
   ): void {
-    const byPk = new Map<string, ConsumedJoinRequestRef>();
-    for (const ref of refs) {
-      byPk.set(ref.requesterStablePubkey, ref);
-    }
-    this.fetchedJoinRequestsByGroup.set(groupId, byPk);
+    const bucket = this.pendingConsumedWelcomes.get(coordinatorKey);
+    if (!bucket) return;
+    for (const ref of refs) bucket.delete(welcomeAckKey(ref));
+    if (bucket.size === 0) this.pendingConsumedWelcomes.delete(coordinatorKey);
+  }
+
+  setFetchedJoinRequests(groupId: string, refs: FetchedJoinRequestRef[]): void {
+    this.fetchedJoinRequestsByGroup.set(
+      groupId,
+      new Map(refs.map((ref) => [joinAckKey(ref), ref])),
+    );
   }
 
   findFetchedJoinRequest(
     groupId: string,
     requesterStablePubkey: string,
+    keyPackageReference: string,
   ): ConsumedJoinRequestRef | undefined {
-    return this.fetchedJoinRequestsByGroup
-      .get(groupId)
-      ?.get(requesterStablePubkey);
+    return [...(this.fetchedJoinRequestsByGroup.get(groupId)?.values() ?? [])]
+      .filter(
+        (ref) =>
+          ref.requesterStablePubkey === requesterStablePubkey &&
+          ref.keyPackageReference === keyPackageReference,
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+  }
+
+  listFetchedJoinRequests(): Record<string, FetchedJoinRequestRef[]> {
+    return Object.fromEntries(
+      [...this.fetchedJoinRequestsByGroup.entries()].map(
+        ([groupId, bucket]) => [groupId, [...bucket.values()]],
+      ),
+    );
   }
 
   queueConsumedJoinRequest(groupId: string, ref: ConsumedJoinRequestRef): void {
@@ -283,6 +338,14 @@ export class CliSessionStore {
     return [...(this.pendingConsumedJoinRequests.get(groupId)?.values() ?? [])];
   }
 
+  listPendingConsumedJoinRequests(): Record<string, ConsumedJoinRequestRef[]> {
+    return Object.fromEntries(
+      [...this.pendingConsumedJoinRequests.entries()].map(
+        ([groupId, bucket]) => [groupId, [...bucket.values()]],
+      ),
+    );
+  }
+
   clearConsumedJoinRequests(
     groupId: string,
     refs: ConsumedJoinRequestRef[],
@@ -296,6 +359,34 @@ export class CliSessionStore {
     }
     if (bucket.size === 0) {
       this.pendingConsumedJoinRequests.delete(groupId);
+    }
+  }
+
+  /** Restores coordinator acknowledgement state persisted in a snapshot,
+   *  so a restart neither re-delivers nor re-accepts handled records. */
+  restoreTransientState(state: {
+    acceptedWelcomeIds?: string[];
+    pendingConsumedWelcomes?: Record<string, ConsumedWelcomeRef[]>;
+    fetchedJoinRequests?: Record<string, FetchedJoinRequestRef[]>;
+    pendingConsumedJoinRequests?: Record<string, ConsumedJoinRequestRef[]>;
+  }): void {
+    for (const id of state.acceptedWelcomeIds ?? []) {
+      this.acceptedWelcomeIds.add(id);
+    }
+    for (const [coordinatorKey, refs] of Object.entries(
+      state.pendingConsumedWelcomes ?? {},
+    )) {
+      for (const ref of refs) this.queueConsumedWelcome(coordinatorKey, ref);
+    }
+    for (const [groupId, refs] of Object.entries(
+      state.fetchedJoinRequests ?? {},
+    )) {
+      this.setFetchedJoinRequests(groupId, refs);
+    }
+    for (const [groupId, refs] of Object.entries(
+      state.pendingConsumedJoinRequests ?? {},
+    )) {
+      for (const ref of refs) this.queueConsumedJoinRequest(groupId, ref);
     }
   }
 }
