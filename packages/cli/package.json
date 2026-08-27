@@ -1,6 +1,6 @@
 {
   "name": "@cordn/cli",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Persistent MLS client for Cordn: interactive commands, encrypted state, and durable agent inbox/outbox queues.",
   "type": "module",
   "license": "MIT",
