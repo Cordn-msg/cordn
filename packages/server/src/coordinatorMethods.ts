@@ -483,15 +483,19 @@ export class CoordinatorAdapter {
           welcome_64: encodeWelcomeBase64(record.welcome),
           at: record.createdAt,
           after: record.joinAfterCursor,
+          sender_pk: record.senderStablePubkey,
         })),
       },
     };
   }
 
-  storeWelcome(input: z.infer<typeof storeWelcomeInputSchema>) {
-    // no extra available here; enforced in registration wrapper
+  storeWelcome(
+    input: z.infer<typeof storeWelcomeInputSchema>,
+    extra: ToolExtra,
+  ) {
     const record = this.coordinator.storeWelcome({
       targetStablePubkey: input.target_pk,
+      senderStablePubkey: requireClientPubkey(extra),
       keyPackageReference: input.kp_ref,
       welcome: decodeWelcomeBase64(input.welcome_64),
       joinAfterCursor: input.after,
@@ -807,8 +811,7 @@ export function registerCoordinatorMethods(
       outputSchema: storeWelcomeOutputSchema,
     },
     withRateLimit(COORDINATOR_METHODS.storeWelcome, (input, extra) => {
-      void extra;
-      return adapter.storeWelcome(input);
+      return adapter.storeWelcome(input, extra);
     }),
   );
 
