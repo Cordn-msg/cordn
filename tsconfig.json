@@ -30,6 +30,7 @@
     "noPropertyAccessFromIndexSignature": false,
     "pretty": true,
     "paths": {
+      "@cordn/cli": ["./packages/cli/src/index.ts"],
       "@cordn/core": ["./packages/core/src/index.ts"],
       "@cordn/coordinator": ["./packages/coordinator/src/index.ts"],
       "@cordn/server": ["./packages/server/src/index.ts"],

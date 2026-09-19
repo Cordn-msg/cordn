@@ -30,8 +30,18 @@ try {
   if (/package\/src\//.test(packedFiles) || /\.test\.ts$/m.test(packedFiles)) {
     throw new Error("published archive contains source tests");
   }
+  if (/package\/dist\/lib\/.*\.test\.js$/m.test(packedFiles)) {
+    throw new Error("library emit contains test files");
+  }
+  if (/package\/dist\/lib\/(main|repl|replCommands|docs)\.js$/m.test(packedFiles)) {
+    throw new Error("library emit dragged in CLI-only modules");
+  }
   for (const required of [
     "package/dist/cli.js",
+    "package/dist/lib/index.js",
+    "package/dist/lib/index.d.ts",
+    "package/dist/lib/session.js",
+    "package/dist/lib/persistentSession.js",
     "package/docs/AGENT.md",
     "package/docs/COMMANDS.md",
     "package/README.md",
@@ -91,6 +101,49 @@ try {
   );
   if (!status.includes("groupCount: 0")) {
     throw new Error("installed CLI could not bootstrap with hosted defaults");
+  }
+
+  const installedManifest = JSON.parse(
+    await readFile(
+      join(installDir, "node_modules", "@cordn", "cli", "package.json"),
+      "utf8",
+    ),
+  );
+  if (installedManifest.exports?.["."]?.import !== "./dist/lib/index.js") {
+    throw new Error("publishConfig exports were not applied to the archive");
+  }
+
+  const libStateFile = join(installDir, "lib-state", "session.json");
+  const { stdout: libSmoke } = await exec(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+        import { CliSession, openPersistentSession, DEFAULT_COORDINATOR_PUBKEY } from "@cordn/cli";
+        const ephemeral = new CliSession({ serverPubkey: DEFAULT_COORDINATOR_PUBKEY });
+        if (!/^[0-9a-f]{64}$/.test(ephemeral.stablePubkey)) throw new Error("bad pubkey");
+        await ephemeral.disconnect();
+        const opened = await openPersistentSession({ stateFile: process.argv[1] });
+        await opened.persist();
+        await opened.close();
+        console.log(JSON.stringify({ ok: true, pubkey: opened.session.stablePubkey, coordinator: DEFAULT_COORDINATOR_PUBKEY }));
+      `,
+      libStateFile,
+    ],
+    { cwd: installDir },
+  );
+  const libResult = JSON.parse(libSmoke.trim().split("\n").at(-1));
+  if (!libResult.ok || !/^[0-9a-f]{64}$/.test(libResult.pubkey)) {
+    throw new Error("installed library import smoke failed");
+  }
+  const libStateDir = await readdir(join(installDir, "lib-state"));
+  if (
+    !libStateDir.includes("session.json") ||
+    !libStateDir.includes("session.json.key") ||
+    libStateDir.includes("session.json.lock")
+  ) {
+    throw new Error(`unexpected library state files: ${libStateDir.join(", ")}`);
   }
 
   console.log(`pack smoke passed: ${archiveName}`);

@@ -9,11 +9,9 @@ import { CliSession } from "./session.ts";
 import { FileMediaStore } from "./mediaStore.ts";
 import { deriveStablePubkey } from "./utils/mlsBase.ts";
 import {
-  acquireStateLock,
-  loadEncryptedState,
-  saveEncryptedState,
-} from "./localState.ts";
-import type { CliSessionSnapshot } from "./session.ts";
+  openPersistentSession,
+  type PersistentSession,
+} from "./persistentSession.ts";
 import { executeReplCommand, tokenizeInput } from "./replCommands.ts";
 import { processOutbox } from "./outbox.ts";
 import { enqueueInboundMessages } from "./inbox.ts";
@@ -199,84 +197,35 @@ const filePrivateKey = options.privateKeyFile
   ? (await readFile(options.privateKeyFile, "utf8")).trim()
   : undefined;
 const explicitPrivateKey = filePrivateKey ?? options.privateKey;
-const stateFile = options.stateFile;
-const stateKeyFile =
-  options.stateKeyFile ?? (stateFile ? `${stateFile}.key` : undefined);
-const releaseStateLock = stateFile
-  ? await acquireStateLock(stateFile)
-  : async () => undefined;
-let session: CliSession | undefined;
 
+let opened: PersistentSession;
 try {
-  const snapshot =
-    stateFile && stateKeyFile
-      ? await loadEncryptedState<CliSessionSnapshot>(stateFile, stateKeyFile)
-      : undefined;
-
-  if (
-    snapshot &&
-    explicitPrivateKey &&
-    snapshot.privateKey.toLowerCase() !== explicitPrivateKey.toLowerCase()
-  ) {
-    throw new Error(
-      "--private-key/--private-key-file does not match the identity stored in --state-file",
-    );
-  }
-
-  const savedCoordinator = snapshot?.defaultCoordinator;
-  const useSavedRelays =
-    savedCoordinator &&
-    (!options.serverPubkey ||
-      options.serverPubkey.toLowerCase() ===
-        savedCoordinator.serverPubkey.toLowerCase());
-  const activeSession = new CliSession({
-    privateKey: snapshot?.privateKey ?? explicitPrivateKey,
-    serverPubkey:
-      options.serverPubkey ??
-      savedCoordinator?.serverPubkey ??
-      readDefaultCoordinatorPubkey() ??
-      DEFAULT_COORDINATOR_PUBKEY,
-    relays:
-      options.relay && options.relay.length > 0
-        ? options.relay
-        : ((useSavedRelays ? savedCoordinator?.relays : undefined) ??
-          readDefaultRelayUrls() ?? [...DEFAULT_RELAY_URLS]),
+  opened = await openPersistentSession({
+    stateFile: options.stateFile,
+    stateKeyFile: options.stateKeyFile,
+    privateKey: explicitPrivateKey,
+    serverPubkey: options.serverPubkey,
+    relays: options.relay,
+    fallback: {
+      serverPubkey: readDefaultCoordinatorPubkey(),
+      relays: readDefaultRelayUrls(),
+    },
     mediaStore: options.mediaDir
       ? new FileMediaStore(options.mediaDir)
       : undefined,
   });
-  session = activeSession;
-  if (snapshot) await activeSession.restoreSnapshot(snapshot);
+} catch (error) {
+  if (error instanceof Error && /does not match the identity/.test(error.message)) {
+    throw new Error(
+      "--private-key/--private-key-file does not match the identity stored in --state-file",
+    );
+  }
+  throw error;
+}
+const activeSession = opened.session;
+const persist = (): Promise<void> => opened.persist();
 
-  let durableQueue = Promise.resolve();
-  let durabilityError: unknown;
-  const enqueueDurableWrite = (
-    beforeSave?: () => Promise<void>,
-  ): Promise<void> => {
-    const operation = durableQueue.then(async () => {
-      if (durabilityError) throw durabilityError;
-      try {
-        await beforeSave?.();
-        if (stateFile && stateKeyFile) {
-          // ponytail: whole-snapshot rewrites stay simple; split history into
-          // append-only storage only if real save latency becomes material.
-          await saveEncryptedState(
-            stateFile,
-            stateKeyFile,
-            await activeSession.exportSnapshotWhenIdle(),
-          );
-        }
-      } catch (error) {
-        durabilityError = error;
-        throw error;
-      }
-    });
-    // Keep the queue usable as a barrier without swallowing the caller's error.
-    durableQueue = operation.catch(() => undefined);
-    return operation;
-  };
-  const persist = (): Promise<void> => enqueueDurableWrite();
-
+try {
   await persist();
   if (options.command !== undefined) {
     const [command = "", ...args] = tokenizeInput(options.command);
@@ -302,7 +251,6 @@ try {
       console.error(
         `inbox/state write failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      durabilityError = error;
       stopping = true;
       process.exitCode = 1;
     };
@@ -317,7 +265,7 @@ try {
                 event.received,
               )
           : undefined;
-      void enqueueDurableWrite(writeInbox).catch(stopOnDurabilityFailure);
+      void opened.persist(writeInbox).catch(stopOnDurabilityFailure);
     });
 
     while (!stopping) {
@@ -374,7 +322,7 @@ try {
         console.error(
           `daemon cycle failed: ${error instanceof Error ? error.message : String(error)}`,
         );
-        if (durabilityError) {
+        if (opened.durabilityError) {
           stopping = true;
           process.exitCode = 1;
         }
@@ -383,9 +331,9 @@ try {
         await new Promise((resolve) => setTimeout(resolve, 5_000));
       }
     }
-    await durableQueue;
+    await opened.flush();
   } else {
-    if (!stateFile) {
+    if (!options.stateFile) {
       console.error(
         "warning: this session is ephemeral; restart with --state-file <path> to preserve identity and MLS state",
       );
@@ -393,14 +341,9 @@ try {
     await startCliRepl(activeSession, persist);
   }
 
-  // Stop live ingestion before the final durability barrier; otherwise a
-  // message can land after the last snapshot but before finally disconnects.
-  await activeSession.disconnect();
-  if (!durabilityError) await persist();
-  else process.exitCode = 1;
 } finally {
-  await session?.disconnect();
-  await releaseStateLock();
+  await opened.close();
+  if (opened.durabilityError) process.exitCode = 1;
 }
 
 function uniqueGroupAlias(session: CliSession, base: string): string {

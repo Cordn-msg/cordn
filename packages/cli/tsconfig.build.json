@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist/lib",
+    "rootDir": "src",
+    "declarationMap": false,
+    "sourceMap": false,
+    // Resolve @cordn/core through node_modules (workspace symlink) rather than
+    // the root `paths` source mapping; otherwise core's sources join the program
+    // outside rootDir (TS6059).
+    "paths": {}
+  },
+  // Only the barrel's closure: keeps main/repl/docs and *.test.ts out of dist/lib.
+  "include": ["src/index.ts"]
+}

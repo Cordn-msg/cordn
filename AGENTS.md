@@ -26,7 +26,9 @@ Packages (`packages/*`):
 - [`@cordn/server`](packages/server/src/) — ContextVM/MCP server bindings over
   the coordinator and the runnable server entrypoint.
 - [`@cordn/cli`](packages/cli/src/) — published `cordn` terminal client (REPL +
-  session model), persistent daemon, and integration helpers. A leaf consumer;
+  session model), persistent daemon, and integration helpers; also importable
+  as a library via [`src/index.ts`](packages/cli/src/index.ts) (published as
+  `dist/lib/**`). A leaf consumer;
   depends on `@cordn/core` (and on `@cordn/server` + `@cordn/test-utils` in its
   integration tests).
 - [`@cordn/test-utils`](packages/test-utils/src/) — shared test fixtures: MLS
@@ -66,7 +68,7 @@ Coordinator contract notes:
 - Runtime: Node.js (≥20) — runs `.ts` source directly via type-stripping
 - Main server entrypoint: [`packages/server/src/main.ts`](packages/server/src/main.ts)
 - Public exports: each package's `src/index.ts` barrel (e.g. [`packages/core/src/index.ts`](packages/core/src/index.ts)); there is no single root barrel
-- Build outputs: `dist/main.js` (server) and `packages/cli/dist/cli.js` (published CLI)
+- Build outputs: `dist/main.js` (server), `packages/cli/dist/cli.js` (published CLI executable), and `packages/cli/dist/lib/` (tsc library emit)
 
 Environment notes for the server:
 

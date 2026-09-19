@@ -136,12 +136,44 @@ Pass `--media-dir <path>` to enable `send-media` and `save-media`. Media is encr
 
 See the [encrypted-media specification](https://github.com/Cordn-msg/cordn/blob/master/spec/applications/encrypted-media.md).
 
+## Library usage
+
+The same persistent client the executable is built on is importable from Node
+(the package is Node-only; it is not browser-safe like `@cordn/core`):
+
+```ts
+import { openPersistentSession } from "@cordn/cli";
+
+const opened = await openPersistentSession({ stateFile: "./state/session.json" });
+const { session } = opened;
+await session.generateKeyPackage("bot", { lastResort: true });
+await session.publishKeyPackage("bot");
+session.onGroupEvent((event) => {
+  if (event.type === "messages-ingested") console.log(event.groupAlias, event.received);
+});
+await session.watchAllGroups();
+await opened.persist();
+// ...
+await opened.close();
+```
+
+`openPersistentSession` provides exactly what the daemon relies on: an exclusive
+state lock, snapshot restore, identity check, coordinator/relay precedence, and
+a serialized durable-write queue (`persist`, `flush`, `close`). Omit `stateFile`
+for an ephemeral session. Everything else (`CliSession`, snapshot helpers,
+queue helpers, defaults, error classes) is exported from the same barrel.
+
+When consuming the package from a source checkout (for example `link:` to
+`packages/cli`), the dev-time exports point at `.ts` sources: run on Node >= 22.18
+(type stripping) and set `rewriteRelativeImportExtensions: true` in the consumer
+`tsconfig`. The published package ships compiled `dist/lib/**` with declarations.
+
 ## Development from the monorepo
 
 ```sh
 pnpm install
 pnpm run client:cli -- --state-file /tmp/cordn-session.json
-pnpm --filter @cordn/cli run build
+pnpm --filter @cordn/cli run build       # dist/cli.js (bin) + dist/lib/** (library)
 pnpm --filter @cordn/cli run pack:check
 ```
 

@@ -4,6 +4,15 @@
   "description": "Persistent MLS client for Cordn: interactive commands, encrypted state, and durable agent inbox/outbox queues.",
   "type": "module",
   "license": "MIT",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "cordn": "./dist/cli.js"
   },
@@ -24,7 +33,8 @@
     "contextvm",
     "messaging",
     "cli",
-    "agent"
+    "agent",
+    "library"
   ],
   "homepage": "https://github.com/Cordn-msg/cordn/tree/master/packages/cli",
   "repository": {
@@ -36,12 +46,23 @@
     "url": "https://github.com/Cordn-msg/cordn/issues"
   },
   "scripts": {
-    "build": "rm -rf dist && esbuild ./src/main.ts --bundle --platform=node --target=node20 --format=esm --packages=external --external:@cordn/core --outfile=./dist/cli.js --banner:js=\"#!/usr/bin/env node\" && chmod +x ./dist/cli.js",
+    "build": "rm -rf dist && pnpm run build:bin && pnpm run build:lib",
+    "build:bin": "esbuild ./src/main.ts --bundle --platform=node --target=node20 --format=esm --packages=external --external:@cordn/core --outfile=./dist/cli.js --banner:js=\"#!/usr/bin/env node\" && chmod +x ./dist/cli.js",
+    "build:lib": "tsc -p tsconfig.build.json",
     "pack:check": "node ./scripts/pack-smoke.mjs",
     "prepack": "pnpm run build"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "main": "./dist/lib/index.js",
+    "types": "./dist/lib/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/lib/index.d.ts",
+        "import": "./dist/lib/index.js"
+      },
+      "./package.json": "./package.json"
+    }
   },
   "dependencies": {
     "@contextvm/mcp-sdk": "^1.30",
