@@ -7,13 +7,13 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@contextvm/mcp-sdk": "^1.30",
-    "@contextvm/sdk": "^0.13.11",
+    "@contextvm/sdk": "^0.13.17",
     "@cordn/coordinator": "workspace:*",
     "@cordn/core": "workspace:*",
     "nostr-tools": "^2.23.9",
     "pino": "^10.3.1",
     "ts-mls": "2.0.0-rc.12",
-    "zod": "^4.4.3"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@cordn/test-utils": "workspace:*",
