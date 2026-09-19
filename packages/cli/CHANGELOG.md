@@ -1,5 +1,13 @@
 # @cordn/cli
 
+## 0.6.2
+
+### Patch Changes
+
+- 7eb87bf: Upgrade `@contextvm/sdk` to 0.13.17 across all workspace packages and unify zod at 4.6.5 so a single `@contextvm/mcp-sdk` instance is resolved (fixes `Client` type mismatch between the SDK transport and the CLI's MCP client).
+- Updated dependencies [7eb87bf]
+  - @cordn/core@0.5.6
+
 ## 0.6.1
 
 ### Patch Changes
