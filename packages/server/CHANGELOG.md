@@ -1,5 +1,11 @@
 # @cordn/server
 
+## 0.5.6
+
+### Patch Changes
+
+- Fix the Docker runtime image for the pnpm-workspace layout: install workspace member manifests before the frozen-lockfile install, produce the runtime node_modules with `pnpm deploy --filter=@cordn/server`, and declare `better-sqlite3` and `@scure/base` as server dependencies (the external-packages bundle imports them via inlined workspace code). Move `onlyBuiltDependencies` to `pnpm-workspace.yaml` so pnpm ≥10.17 actually builds the native sqlite binding again.
+
 ## 0.5.5
 
 ### Patch Changes

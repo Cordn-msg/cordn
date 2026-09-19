@@ -124,6 +124,12 @@ importers:
       '@cordn/core':
         specifier: workspace:*
         version: link:../core
+      '@scure/base':
+        specifier: ^2.2.0
+        version: 2.2.0
+      better-sqlite3:
+        specifier: ^12.9.0
+        version: 12.9.0
       nostr-tools:
         specifier: ^2.23.9
         version: 2.23.12(typescript@5.9.3)

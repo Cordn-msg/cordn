@@ -1,6 +1,6 @@
 {
   "name": "@cordn/server",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -8,6 +8,8 @@
   "dependencies": {
     "@contextvm/mcp-sdk": "^1.30",
     "@contextvm/sdk": "^0.13.17",
+    "@scure/base": "^2.2.0",
+    "better-sqlite3": "^12.9.0",
     "@cordn/coordinator": "workspace:*",
     "@cordn/core": "workspace:*",
     "nostr-tools": "^2.23.9",
