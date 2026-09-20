@@ -45,7 +45,7 @@
   },
   "dependencies": {
     "@contextvm/mcp-sdk": "^1.30",
-    "@contextvm/sdk": "^0.13.17",
+    "@contextvm/sdk": "^0.14.1",
     "@cordn/core": "workspace:*",
     "@noble/ciphers": "^2.2.0",
     "commander": "^14.0.3",

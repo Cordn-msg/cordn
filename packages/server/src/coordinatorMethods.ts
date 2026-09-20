@@ -661,7 +661,20 @@ export class CoordinatorAdapter {
 
     stream.abort = async (reason?: string): Promise<void> => {
       cleanupSubscriptions(reason ?? "abort");
-      await originalAbort(reason);
+      try {
+        await originalAbort(reason);
+      } catch (error) {
+        // Belt and suspenders for the SDK probe-timeout race: the transport
+        // can evict the session before the writer's abort publishes its frame
+        // ("No active session found"). The stream is dead either way.
+        this.logger.warn(
+          {
+            error: error instanceof Error ? error.message : String(error),
+            clientPubkey: clientPubkeyLabel,
+          },
+          "Open-stream abort failed after session teardown",
+        );
+      }
     };
 
     // ponytail: writer.signal (SDK 0.13.8+) fires on every termination incl.

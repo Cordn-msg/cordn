@@ -1,5 +1,11 @@
 # @cordn/server
 
+## 0.5.7
+
+### Patch Changes
+
+- Absorb open-stream abort failures after session teardown and bump `@contextvm/sdk` to 0.14.1, which fixes the fatal `unhandledRejection` in the server-side `OpenStreamWriter` keepalive path (process exit 1, ~every 9h under load). The `stream.abort` override now logs a warning instead of letting the rejection escape when the transport already evicted the client session.
+
 ## 0.5.6
 
 ### Patch Changes

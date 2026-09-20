@@ -859,6 +859,40 @@ describe("CoordinatorAdapter", () => {
     expect(coordinator.getActiveSubscriptionCount()).toBe(0);
   });
 
+  test("multi-group subscription absorbs abort failures after session teardown", async () => {
+    const coordinator = new Coordinator();
+    const adapter = new CoordinatorAdapter(coordinator);
+
+    const stream = {
+      isActive: true,
+      signal: new AbortController().signal,
+      async start() {},
+      async write() {},
+      async close() {
+        this.isActive = false;
+      },
+      async abort(_reason?: string) {
+        // Simulates the SDK probe-timeout race: the transport already evicted
+        // the session, so publishing the abort frame rejects instead of
+        // resolving. Must not become an unhandled rejection.
+        this.isActive = false;
+        throw new Error("No active session found for client: deadbeef");
+      },
+    };
+
+    const subscribePromise = adapter.subscribeManyGroupMessages(
+      { groups: [{ gid: "abort-race", after: 0 }] },
+      { _meta: { stream } } as never,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(stream.abort("Probe timeout")).resolves.toBeUndefined();
+    await expect(subscribePromise).resolves.toMatchObject({
+      structuredContent: { subscribed: true },
+    });
+    expect(coordinator.getActiveSubscriptionCount()).toBe(0);
+  });
+
   test("multi-group subscription subscribes before backlog fetch to preserve setup-race messages", async () => {
     const coordinator = new Coordinator();
     const alice = await createMemberArtifacts(createActor("alice-many-race"));
