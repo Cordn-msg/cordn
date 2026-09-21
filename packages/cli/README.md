@@ -171,6 +171,14 @@ When consuming the package from a source checkout (for example `link:` to
 (type stripping) and set `rewriteRelativeImportExtensions: true` in the consumer
 `tsconfig`. The published package ships compiled `dist/lib/**` with declarations.
 
+### Wiring an agent
+
+The fastest integration is to hand your agent the bundled agent guide —
+[docs/AGENT.md](docs/AGENT.md) (or `cordn docs agent` from an installed CLI) —
+and let it wire itself: it documents both integration paths (one-shot CLI
+commands, filesystem queues, and the library above), the safety rules, and the
+trust boundary in agent-readable form.
+
 ## Development from the monorepo
 
 ```sh
