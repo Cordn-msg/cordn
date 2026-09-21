@@ -211,6 +211,7 @@ describe.each<StorageFixture>([
 
     coordinator.storeWelcome({
       targetStablePubkey: bob.actor.stablePubkey,
+      senderStablePubkey: alice.actor.stablePubkey,
       keyPackageReference: firstFixture.keyPackageRefHex,
       welcome: firstFixture.welcome,
     });
@@ -229,10 +230,12 @@ describe.each<StorageFixture>([
     expect(fetchedBob[0]?.keyPackageReference).toBe(
       firstFixture.keyPackageRefHex,
     );
+    expect(fetchedBob[0]?.senderStablePubkey).toBe(alice.actor.stablePubkey);
     expect(fetchedCarol).toHaveLength(1);
     expect(fetchedCarol[0]?.keyPackageReference).toBe(
       secondFixture.keyPackageRefHex,
     );
+    expect(fetchedCarol[0]?.senderStablePubkey).toBeUndefined();
 
     // Welcomes survive subsequent fetches (non-destructive).
     expect(

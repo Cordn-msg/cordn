@@ -346,11 +346,14 @@ describe("CoordinatorAdapter", () => {
       member: bob,
     });
 
-    const stored = adapter.storeWelcome({
-      target_pk: bob.actor.stablePubkey,
-      kp_ref: group.keyPackageRefHex,
-      welcome_64: encodeWelcomeAsBase64(group.welcome),
-    });
+    const stored = adapter.storeWelcome(
+      {
+        target_pk: bob.actor.stablePubkey,
+        kp_ref: group.keyPackageRefHex,
+        welcome_64: encodeWelcomeAsBase64(group.welcome),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
 
     expect(stored.content).toEqual([]);
     expect(stored.structuredContent.at).toBeTypeOf("number");
@@ -362,6 +365,9 @@ describe("CoordinatorAdapter", () => {
     expect(fetchedWelcomes.structuredContent.welcomes).toHaveLength(1);
     expect(fetchedWelcomes.structuredContent.welcomes[0]?.kp_ref).toBe(
       group.keyPackageRefHex,
+    );
+    expect(fetchedWelcomes.structuredContent.welcomes[0]?.sender_pk).toBe(
+      alice.actor.stablePubkey,
     );
 
     const messageBytes = await createApplicationMessageBytes({
@@ -446,12 +452,15 @@ describe("CoordinatorAdapter", () => {
     });
 
     // Store with after cursor hint.
-    adapter.storeWelcome({
-      target_pk: bob.actor.stablePubkey,
-      kp_ref: fixture.keyPackageRefHex,
-      welcome_64: encodeWelcomeAsBase64(fixture.welcome),
-      after: 42,
-    });
+    adapter.storeWelcome(
+      {
+        target_pk: bob.actor.stablePubkey,
+        kp_ref: fixture.keyPackageRefHex,
+        welcome_64: encodeWelcomeAsBase64(fixture.welcome),
+        after: 42,
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
 
     // Fetch returns the after cursor.
     const fetched = adapter.fetchPendingWelcomes(
@@ -465,11 +474,14 @@ describe("CoordinatorAdapter", () => {
     });
 
     // Old-style welcome without after returns undefined (backward compat).
-    adapter.storeWelcome({
-      target_pk: bob.actor.stablePubkey,
-      kp_ref: "no-after-ref",
-      welcome_64: encodeWelcomeAsBase64(fixture.welcome),
-    });
+    adapter.storeWelcome(
+      {
+        target_pk: bob.actor.stablePubkey,
+        kp_ref: "no-after-ref",
+        welcome_64: encodeWelcomeAsBase64(fixture.welcome),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
     const secondFetch = adapter.fetchPendingWelcomes(
       {},
       createExtra(bob.actor.stablePubkey),
@@ -497,11 +509,14 @@ describe("CoordinatorAdapter", () => {
       member: bob,
     });
 
-    adapter.storeWelcome({
-      target_pk: bob.actor.stablePubkey,
-      kp_ref: fixture.keyPackageRefHex,
-      welcome_64: encodeWelcomeAsBase64(fixture.welcome),
-    });
+    adapter.storeWelcome(
+      {
+        target_pk: bob.actor.stablePubkey,
+        kp_ref: fixture.keyPackageRefHex,
+        welcome_64: encodeWelcomeAsBase64(fixture.welcome),
+      },
+      createExtra(alice.actor.stablePubkey),
+    );
 
     const observed = adapter.fetchPendingWelcomes(
       {},
