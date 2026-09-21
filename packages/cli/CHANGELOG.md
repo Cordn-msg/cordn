@@ -1,5 +1,11 @@
 # @cordn/cli
 
+## 0.7.0
+
+### Minor Changes
+
+- c8f85c0: Expose the Node client as an importable library: `import { CliSession, openPersistentSession, ... } from "@cordn/cli"`, with typed `dist/lib/**` output published alongside the `cordn` executable. The daemon's persistent-session wiring (state lock, snapshot restore, serialized durable writes) moved into `openPersistentSession` and is shared by the CLI.
+
 ## 0.6.2
 
 ### Patch Changes
