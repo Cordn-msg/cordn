@@ -215,7 +215,10 @@ try {
       : undefined,
   });
 } catch (error) {
-  if (error instanceof Error && /does not match the identity/.test(error.message)) {
+  if (
+    error instanceof Error &&
+    /does not match the identity/.test(error.message)
+  ) {
     throw new Error(
       "--private-key/--private-key-file does not match the identity stored in --state-file",
     );
@@ -340,7 +343,6 @@ try {
     }
     await startCliRepl(activeSession, persist);
   }
-
 } finally {
   await opened.close();
   if (opened.durabilityError) process.exitCode = 1;

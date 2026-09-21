@@ -92,6 +92,34 @@ Inbox and outbox delivery are at-least-once. A crash can produce duplicate work 
 
 See `cordn docs queues` for exact schemas and shell examples.
 
+## Programmatic usage
+
+Agent harnesses that run Node can embed the same persistent client instead of parsing CLI output or watching queue directories:
+
+```js
+import { openPersistentSession } from "@cordn/cli";
+
+const opened = await openPersistentSession({
+  stateFile: `${ROOT}/session.json`,
+});
+const { session } = opened;
+
+await session.generateKeyPackage("bot", { lastResort: true });
+await session.publishKeyPackage("bot");
+
+session.onGroupEvent((event) => {
+  if (event.type === "messages-ingested") {
+    // own ingestion loop: validate, authorize, deduplicate, respond
+  }
+});
+await session.watchAllGroups();
+
+await opened.persist(); // durable snapshot write; queued writes are serialized
+await opened.close(); // final snapshot, stop ingestion, release the lock
+```
+
+`openPersistentSession` gives library callers the same guarantees the daemon relies on: exclusive state lock, snapshot restore, identity check, and serialized durable writes. Only one process may hold a given state file, so a library session replaces the daemon for that snapshot — do not run both against the same `--state-file`. The package is Node-only and ships typed `dist/lib` output; see the package README "Library usage" for the full export surface.
+
 ## Trust boundary
 
 Cordn decrypts messages before placing plaintext in the inbox. Sending that plaintext to an AI provider changes the privacy boundary: the provider can see it. Use an explicit bot identity, disclose the provider to group members, authorize senders, limit input size and rate, and disable agent tools unless separately sandboxed and approved.

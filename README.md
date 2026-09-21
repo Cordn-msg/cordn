@@ -9,7 +9,7 @@ Minimal MLS delivery service coordinator and ContextVM server adapter implemente
 - [`spec/02.md`](spec/02.md) defines the Nostr-shaped application-message envelope model.
 - [`packages/coordinator/src/`](packages/coordinator/src/) contains the reference coordinator implementation.
 - [`packages/server/src/`](packages/server/src/) exposes that coordinator as a runnable ContextVM server.
-- [`@cordn/cli`](packages/cli/) is the published persistent client for interactive, scripted, and filesystem-queue agent workflows.
+- [`@cordn/cli`](packages/cli/) is the published persistent client for interactive, scripted, and filesystem-queue agent workflows, also importable from Node as a library (`openPersistentSession`).
 - The same CLI and server flow is also used by the integration-style test coverage under [`packages/`](packages/).
 
 ## Coordinator delivery semantics

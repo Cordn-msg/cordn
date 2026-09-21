@@ -144,12 +144,15 @@ The same persistent client the executable is built on is importable from Node
 ```ts
 import { openPersistentSession } from "@cordn/cli";
 
-const opened = await openPersistentSession({ stateFile: "./state/session.json" });
+const opened = await openPersistentSession({
+  stateFile: "./state/session.json",
+});
 const { session } = opened;
 await session.generateKeyPackage("bot", { lastResort: true });
 await session.publishKeyPackage("bot");
 session.onGroupEvent((event) => {
-  if (event.type === "messages-ingested") console.log(event.groupAlias, event.received);
+  if (event.type === "messages-ingested")
+    console.log(event.groupAlias, event.received);
 });
 await session.watchAllGroups();
 await opened.persist();

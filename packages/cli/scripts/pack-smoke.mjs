@@ -33,7 +33,9 @@ try {
   if (/package\/dist\/lib\/.*\.test\.js$/m.test(packedFiles)) {
     throw new Error("library emit contains test files");
   }
-  if (/package\/dist\/lib\/(main|repl|replCommands|docs)\.js$/m.test(packedFiles)) {
+  if (
+    /package\/dist\/lib\/(main|repl|replCommands|docs)\.js$/m.test(packedFiles)
+  ) {
     throw new Error("library emit dragged in CLI-only modules");
   }
   for (const required of [
@@ -143,7 +145,9 @@ try {
     !libStateDir.includes("session.json.key") ||
     libStateDir.includes("session.json.lock")
   ) {
-    throw new Error(`unexpected library state files: ${libStateDir.join(", ")}`);
+    throw new Error(
+      `unexpected library state files: ${libStateDir.join(", ")}`,
+    );
   }
 
   console.log(`pack smoke passed: ${archiveName}`);
