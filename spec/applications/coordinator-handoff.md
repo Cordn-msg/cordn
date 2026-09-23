@@ -108,6 +108,7 @@ Rules:
 
 - Segment `k < len(handoffs)` is served by `handoffs[k].from`. Segment `0` at first installation is served by `handoffs[0].from` when the first entry records a migration into this extension, otherwise by the `active` at installation.
 - A routing update MUST append a `HandoffRecord` if and only if `active` changes. Roster edits that leave `active` unchanged MUST NOT append a record or renumber segments.
+- The `active` locator MUST NOT name a coordinator that already served the group (any `from` in `handoffs`). A returning service MUST use a fresh coordinator identity. This keeps every segment's cursor space fresh (records restart at cursor `1`) and every locator mapped to exactly one segment.
 - The locator recorded in `from` of a new entry MUST equal the `active` of the previous extension state.
 - `boundary_cursor` is the highest cursor of the closing segment that the committer had ingested at commit time.
 - `boundary_tips` is the committer's tip set of the group's causal DAG at commit time (§6). It MAY be empty.
@@ -129,13 +130,14 @@ Cursors remain exactly as defined in [`spec/00.md`](../00.md) §4–§5: monoton
   - a group document's `cursor` ([`multi-device.md`](multi-device.md) §4) names a cursor of the segment whose coordinator the document names in its `coordinator` field;
   - client-local fetch progression and read markers name cursors of the segment the client is currently ingesting.
 - A cursor reference with no accompanying locator, in a group with `len(handoffs) > 0`, is ambiguous and MUST NOT be used for comparison across segments.
+- A cursor reference whose accompanying locator is not the one the adopted chain assigns to its segment — for example a marker minted on a discarded fork branch (§10) — is stale and MUST be treated as void.
 
 Implementations MAY derive a dense virtual cursor numbering for display and compact storage:
 
 - `base(0) = 0`; `base(k + 1) = base(k) + handoffs[k].boundary_cursor + 1`
 - a record at position `(k, c)` with `c <= handoffs[k].boundary_cursor` displays as `base(k) + c`
 - the handoff commit that appended `handoffs[k]` displays as `base(k + 1)` (the seam)
-- records of a closed segment beyond `boundary_cursor` have no virtual number (they are orphaned candidates, §7)
+- records of a closed segment beyond `boundary_cursor` have no virtual number. They MAY still be counted through §7.1 pull-in; they simply display by position instead of by dense number
 
 Virtual numbering is presentational. It MUST NOT be used to decide whether a record is counted (§7), and it MUST NOT appear on the wire as anything other than an ordinary cursor within one segment.
 
@@ -162,13 +164,14 @@ The node identity of a record in the causal DAG is the envelope `id` defined in 
 - Authors compute the `id` once at send time; receivers re-derive it as already required by [`spec/02.md`](../02.md) §4. No additional verification step is introduced.
 - Because `tags` participates in the `id` derivation, the `id` commits to the record's link set: two records with the same `id` have the same parents. Author equivocation on the DAG is structurally impossible.
 - Re-sending a lost record MUST reuse the original envelope and therefore its `id`, re-sealing only (fresh nonce, [`spec/03.md`](../03.md) §4). Receivers MUST deduplicate by `id`, so re-delivery, re-sending, and handoff overlap all collapse to one record.
+- When the same `id` appears at multiple positions (a re-send landing in a later segment), it is one record, and the lowest position is canonical.
 
 #### 6.3 Linking Rule
 
 When sending a record, a sender MUST include one `prev` tag for every tip of its known DAG for the group.
 
-- In the common case this is exactly one tag, naming the sender's latest ingested record.
-- After ingesting concurrent records, the sender's next record links all resulting tips, merging them.
+- In the common case this is exactly one tag, naming the sender's latest ingested record. A client catching up on unlinked legacy records links each of them once, after which tip counts collapse back to one.
+- After ingesting concurrent records, the sender's next record links all resulting tips, merging them. Linking only the latest tip would strand concurrent tips forever, so the rule is all tips, not one.
 - A record with no `prev` tags is **unlinked**. Unlinked records are tolerated: they carry no causality information and are adjudicated by position alone (§7).
 
 Links are carried inside the sealed payload ([`spec/03.md`](../03.md) §4). Coordinators see no link structure and gain no visibility into reply, merge, or interaction patterns.
@@ -183,7 +186,7 @@ A record of a closed segment `k` is **counted** if and only if either:
 - it becomes linked as an ancestor of any later counted record (pull-in), or
 - it is unlinked and its cursor is at most `handoffs[k].boundary_cursor` (legacy tolerance).
 
-For the open segment, every record received is provisionally counted; adjudication finalizes when the segment closes.
+Classification is provisional and grows with knowledge: an open-segment record is provisionally counted when received (and adjudication is not final at segment close, because later linkage can still pull records in), a segment's closing can orphan records the group never linked, and later linkage can pull records back in. All members holding the same records converge on the same classification. Clients MUST reconcile on change: a record that becomes counted MUST be ingested (re-fetched per §8 when no longer held), and a record that proves orphaned MUST be discarded (§7.2). Reclamation requires the relevant records; implementations bound retention as [`multi-device.md`](multi-device.md) document chains do, and a record that can no longer be recovered remains a gap (§8).
 
 `boundary_cursor` is advisory for fetch bounding and display (§5). **Countedness is decided by linkage, never by cursor comparison.** A record above `boundary_cursor` can be pulled in by later linkage, and a record below it can be orphaned if never linked.
 
@@ -191,8 +194,8 @@ For the open segment, every record received is provisionally counted; adjudicati
 
 A record of a closed segment that satisfies none of the §7.1 conditions is **orphaned**.
 
-- Clients MUST NOT process orphaned records for group state or display, even when fetched later.
-- If a client has already processed a record that later proves orphaned, the record's content is not authoritative. For application messages, the client MUST discard it locally. For Commits, see §7.3.
+- Clients MUST NOT process records outside the counted set, even when fetched later.
+- Classification can change as knowledge grows (§7.1). A client that processed a record before it proved orphaned MUST discard it; its content is not authoritative, and for Commits see §7.3. A client that discarded a record before it was pulled in MUST re-ingest it.
 - Typical orphans: records written to a coordinator after the group stopped reading it (§9), and the unconfirmed tail of a coordinator that failed (§10). Orphaned records are precisely the records that never achieved inbound confirmation from any counted sender.
 
 #### 7.3 Commits
@@ -202,7 +205,7 @@ MLS handshake records (Proposals and Commits) are not message envelopes and carr
 - a Commit is counted if and only if its resulting epoch lies in the epoch chain of the group's adopted MLS state (the transcript hash chains every Commit to its predecessors, [`RFC 9420`](https://www.rfc-editor.org/rfc/rfc9420));
 - in a planned handoff, the commit carrying the routing update is by definition the final record of the closing segment;
 - in a forced failover, the commit carrying the routing update is by definition the first counted record of the new segment;
-- two competing Commits at the same epoch (possible only when failover commits race, §10) are a fork of the same class as the known equal-epoch limitation of [`multi-device.md`](multi-device.md); healing follows that document's reconcile procedure.
+- two competing Commits at the same epoch (possible only when failover or handoff commits race, §9, §10) are a fork of the same class as the known equal-epoch limitation of [`multi-device.md`](multi-device.md); healing follows that document's reconcile procedure, and the discarded branch's routing updates and segment never existed (§5 marks references to them void).
 
 ### 8. Gap Detection and Recovery
 
@@ -284,12 +287,12 @@ Implementations MUST agree on all of the following:
 
 - the `cordn_coordinator_routing` extension type value, serialization, and versioning rules
 - the `prev` tag name, one-parent-per-tag shape, and the linking rule of §6.3
-- envelope `id` semantics from [`spec/02.md`](../02.md) §4 as DAG node identity, including deduplication on re-send
-- segment numbering, position comparison, and the implicit qualification rule for cursor references that travel with a locator
+- envelope `id` semantics from [`spec/02.md`](../02.md) §4 as DAG node identity, including deduplication on re-send and the canonical (lowest) position rule of §6.2
+- segment numbering, position comparison, the implicit qualification rule for cursor references that travel with a locator, and the stale-marker void rule of §5
 - the counted/orphaned adjudication of §7 and the commit rules of §7.3
 - the planned handoff and forced failover procedures of §9 and §10, including the single-writer discipline
 
-Implementations MUST reject malformed extension payloads, invalid UTF-8, `prev` values that are not valid envelope ids, and extension updates that violate the chain rules of §4.4.
+Implementations MUST reject malformed extension payloads, invalid UTF-8, and `prev` values that are not valid envelope ids. An extension update that violates the chain rules of §4.4 MUST be treated as void rather than applied; such an update can only arrive from a discarded fork branch (§7.3), and the §4.4 rules remain the conformance target for update authors.
 
 ### 15. Rationale
 
@@ -302,6 +305,7 @@ The design keeps coordinators dumb and moves all survivability into group state 
 - **Links in `tags`.** Tags are the designated extension point of the envelope ([`spec/02.md`](../02.md) §6), they are covered by the `id` derivation (same id ⇒ same link set), and conforming decoders carry them through untouched. This makes the mechanism strictly additive: pre-feature clients keep verifying records fully and simply ignore causality.
 - **Positions instead of global cursors.** Cursors are already per-group and coordinator-local ([`spec/00.md`](../00.md) §4). Qualifying them by segment preserves every existing wire format; because each durable cursor reference in the protocol already travels alongside a coordinator locator, qualification is implicit and no format changes are required anywhere.
 - **Orphans are evidence-based.** The old instinct — cap fetches at a cursor and hope — is trust in the switcher's arithmetic. Ancestry makes orphanhood provable, and it coincides exactly with the existing finalization rule: orphaned records are precisely those that never achieved inbound confirmation.
+- **Provisional classification with reconcile-on-change.** Rare boundary races reclassify records in both directions (a straggler orphaned at the cut, then pulled in by its author's next record). Accepting reclassification buys convergence: every member holding the same records computes the same history, with no permanent disagreement about stragglers.
 - **No consensus over the DAG.** The DAG expresses causality; ordering remains the coordinator's job. A fork-choice rule over links would be a second consensus mechanism duplicating the single-writer discipline. The residual race — two handoff commits at the same epoch on different coordinators — is inherited openly from the known [`multi-device.md`](multi-device.md) limitation and healed by the same procedure.
 
 This approach makes coordinator loss a routing event with verifiable boundaries rather than a data-loss event for group state, at the cost of one small optional tag, one optional GroupContext extension, and no coordinator changes.
