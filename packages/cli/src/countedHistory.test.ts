@@ -89,7 +89,7 @@ describe("§7.1/§7.2 adjudication rules", () => {
     expect(result.counted.has("x")).toBe(true);
   });
 
-  test("missing parents and unknown boundary tips are gaps (§8)", () => {
+  test("gaps are soft: a gappy record still counts; unknown parents and tips are gaps (§8)", () => {
     const result = adjudicate([rec("x", 1, 1, ["ghost"])], [cut("phantom")]);
     expect([...result.gaps].sort()).toEqual(["ghost", "phantom"]);
     expect(result.counted.has("x")).toBe(true);
