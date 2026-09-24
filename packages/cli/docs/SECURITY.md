@@ -22,6 +22,8 @@ By default, requests to the coordinator are plaintext ContextVM events. MLS payl
 
 It also matters with more than one relay. The transport de-duplicates gift-wrapped requests by event id, but not plaintext ones, so without encryption a request that reaches the coordinator through N relays is processed N times, and a posted message is stored at N cursors; other members then fail to decrypt the copies ("generation in the past"). Library callers pass `transportEncryption: "required"` to `openPersistentSession`.
 
+One caveat with `required` (in `@contextvm/sdk` 0.14.1): the server also drops a decrypted request whose event id it has already seen, and requests carry no nonce. A client that restarts and repeats a request the previous process already sent, within the same second and with the same key, sends an identical event, and that request goes unanswered until it times out. Separate processes sharing one identity can collide the same way.
+
 The CLI retains `CORDN_SERVER_PRIVATE_KEY` only as a local-development fallback for deriving a coordinator public key. Never distribute a coordinator private key to clients.
 
 ## Client identity and snapshot
