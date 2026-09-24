@@ -6,7 +6,7 @@
 
 This document defines how a `cordn` group survives its coordinator. It covers coordinator migration (planned handoff), coordinator loss (forced failover), and coordinator discovery (preferred coordinator and a preference-ordered fallback roster agreed in group state).
 
-The design rests on three pieces. First, a `cordn_coordinator_routing` MLS GroupContext extension carrying the group's preferred coordinator, fallback roster, and append-only handoff chain. Second, causal `prev` links carried inside sealed message envelopes, over the envelope identifiers already defined in [`spec/02.md`](../02.md), giving the group a self-certifying history whose completeness and boundaries are verifiable without trusting any coordinator. Third, cursor positions qualified by segment, so per-group cursors remain meaningful across coordinators that do not share cursor spaces.
+The design rests on three pieces. First, a `coordinator_routing` field of the cordn group metadata document carrying the group's preferred coordinator, fallback roster, and append-only handoff chain. Second, causal `prev` links carried inside sealed message envelopes, over the envelope identifiers already defined in [`spec/02.md`](../02.md), giving the group a self-certifying history whose completeness and boundaries are verifiable without trusting any coordinator. Third, cursor positions qualified by segment, so per-group cursors remain meaningful across coordinators that do not share cursor spaces.
 
 Coordinators are unchanged. They remain uniform, content-opaque delivery services as defined in [`spec/00.md`](../00.md) and [`spec/03.md`](../03.md); every mechanism in this document is client-side or group-state-side.
 
@@ -17,7 +17,7 @@ Coordinators are unchanged. They remain uniform, content-opaque delivery service
 `cordn` groups use exactly one active coordinator at a time.
 
 - MLS requires strong ordering, so a group MUST NOT write to more than one coordinator concurrently (single-writer discipline).
-- The active coordinator is agreed group state, carried in the `cordn_coordinator_routing` GroupContext extension (§4).
+- The active coordinator is agreed group state, carried in the group metadata document's `coordinator_routing` field (§4).
 - A preference-ordered fallback roster accompanies the active coordinator so members can find the group after coordinator loss without out-of-band signals (§4.4).
 - Switching coordinators is a *handoff*: it closes the current segment of the group's history and opens a new one (§9, §10).
 - Cursor spaces are per coordinator. Positions across a handoff are made meaningful by segment qualification (§5) and by causal links (§6), not by cursor arithmetic.
@@ -48,21 +48,17 @@ interface CoordinatorLocator {
 
 Implementations MUST encode the public key as 32 raw bytes in serialized group state and use the lowercase hex form in textual and API representations, matching [`group-ref.md`](group-ref.md).
 
-### 4. The `cordn_coordinator_routing` Extension
+### 4. Coordinator Routing State
 
-#### 4.1 Extension Identifier
+#### 4.1 Placement in the Group Metadata Document
 
-Implementations MUST use a stable private-use MLS extension type for `cordn_coordinator_routing`.
+Routing state is the first trailing field appended to the `CordnGroupMetadata` structure ([`spec/01.md`](../01.md) §3): an optional `coordinator_routing` field carrying the `CordnCoordinatorRouting` structure of [§4.2](#42-tls-serialization). Encoders MUST always write the field (empty when no routing state is present) so that fields appended by future versions keep their position.
 
-This document assigns:
-
-- `cordn_coordinator_routing = 0xC04E`
-
-This value is in the MLS private-use extension range and MUST be advertised in member capabilities whenever a client claims support for this extension. Capability and admission rules mirror those of [`spec/01.md`](../01.md) §7: a group using this extension MUST ensure all members support it before adding them, and a client joining such a group MUST verify support before accepting the group state.
+No new extension type, capability advertisement, or admission rule is introduced: the field rides the existing `cordn_group_metadata` GroupContext extension (`0xC04D`, [`spec/01.md`](../01.md) §2), whose capability and admission rules are unchanged. Decoders that do not recognize the field MUST ignore it ([`spec/01.md`](../01.md) §4 trailing-field rule); a client that does not understand coordinator handoff simply does not follow it (§14).
 
 #### 4.2 TLS Serialization
 
-The extension payload uses TLS presentation language with MLS variable-length vector encoding conventions, following [`spec/01.md`](../01.md) §3.
+The `coordinator_routing` field payload uses TLS presentation language with MLS variable-length vector encoding conventions, following [`spec/01.md`](../01.md) §3.
 
 In TLS notation:
 
@@ -106,15 +102,15 @@ All `EnvelopeId` values MUST be canonical envelope `id` strings as defined in [`
 
 Rules:
 
-- Segment `k < len(handoffs)` is served by `handoffs[k].from`. Segment `0` at first installation is served by `handoffs[0].from` when the first entry records a migration into this extension, otherwise by the `active` at installation.
+- Segment `k < len(handoffs)` is served by `handoffs[k].from`. Segment `0` at first installation is served by `handoffs[0].from` when the first entry records a migration into the routing state, otherwise by the `active` at installation.
 - A routing update MUST append a `HandoffRecord` if and only if `active` changes. Roster edits that leave `active` unchanged MUST NOT append a record or renumber segments.
 - A locator MAY appear several times in the chain: each appearance is a fresh segment on a fresh stream, even for a coordinator the group used before (§5).
-- The locator recorded in `from` of a new entry MUST equal the `active` of the previous extension state.
+- The locator recorded in `from` of a new entry MUST equal the `active` of the previous routing state.
 - `boundary_tips` is the committer's tip set of the group's causal DAG at commit time (§6). It MAY be empty.
 
 #### 4.5 Lifecycle and Updates
 
-Lifecycle follows [`spec/01.md`](../01.md) §8: the extension MAY be set at group creation or updated by `group_context_extensions` proposals and the commits that apply them. Each update MUST serialize the complete `CordnCoordinatorRouting` structure and MUST preserve any other GroupContext extensions that remain in use.
+Lifecycle follows [`spec/01.md`](../01.md) §8: the metadata document MAY be set at group creation or updated by `group_context_extensions` proposals and the commits that apply them. Each update MUST serialize the complete metadata document — including a complete `CordnCoordinatorRouting` structure whenever routing state is present, never a partial chain — and MUST preserve any other GroupContext extensions that remain in use.
 
 ### 5. Segments and Cursor Positions
 
@@ -214,7 +210,7 @@ Procedure:
 
 1. The group chooses the target locator by its application-level decision process.
 2. The committing member ingests the closing segment to quiescence (fetch-first discipline; late records should be linked before the cut, §7.1 pull-in).
-3. The committing member creates a `group_context_extensions` proposal and Commit replacing `cordn_coordinator_routing` with: `active` set to the target locator, `fallbacks` updated as desired, and a `HandoffRecord` appended with `from` equal to the previous `active` and `boundary_tips` equal to the committer's tip set.
+3. The committing member creates a `group_context_extensions` proposal and Commit replacing the group metadata document's `coordinator_routing` field with: `active` set to the target locator, `fallbacks` updated as desired, and a `HandoffRecord` appended with `from` equal to the previous `active` and `boundary_tips` equal to the committer's tip set.
 4. The commit is posted to the **closing** segment's coordinator. It is the final record of that segment.
 5. After the commit is stored, the sender and every member that processes it MUST NOT post further records to the closing segment. All subsequent records go to `active`, appended to that coordinator's stream: numbering starts at cursor `1` for every new segment (§5).
 6. Clients treat processing the routing commit as the segment switch: fetch progression for positions `(k, c)` maps to the closing coordinator with `afterCursor = c`, and for `(k + 1, c)` to the new `active` with `afterCursor = c`. The existing fetch-then-subscribe ingestion model ([`packages/cli/README.md`](../../packages/cli/README.md)) continues to apply per segment.
@@ -249,12 +245,12 @@ A coordinator also stores Welcomes, join requests, and published KeyPackages. Th
 - **Join requests**: requesters whose pending request was stranded SHOULD re-submit it to the active coordinator ([`join-requests.md`](join-requests.md)).
 - **KeyPackages**: publishers SHOULD re-publish their current KeyPackages to the active coordinator. Last-resort KeyPackages make this non-destructive ([`spec/00.md`](../00.md) §11).
 
-Welcomes minted after the switch embed the group's MLS state and therefore the routing extension: an invitee learns the active coordinator and the full fallback roster before ever contacting a coordinator.
+Welcomes minted after the switch embed the group's MLS state and therefore the routing state: an invitee learns the active coordinator and the full fallback roster before ever contacting a coordinator.
 
 ### 12. Interaction with Other Specifications
 
 - [`spec/00.md`](../00.md): unchanged. Coordinator uniformity (§2), cursor semantics (§4–§5), and the migration slot reserved in §13 are as this document defines them.
-- [`spec/01.md`](../01.md): `cordn_coordinator_routing` coexists with `cordn_group_metadata`; updates to either MUST preserve the other ([§4.5](#45-lifecycle-and-updates)).
+- [`spec/01.md`](../01.md): `coordinator_routing` is a trailing field of the `CordnGroupMetadata` structure defined there; its append-only evolution and ignore-trailing rules (§4) give pre-feature clients the ignore-and-continue behavior of §14.
 - [`spec/02.md`](../02.md): the envelope `id` (§4) is DAG node identity; `prev` tags are ordinary tags (§6) and the existing mandatory `id` recomputation covers them. Envelope decoding is unaffected: `prev` is additive and unknown tags are preserved by conforming decoders.
 - [`spec/03.md`](../03.md): unchanged. Links live inside the sealed payload; coordinators gain no visibility (§3, §6.3).
 - [`group-ref.md`](group-ref.md): a group reference's coordinator coordinates are one locator (§3). A reference minted after a handoff SHOULD carry the active locator and MAY carry fallback relays as additional relay hints.
@@ -277,14 +273,14 @@ A group lives on coordinator A. Its stream is segment `0`, cursors `1..40`, wher
 
 Implementations MUST agree on all of the following:
 
-- the `cordn_coordinator_routing` extension type value, serialization, and versioning rules
+- the `coordinator_routing` field's placement in the metadata document, serialization, and versioning rules
 - the `prev` tag name, one-parent-per-tag shape, and the linking rule of §6.3
 - envelope `id` semantics from [`spec/02.md`](../02.md) §4 as DAG node identity, including deduplication on re-send and the canonical (lowest) position rule of §6.2
 - segment numbering, position comparison, the implicit qualification rule for cursor references that travel with a locator, and the stale-marker void rule of §5
 - the counted/orphaned adjudication of §7 and the commit rules of §7.3
 - the planned handoff and forced failover procedures of §9 and §10, including the single-writer discipline
 
-Implementations MUST reject malformed extension payloads, invalid UTF-8, and `prev` values that are not valid envelope ids. An extension update that violates the chain rules of §4.4 MUST be treated as void rather than applied; such an update can only arrive from a discarded fork branch (§7.3), and the §4.4 rules remain the conformance target for update authors.
+Implementations MUST reject malformed routing payloads, invalid UTF-8, and `prev` values that are not valid envelope ids. An extension update that violates the chain rules of §4.4 MUST be treated as void rather than applied; such an update can only arrive from a discarded fork branch (§7.3), and the §4.4 rules remain the conformance target for update authors.
 
 ### 15. Rationale
 
@@ -292,6 +288,7 @@ The design keeps coordinators dumb and moves all survivability into group state 
 
 - **One active coordinator at a time.** MLS needs a total order; multiple concurrent coordinators would assign incomparable cursors and fork group state. A single writer with sequential segments is the simplest structure that preserves strong ordering.
 - **Preferred coordinator and fallback roster in group state.** Group state is agreed through MLS, so nobody can unilaterally redirect the group. The roster is required because of the discovery paradox: updating group state to say where the group went requires a coordinator, so after coordinator *loss* the metadata cannot name the recovery target. The roster is recovery state agreed *before* the disaster. Preferring the first reachable fallback also concentrates racing failover commits on one coordinator, where ordering serializes them.
+- **No new mandatory feature.** Routing extends the existing group metadata document instead of adding a GroupContext extension type: MLS makes every GroupContext extension mandatory for all members ([RFC 9420](https://www.rfc-editor.org/rfc/rfc9420) §13.4), so a new type would gate key packages and admission. As a trailing metadata field, handoff inherits the capability story the metadata extension already has, and clients that predate the fields simply do not follow them.
 - **Causal links over cursor arithmetic.** Dense offset schemes (continuing one coordinator's numbering on the next) require knowing the exact last cursor assigned before the cut. That number is unknowable after a crash, so offsets either collide (two records claiming one position, silently skipping fetches) or gap unpredictably. Link-based adjudication is exact under the same races: a record is counted because someone counted links it, and the pull-in rule of §7.1 covers the ordinary straggler without losing messages. This replaces trust in cursor bookkeeping with verifiable ancestry.
 - **Correlation is advisory; decryption is epoch-local.** The DAG decides what counts and what is missing (§7, §8), never whether a record can be opened: an application record decrypts at its own epoch even across gaps, so counted records are processed optimistically, and a decryption attempt doubles as a cheap probe that distinguishes history gaps from epoch gaps in recovery.
 - **Envelope `id` as node identity.** It is computed once by the author and mandatorily re-derived by receivers today ([`spec/02.md`](../02.md) §4), so the DAG inherits verification for free. It is content-derived, so a re-send of a lost record after re-sealing keeps its identity and deduplicates — where a hash over the sealed blob would differ on every fresh nonce. And it never surfaces outside the seal, so coordinators cannot even compute the DAG's node identities.
@@ -301,4 +298,4 @@ The design keeps coordinators dumb and moves all survivability into group state 
 - **Provisional classification with reconcile-on-change.** Rare boundary races reclassify records in both directions (a straggler orphaned at the cut, then pulled in by its author's next record). Accepting reclassification buys convergence: every member holding the same records computes the same history, with no permanent disagreement about stragglers.
 - **No consensus over the DAG.** The DAG expresses causality; ordering remains the coordinator's job. A fork-choice rule over links would be a second consensus mechanism duplicating the single-writer discipline. The residual race — two handoff commits at the same epoch on different coordinators — is inherited openly from the known [`multi-device.md`](multi-device.md) limitation and healed by the same procedure.
 
-This approach makes coordinator loss a routing event with verifiable boundaries rather than a data-loss event for group state, at the cost of one small optional tag, one optional GroupContext extension, and no coordinator changes.
+This approach makes coordinator loss a routing event with verifiable boundaries rather than a data-loss event for group state, at the cost of one small optional tag, one optional metadata field, and no coordinator changes.

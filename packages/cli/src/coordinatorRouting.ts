@@ -1,9 +1,12 @@
-import { normalizePubkey } from "./groupMetadata.ts";
-
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
-export const CORDN_COORDINATOR_ROUTING_EXTENSION_TYPE = 0xc04e;
+function normalizePubkey(pubkey: string): string {
+  if (!/^[0-9a-fA-F]{64}$/.test(pubkey)) {
+    throw new Error(`Invalid pubkey: ${pubkey}`);
+  }
+  return pubkey.trim().toLowerCase();
+}
 
 export interface CoordinatorLocator {
   pubkey: string;

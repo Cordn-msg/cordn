@@ -6,6 +6,12 @@ import {
   type GroupContextExtension,
 } from "ts-mls";
 
+import {
+  decodeCordnCoordinatorRouting,
+  encodeCordnCoordinatorRouting,
+  type CordnCoordinatorRouting,
+} from "./coordinatorRouting.ts";
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -17,6 +23,8 @@ export interface CordnGroupMetadata {
   adminPubkeys?: string[];
   icon?: string;
   imageUrl?: string;
+  /** Trailing field: coordinator routing state (coordinator-handoff.md §4). */
+  coordinatorRouting?: CordnCoordinatorRouting;
 }
 
 interface NormalizedCordnGroupMetadata {
@@ -26,6 +34,7 @@ interface NormalizedCordnGroupMetadata {
   adminPubkeys: string[];
   icon: string;
   imageUrl: string;
+  coordinatorRouting?: CordnCoordinatorRouting;
 }
 
 function encodeUint16(value: number): Uint8Array {
@@ -105,6 +114,7 @@ function normalizeCordnGroupMetadata(
     adminPubkeys: normalizeAdminPubkeys(metadata.adminPubkeys),
     icon: metadata.icon ?? "",
     imageUrl: metadata.imageUrl ?? "",
+    coordinatorRouting: metadata.coordinatorRouting,
   };
 }
 
@@ -143,6 +153,13 @@ export function encodeCordnGroupMetadata(
     ...encodeField(encodeAdminPubkeys(normalized.adminPubkeys)),
     ...encodeField(encodeUtf8(normalized.icon)),
     ...encodeField(encodeUtf8(normalized.imageUrl)),
+    // First trailing field: coordinator_routing (coordinator-handoff.md §4.1).
+    // Always present so future trailing fields keep their position.
+    ...encodeField(
+      normalized.coordinatorRouting === undefined
+        ? new Uint8Array()
+        : encodeCordnCoordinatorRouting(normalized.coordinatorRouting),
+    ),
   ]);
 }
 
@@ -167,10 +184,17 @@ export function decodeCordnGroupMetadata(
     offsetAfterDescription,
   );
   const [iconBytes, offsetAfterIcon] = decodeField(bytes, offsetAfterAdmins);
-  const [imageUrlBytes, finalOffset] = decodeField(bytes, offsetAfterIcon);
+  const [imageUrlBytes, afterImageUrl] = decodeField(bytes, offsetAfterIcon);
 
-  if (finalOffset !== bytes.length) {
-    throw new Error("Unexpected trailing bytes in cordn group metadata");
+  // The first trailing field is coordinator_routing (coordinator-handoff.md
+  // §4.1); further trailing fields come from future versions and are ignored
+  // (spec/01.md §4).
+  let coordinatorRouting: CordnCoordinatorRouting | undefined;
+  if (afterImageUrl < bytes.length) {
+    const [routingBytes] = decodeField(bytes, afterImageUrl);
+    if (routingBytes.length > 0) {
+      coordinatorRouting = decodeCordnCoordinatorRouting(routingBytes);
+    }
   }
 
   const adminPubkeys = decodeAdminPubkeys(adminPubkeysBytes);
@@ -181,6 +205,7 @@ export function decodeCordnGroupMetadata(
     adminPubkeys: adminPubkeys.length > 0 ? adminPubkeys : undefined,
     icon: decodeUtf8(iconBytes) || undefined,
     imageUrl: decodeUtf8(imageUrlBytes) || undefined,
+    coordinatorRouting,
   };
 }
 
