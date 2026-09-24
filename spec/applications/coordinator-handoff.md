@@ -6,7 +6,7 @@
 
 This document defines how a `cordn` group survives its coordinator. It covers coordinator migration (planned handoff), coordinator loss (forced failover), and coordinator discovery (preferred coordinator and a preference-ordered fallback roster agreed in group state).
 
-The design rests on three pieces. First, a `coordinator_routing` field of the cordn group metadata document carrying the group's preferred coordinator, fallback roster, and append-only handoff chain. Second, causal `prev` links carried inside sealed message envelopes, over the envelope identifiers already defined in [`spec/02.md`](../02.md), giving the group a self-certifying history whose completeness and boundaries are verifiable without trusting any coordinator. Third, cursor positions qualified by segment, so per-group cursors remain meaningful across coordinators that do not share cursor spaces.
+The design rests on two pieces. First, a `coordinator_routing` field of the cordn group metadata document carrying the group's preferred coordinator, fallback roster, and append-only handoff chain. Second, causal `prev` links carried inside sealed message envelopes, over the envelope identifiers already defined in [`spec/02.md`](../02.md), giving the group a self-certifying history whose completeness and boundaries are verifiable without trusting any coordinator. Cursors stay exactly as [`spec/00.md`](../00.md) defines them — stream-local addresses — and are given no cross-stream meaning.
 
 Coordinators are unchanged. They remain uniform, content-opaque delivery services as defined in [`spec/00.md`](../00.md) and [`spec/03.md`](../03.md); every mechanism in this document is client-side or group-state-side.
 
@@ -20,16 +20,15 @@ Coordinators are unchanged. They remain uniform, content-opaque delivery service
 - The active coordinator is agreed group state, carried in the group metadata document's `coordinator_routing` field (§4).
 - A preference-ordered fallback roster accompanies the active coordinator so members can find the group after coordinator loss without out-of-band signals (§4.4).
 - Switching coordinators is a *handoff*: it closes the current segment of the group's history and opens a new one (§9, §10).
-- Cursor spaces are per coordinator. Positions across a handoff are made meaningful by segment qualification (§5) and by causal links (§6), not by cursor arithmetic.
+- Cursor spaces are per coordinator and are given no cross-stream meaning. History identity and continuity come from causal links (§6), never from cursor arithmetic (§5).
 
 This document adds no coordinator protocol surface. All fetch, store, and subscribe behavior is unchanged.
 
 ### 2. Terminology
 
 - **Locator**: where a coordinator can be reached: its public key plus optional relay hints (§3).
-- **Stream**: one `gid`'s cursor space on one coordinator for one segment. Cursors are assigned by that coordinator and never renumbered within a stream. Each segment has exactly one stream; a coordinator serving the group again opens a new stream, restarting at cursor `1` (§5).
-- **Segment**: one contiguous stretch of the group's history served under one active coordinator. Segment indices are `0, 1, 2, …` in handoff order. A segment maps to exactly one stream (§5).
-- **Position**: a pair `(segment, cursor)` naming a record's place in the group's history (§5).
+- **Stream**: one `gid`'s cursor space on one coordinator for one segment. Cursors are assigned by that coordinator and never renumbered within a stream. A coordinator serving the group again opens a new stream, restarting at cursor `1` (§5).
+- **Segment**: one contiguous stretch of the group's history served under one active coordinator. Segment indices are `0, 1, 2, …` in handoff order. A segment has exactly one stream (§5).
 - **Link**: a `prev` tag in a message envelope naming another record by envelope `id` (§6).
 - **Tip**: a record whose `id` is not referenced as a link target by any known record.
 - **Ancestors of a record**: the record itself and everything reachable from it by following links transitively.
@@ -89,10 +88,7 @@ All `EnvelopeId` values MUST be canonical envelope `id` strings as defined in [`
 
 #### 4.3 Versioning
 
-- Version `1` is the initial format defined by this document.
-- Version `0` is reserved and MUST be rejected.
-- Future versions MUST preserve append-only evolution by adding new fields only at the end of the structure.
-- Implementations SHOULD ignore unknown trailing fields from future versions when this can be done safely.
+- Version `1` is the initial format defined by this document. Versioning follows [`spec/01.md`](../01.md) §4 exactly: version `0` is reserved and MUST be rejected, evolution is append-only at the end of the structure, and unknown trailing fields SHOULD be ignored when this can be done safely.
 
 #### 4.4 Field Semantics
 
@@ -102,7 +98,6 @@ All `EnvelopeId` values MUST be canonical envelope `id` strings as defined in [`
 
 Rules:
 
-- Segment `k < len(handoffs)` is served by `handoffs[k].from`. Segment `0` at first installation is served by `handoffs[0].from` when the first entry records a migration into the routing state, otherwise by the `active` at installation.
 - A routing update MUST append a `HandoffRecord` if and only if `active` changes. Roster edits that leave `active` unchanged MUST NOT append a record or renumber segments.
 - A locator MAY appear several times in the chain: each appearance is a fresh segment on a fresh stream, even for a coordinator the group used before (§5).
 - The locator recorded in `from` of a new entry MUST equal the `active` of the previous routing state.
@@ -112,20 +107,19 @@ Rules:
 
 Lifecycle follows [`spec/01.md`](../01.md) §8: the metadata document MAY be set at group creation or updated by `group_context_extensions` proposals and the commits that apply them. Each update MUST serialize the complete metadata document — including a complete `CordnCoordinatorRouting` structure whenever routing state is present, never a partial chain — and MUST preserve any other GroupContext extensions that remain in use.
 
-### 5. Segments and Cursor Positions
+### 5. Streams and Cursors
 
-Cursors remain exactly as defined in [`spec/00.md`](../00.md) §4–§5: monotonic per group, scoped to one coordinator's view of the group's stream, never canonical message identities. This document adds that every cursor belongs to a **segment**, and that cursor spaces belong to **streams**.
+Cursors remain exactly as defined in [`spec/00.md`](../00.md) §4–§5: monotonic per group, scoped to one coordinator's view of the group's stream, never canonical message identities. Cursors are stream-local addresses and nothing more: they order records within one stream and never carry meaning across streams.
 
-- A stream is one `gid`'s cursor space on one coordinator, and it serves exactly one segment. A coordinator serving the group again opens a **new stream**, restarting at cursor `1`, and MAY discard the previous one. Continuing an old stream would leave records at the seam between stints unattributable: the routing commits that delimit stints live in other streams, so nothing in a shared numbering decides which stint a seam record belongs to. Clients need no stream boundary markers: order is cursor order within a segment, and countedness is decided by linkage (§7).
-- A position `(k, c)` names cursor `c` of the stream that segment `k` is served by.
-- Cursor values MUST NOT be compared or combined across segments except by comparing positions lexicographically: `(k, c) < (k', c')` iff `k < k'`, or `k = k'` and `c < c'`.
-- A cursor reference that travels with a coordinator locator is implicitly qualified by that coordinator's stream. No format change is required:
+- A stream is one `gid`'s cursor space on one coordinator, and it serves exactly one segment. A coordinator serving the group again opens a **new stream**, restarting at cursor `1`, and MAY discard the previous one. Continuing an old stream would leave records at the seam between stints unattributable: the routing commits that delimit stints live in other streams, so nothing in a shared numbering decides which stint a seam record belongs to. Because every stream numbers from `1`, a fetch progression resets when the group's stream changes.
+- Cursor values MUST NOT be compared or combined across streams. Within one stream, order is cursor order.
+- A cursor reference MUST travel with its locator, which names the stream. No format change is required:
   - the Welcome `after` hint ([`welcome-delivery.md`](welcome-delivery.md)) names a cursor of the stream whose coordinator stores the Welcome;
   - a group document's `cursor` ([`multi-device.md`](multi-device.md) §4) names a cursor of the stream whose coordinator the document names in its `coordinator` field;
   - client-local fetch progression and read markers name cursors of the stream the client is currently ingesting.
-- A cursor reference MUST travel with its locator. One with no locator in a group with `len(handoffs) > 0`, or whose locator does not appear in the adopted chain — for example a marker minted on a discarded fork branch (§10) — is void.
+- A cursor reference with no locator in a group with `len(handoffs) > 0`, or whose locator does not appear in the adopted chain — for example a marker minted on a discarded fork branch (§10) — is void.
 
-There is deliberately no derived or dense numbering across segments: history identity comes from the link chain (§6), order from `(segment, cursor)`, and offsets would add arithmetic without adding meaning.
+There is deliberately no numbering or ordering across streams: history identity and order come from the link chain (§6), and display order across streams is client-local.
 
 ### 6. Causal Links and Message Identity
 
@@ -150,7 +144,6 @@ The node identity of a record in the causal DAG is the envelope `id` defined in 
 - Authors compute the `id` once at send time; receivers re-derive it as already required by [`spec/02.md`](../02.md) §4. No additional verification step is introduced.
 - Because `tags` participates in the `id` derivation, the `id` commits to the record's link set: two records with the same `id` have the same parents. Author equivocation on the DAG is structurally impossible.
 - Re-sending a lost record MUST reuse the original envelope and therefore its `id`, re-sealing only (fresh nonce, [`spec/03.md`](../03.md) §4). Receivers MUST deduplicate by `id`, so re-delivery, re-sending, and handoff overlap all collapse to one record.
-- When the same `id` appears at multiple positions (a re-send landing in a later segment), it is one record, and the lowest position is canonical.
 
 #### 6.3 Linking Rule
 
@@ -166,18 +159,18 @@ Links are carried inside the sealed payload ([`spec/03.md`](../03.md) §4). Coor
 
 #### 7.1 Counted Records
 
-A record of a closed segment `k` is **counted** if and only if either:
+A record is **counted** if and only if it lies in the ancestor closure of the counted seeds:
 
-- it is an ancestor of one of `handoffs[k].boundary_tips`, or
-- it becomes linked as an ancestor of any later counted record (pull-in).
+- every `boundary_tips` entry of every `handoffs` record, and
+- every record fetched from the stream serving the open segment (provisional seeds).
 
-The cut counts exactly what the cutting committer had ingested: `boundary_tips` is that member's tip set, and the ancestor closure of a tip set is everything its holder knew — linked records walk back through their ancestors, and records with no `prev` tags are themselves tips. **Countedness is decided by linkage alone**; cursor values never decide it.
+Everything else a client holds is **orphaned** (§7.2). The closure of one cut's tips is exactly the cutting committer's knowledge: `boundary_tips` is that member's tip set, and the ancestor closure of a tip set is everything its holder knew — linked records walk back through their ancestors, and records with no `prev` tags are themselves tips. Any cut's tips may pull a record in, and any counted record links its ancestors in with it. **Countedness is decided by linkage and stream provenance, never by cursor values.**
 
-Classification is provisional and grows with knowledge: an open-segment record is provisionally counted when received (and adjudication is not final at segment close, because later linkage can still pull records in), a segment's closing can orphan records the group never linked, and later linkage can pull records back in. All members holding the same records converge on the same classification. Clients MUST reconcile on change: a record that becomes counted MUST be ingested (re-fetched per §8 when no longer held), and a record that proves orphaned MUST be discarded (§7.2). Reclamation requires the relevant records; implementations bound retention as [`multi-device.md`](multi-device.md) document chains do, and a record that can no longer be recovered remains a gap (§8).
+Classification is provisional and grows with knowledge: a record fetched from the open stream is provisionally counted (and adjudication is not final at segment close, because later linkage can still pull records in), a segment's closing can orphan records the group never linked, and later linkage can pull records back in. All members holding the same records converge on the same classification. Clients MUST reconcile on change: a record that becomes counted MUST be ingested (re-fetched per §8 when no longer held), and a record that proves orphaned MUST be discarded (§7.2). Reclamation requires the relevant records; implementations bound retention as [`multi-device.md`](multi-device.md) document chains do, and a record that can no longer be recovered remains a gap (§8).
 
 #### 7.2 Orphaned Records
 
-A record of a closed segment that satisfies none of the §7.1 conditions is **orphaned**.
+A record is **orphaned** when it is not counted (§2, §7.1).
 
 - Clients MUST NOT process records outside the counted set, even when fetched later.
 - Classification can change as knowledge grows (§7.1). A client that processed a record before it proved orphaned MUST discard it; its content is not authoritative, and for Commits see §7.3. A client that discarded a record before it was pulled in MUST re-ingest it.
@@ -213,7 +206,7 @@ Procedure:
 3. The committing member creates a `group_context_extensions` proposal and Commit replacing the group metadata document's `coordinator_routing` field with: `active` set to the target locator, `fallbacks` updated as desired, and a `HandoffRecord` appended with `from` equal to the previous `active` and `boundary_tips` equal to the committer's tip set.
 4. The commit is posted to the **closing** segment's coordinator. It is the final record of that segment.
 5. After the commit is stored, the sender and every member that processes it MUST NOT post further records to the closing segment. All subsequent records go to `active`, appended to that coordinator's stream: numbering starts at cursor `1` for every new segment (§5).
-6. Clients treat processing the routing commit as the segment switch: fetch progression for positions `(k, c)` maps to the closing coordinator with `afterCursor = c`, and for `(k + 1, c)` to the new `active` with `afterCursor = c`. The existing fetch-then-subscribe ingestion model ([`packages/cli/README.md`](../../packages/cli/README.md)) continues to apply per segment.
+6. Clients treat processing the routing commit as the segment switch: fetch progression resets to the new stream, which numbers from `1` (§5). The existing fetch-then-subscribe ingestion model ([`packages/cli/README.md`](../../packages/cli/README.md)) continues to apply per stream.
 7. Non-message coordinator state is migrated per §11.
 
 A straggler that misses the routing commit and posts to the closing segment produces an orphan candidate: the record can only become counted by the §7.1 pull-in rule, and it can never finalize a pending epoch operation, because inbound confirmation for it requires ingesting past the cut, which no compliant client performs. On catching up, the straggler retries its pending record on the new segment.
@@ -228,7 +221,7 @@ Procedure:
 2. Members attempt the `fallbacks` roster in preference order. All members SHOULD prefer the first reachable fallback, which concentrates handoff commits on one coordinator and lets that coordinator's ordering serialize them.
 3. The first member to commit on the chosen fallback creates a `group_context_extensions` update: `active` set to the chosen fallback, `handoffs` appended with `from` equal to the unreachable coordinator's locator and `boundary_tips` equal to the committer's tip set.
 4. The commit is posted to the **new** coordinator. It is the first counted record of the new segment. The old segment's cut is approximate: `boundary_tips` states what one member had confirmed, and §7.1 adjudicates the rest.
-5. Every member adopts the routing commit on processing it and switches write targets (§9 step 6 for progression mapping).
+5. Every member adopts the routing commit on processing it and switches write targets (§9 step 6 for the stream switch).
 6. Authors of records that never achieved inbound confirmation on the dead segment MAY re-send them on the new segment. Re-sends reuse the original envelope `id` and deduplicate (§6.2); unconfirmed Commits cannot be re-sent and are superseded by new Commits on the new segment.
 
 Requirements and failure notes:
@@ -241,7 +234,7 @@ Requirements and failure notes:
 
 A coordinator also stores Welcomes, join requests, and published KeyPackages. This state does not migrate automatically; owners re-establish it on the active coordinator:
 
-- **Welcomes**: Welcomes stranded on a former coordinator's queue are stale after a planned handoff and lost after a forced failover. Inviters SHOULD re-store pending Welcomes on the active coordinator. A re-stored Welcome's `after` hint MUST be minted as a cursor of the active segment (§5).
+- **Welcomes**: Welcomes stranded on a former coordinator's queue are stale after a planned handoff and lost after a forced failover. Inviters SHOULD re-store pending Welcomes on the active coordinator. A re-stored Welcome's `after` hint MUST be minted as a cursor of the active stream (§5).
 - **Join requests**: requesters whose pending request was stranded SHOULD re-submit it to the active coordinator ([`join-requests.md`](join-requests.md)).
 - **KeyPackages**: publishers SHOULD re-publish their current KeyPackages to the active coordinator. Last-resort KeyPackages make this non-destructive ([`spec/00.md`](../00.md) §11).
 
@@ -254,19 +247,19 @@ Welcomes minted after the switch embed the group's MLS state and therefore the r
 - [`spec/02.md`](../02.md): the envelope `id` (§4) is DAG node identity; `prev` tags are ordinary tags (§6) and the existing mandatory `id` recomputation covers them. Envelope decoding is unaffected: `prev` is additive and unknown tags are preserved by conforming decoders.
 - [`spec/03.md`](../03.md): unchanged. Links live inside the sealed payload; coordinators gain no visibility (§3, §6.3).
 - [`group-ref.md`](group-ref.md): a group reference's coordinator coordinates are one locator (§3). A reference minted after a handoff SHOULD carry the active locator and MAY carry fallback relays as additional relay hints.
-- [`welcome-delivery.md`](welcome-delivery.md): the `after` hint is a position (§5), implicitly scoped to the segment whose coordinator stores the Welcome.
-- [`multi-device.md`](multi-device.md): the group document `cursor` is a position (§5), implicitly scoped to the segment named by the document's `coordinator` field. Its compare-and-advance rules (§8) apply within one segment; across segments, positions compare lexicographically. Fork healing continues to follow that document's reconcile procedure.
+- [`welcome-delivery.md`](welcome-delivery.md): the `after` hint is a cursor of the stream whose coordinator stores the Welcome (§5).
+- [`multi-device.md`](multi-device.md): the group document `cursor` is a cursor of the stream named by the document's `coordinator` field (§5). Its compare-and-advance rules (§8) apply within one stream; there is no cross-stream cursor comparison. Fork healing continues to follow that document's reconcile procedure.
 - [`join-requests.md`](join-requests.md): stranding and re-submission are as §11.
 
 ### 13. Worked Example
 
-A group lives on coordinator A. Its stream is segment `0`, cursors `1..40`, where cursor 40 is a planned handoff commit to coordinator B carrying `boundary_tips = [<id at (0, 37)>]` — the committer's tips, whose ancestor closure is everything that committer had ingested.
+A group lives on coordinator A. Its stream is segment `0`, cursors `1..40`, where cursor 40 is a planned handoff commit to coordinator B carrying `boundary_tips = [<id at A-cursor 37>]` — the committer's tips, whose ancestor closure is everything that committer had ingested.
 
-- A chat message sits at `(0, 12)`.
-- The handoff commit is the seam at `(0, 40)`.
-- B serves segment `1` on its own stream; its first chat message is `(1, 1)`.
-- A message written to A at cursor 41 after the cut is fetched later: it is orphaned (not linked by `boundary_tips`, not pulled in) and MUST NOT be processed.
-- A message that a slow member wrote to A at cursor 38 before the cut, which the committer had not ingested, is pulled in when the author's next record on B links its `id`. It is counted at `(0, 38)`.
+- A chat message sits at A-cursor 12.
+- The handoff commit is the seam at A-cursor 40.
+- B serves segment `1` on its own stream; its first chat message is at B-cursor 1.
+- A message written to A at cursor 41 after the cut is fetched later: its stream is no longer open and nothing counted links it, so it is orphaned and MUST NOT be processed.
+- A message that a slow member wrote to A at cursor 38 before the cut, which the committer had not ingested, is pulled in when the author's next record on B links its `id`. It is counted.
 - An older record with no `prev` tags that the committer had ingested is a tip, so it appears in `boundary_tips` itself and is counted.
 
 ### 14. Interoperability Requirements
@@ -275,8 +268,8 @@ Implementations MUST agree on all of the following:
 
 - the `coordinator_routing` field's placement in the metadata document, serialization, and versioning rules
 - the `prev` tag name, one-parent-per-tag shape, and the linking rule of §6.3
-- envelope `id` semantics from [`spec/02.md`](../02.md) §4 as DAG node identity, including deduplication on re-send and the canonical (lowest) position rule of §6.2
-- segment numbering, position comparison, the implicit qualification rule for cursor references that travel with a locator, and the stale-marker void rule of §5
+- envelope `id` semantics from [`spec/02.md`](../02.md) §4 as DAG node identity, including deduplication on re-send (§6.2)
+- stream-local cursor semantics, the rule that cursor references travel with their locator, and the stale-stream void rule of §5
 - the counted/orphaned adjudication of §7 and the commit rules of §7.3
 - the planned handoff and forced failover procedures of §9 and §10, including the single-writer discipline
 
@@ -293,7 +286,7 @@ The design keeps coordinators dumb and moves all survivability into group state 
 - **Correlation is advisory; decryption is epoch-local.** The DAG decides what counts and what is missing (§7, §8), never whether a record can be opened: an application record decrypts at its own epoch even across gaps, so counted records are processed optimistically, and a decryption attempt doubles as a cheap probe that distinguishes history gaps from epoch gaps in recovery.
 - **Envelope `id` as node identity.** It is computed once by the author and mandatorily re-derived by receivers today ([`spec/02.md`](../02.md) §4), so the DAG inherits verification for free. It is content-derived, so a re-send of a lost record after re-sealing keeps its identity and deduplicates — where a hash over the sealed blob would differ on every fresh nonce. And it never surfaces outside the seal, so coordinators cannot even compute the DAG's node identities.
 - **Links in `tags`.** Tags are the designated extension point of the envelope ([`spec/02.md`](../02.md) §6), they are covered by the `id` derivation (same id ⇒ same link set), and conforming decoders carry them through untouched. This makes the mechanism strictly additive: pre-feature clients keep verifying records fully and simply ignore causality.
-- **Positions instead of global cursors.** Cursors are already per-group and coordinator-local ([`spec/00.md`](../00.md) §4). Qualifying them by segment preserves every existing wire format; because each durable cursor reference in the protocol already travels alongside a coordinator locator, qualification is implicit and no format changes are required anywhere. Derived virtual numbering is deliberately absent: history identity comes from the link chain and order from `(segment, cursor)`, so dense offsets would add arithmetic without meaning — and with no arithmetic in the design, a returning coordinator's fresh numbering space (§5) is harmless.
+- **Stream-local cursors, no global numbering.** Cursors are already per-group and coordinator-local ([`spec/00.md`](../00.md) §4). The design assigns them no cross-stream meaning at all: history identity and order come from the link chain, so there is no numbering to maintain, translate, or compare — and every durable cursor reference in the protocol already travels alongside a coordinator locator, so no format changes are required anywhere. With no cursor arithmetic anywhere in the design, a returning coordinator's fresh numbering space (§5) is harmless.
 - **Orphans are evidence-based.** The old instinct — cap fetches at a cursor and hope — is trust in the switcher's arithmetic. Ancestry makes orphanhood provable, and it coincides exactly with the existing finalization rule: orphaned records are precisely those that never achieved inbound confirmation.
 - **Provisional classification with reconcile-on-change.** Rare boundary races reclassify records in both directions (a straggler orphaned at the cut, then pulled in by its author's next record). Accepting reclassification buys convergence: every member holding the same records computes the same history, with no permanent disagreement about stragglers.
 - **No consensus over the DAG.** The DAG expresses causality; ordering remains the coordinator's job. A fork-choice rule over links would be a second consensus mechanism duplicating the single-writer discipline. The residual race — two handoff commits at the same epoch on different coordinators — is inherited openly from the known [`multi-device.md`](multi-device.md) limitation and healed by the same procedure.

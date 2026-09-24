@@ -8,29 +8,18 @@
  * the test file records the finding.
  */
 
-/**
- * A record's place in history (§5). Cursors restart per segment — a
- * coordinator serving the group again opens a fresh numbering space — so
- * `(segment, cursor)` is unambiguous and order is lexicographic.
- */
-export interface Position {
-  segment: number;
-  cursor: number;
-}
-
 export interface HistoryRecord {
   /** Envelope `id` ([`spec/02.md`] §4) — the DAG node identity (§6.2). */
   id: string;
   /** Envelope `id` values named by `prev` tags. Empty = a DAG root (§6.3). */
   parents: string[];
-  position: Position;
+  /**
+   * The stream this copy was fetched from (§2). Provenance is the only
+   * cursor-derived fact adjudication uses: whether the copy came from the
+   * stream serving the open segment (§7.1 provisional seeds).
+   */
+  stream: string;
 }
-
-/**
- * A closing commit's `boundary_tips` (§4.4) — the committer's tip set. Its
- * ancestor closure is exactly what that member had ingested (§7.1).
- */
-export type SegmentCut = string[];
 
 /** The routing fields that matter for the §4.4 chain rules. */
 export interface RoutingState {
@@ -43,18 +32,6 @@ export interface Adjudication {
   counted: Set<string>;
   orphaned: Set<string>;
   gaps: Set<string>;
-}
-
-/** Positions compare lexicographically (§5). */
-export function comparePositions(a: Position, b: Position): number {
-  return a.segment !== b.segment ? a.segment - b.segment : a.cursor - b.cursor;
-}
-
-/** A record appearing at multiple positions canonically sits at the lowest (§6.2). */
-export function canonicalPosition(positions: Position[]): Position {
-  return positions.reduce((best, candidate) =>
-    comparePositions(candidate, best) < 0 ? candidate : best,
-  );
 }
 
 /** Tip = id not referenced as a link target by any known record (§2). */
@@ -70,20 +47,21 @@ export function tipsOf(records: Iterable<HistoryRecord>): string[] {
 
 interface Entry {
   parents: string[];
-  positions: Position[];
+  streams: string[];
 }
 
 /**
  * Counted/orphaned adjudication (§7.1, §7.2). Counted history is the
- * ancestor-closure of the seeds: open-segment records (provisionally
- * counted) and the `boundary_tips` of every cut. Entries whose copies all
- * lie in closed segments and fall outside that closure are orphaned.
- * Referenced ids nobody holds are gaps (§8). Duplicate copies of one `id`
- * (re-sends, §6.2) are one record. Cursor values never decide anything.
+ * ancestor-closure of the seeds: every `boundary_tips` entry of every cut
+ * and every record fetched from the stream serving the open segment
+ * (provisionally counted). Everything else held is orphaned. Referenced ids
+ * nobody holds are gaps (§8). Duplicate copies of one `id` (re-sends, §6.2)
+ * are one record. Cursor values never decide anything.
  */
 export function adjudicate(
   records: Iterable<HistoryRecord>,
-  cuts: SegmentCut[],
+  cutTips: Iterable<string>,
+  activeStream: string,
 ): Adjudication {
   const entries = new Map<string, Entry>();
   for (const record of records) {
@@ -91,10 +69,10 @@ export function adjudicate(
     if (entry === undefined) {
       entries.set(record.id, {
         parents: record.parents,
-        positions: [record.position],
+        streams: [record.stream],
       });
     } else {
-      entry.positions.push(record.position);
+      entry.streams.push(record.stream);
     }
   }
 
@@ -107,13 +85,11 @@ export function adjudicate(
   };
 
   for (const [id, entry] of entries) {
-    if (
-      entry.positions.some((position) => cuts[position.segment] === undefined)
-    ) {
-      seed(id); // any copy in the open segment: provisionally counted
+    if (entry.streams.includes(activeStream)) {
+      seed(id); // any copy from the open stream: provisionally counted
     }
   }
-  for (const tips of cuts) for (const tip of tips) seed(tip);
+  for (const tip of cutTips) seed(tip);
 
   // Pull-in: ancestors of counted records are counted (§7.1).
   const queue = [...counted];
@@ -132,11 +108,8 @@ export function adjudicate(
   }
 
   const orphaned = new Set<string>();
-  for (const [id, entry] of entries) {
-    const allCopiesClosed = entry.positions.every(
-      (position) => cuts[position.segment] !== undefined,
-    );
-    if (allCopiesClosed && !counted.has(id)) orphaned.add(id);
+  for (const id of entries.keys()) {
+    if (!counted.has(id)) orphaned.add(id);
   }
   return { counted, orphaned, gaps };
 }
