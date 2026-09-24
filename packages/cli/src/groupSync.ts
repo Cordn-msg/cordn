@@ -265,8 +265,15 @@ export async function ingestGroupMessages(params: {
         throw new Error("Cordn message envelope pubkey does not match sender");
       }
 
-      // §6.2: a re-sent envelope is one record — dedupe by id.
-      if (group.messages.some((stored) => stored.id === event.id)) {
+      // §6.2: a re-sent envelope is one record — dedupe by id. The fresh
+      // copy's stream is provenance the record adopts (newest copy wins:
+      // stream ordinals grow monotonically); the home stream is untouched.
+      const duplicate = group.messages.find((stored) => stored.id === event.id);
+      if (duplicate) {
+        duplicate.copyStream = Math.max(
+          duplicate.copyStream ?? duplicate.stream ?? 0,
+          stream,
+        );
         group.fetchCursor = message.cursor;
         group.lastCursor = Math.max(group.lastCursor, message.cursor);
         continue;

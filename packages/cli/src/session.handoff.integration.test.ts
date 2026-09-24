@@ -27,10 +27,12 @@ interface Harness {
   relayHub: MockRelayHub;
   server1Pubkey: string;
   server2Pubkey: string;
+  server3Pubkey: string;
   makeSession: () => {
     session: CliSession;
     target1: CoordinatorTarget;
     target2: CoordinatorTarget;
+    target3: CoordinatorTarget;
   };
   close: () => Promise<void>;
 }
@@ -39,8 +41,10 @@ async function createHarness(): Promise<Harness> {
   const relayHub = new MockRelayHub();
   const signer1 = new PrivateKeySigner();
   const signer2 = new PrivateKeySigner();
+  const signer3 = new PrivateKeySigner();
   const server1Pubkey = await signer1.getPublicKey();
   const server2Pubkey = await signer2.getPublicKey();
+  const server3Pubkey = await signer3.getPublicKey();
   const servers = await Promise.all([
     connectServer({
       signer: signer1,
@@ -48,6 +52,10 @@ async function createHarness(): Promise<Harness> {
     }),
     connectServer({
       signer: signer2,
+      relayHandler: relayHub.createRelayHandler(),
+    }),
+    connectServer({
+      signer: signer3,
       relayHandler: relayHub.createRelayHandler(),
     }),
   ]);
@@ -58,6 +66,7 @@ async function createHarness(): Promise<Harness> {
     relayHub,
     server1Pubkey,
     server2Pubkey,
+    server3Pubkey,
     makeSession() {
       const target1: CoordinatorTarget = {
         serverPubkey: server1Pubkey,
@@ -67,12 +76,16 @@ async function createHarness(): Promise<Harness> {
         serverPubkey: server2Pubkey,
         relayHandler: relayHub.createRelayHandler(),
       };
+      const target3: CoordinatorTarget = {
+        serverPubkey: server3Pubkey,
+        relayHandler: relayHub.createRelayHandler(),
+      };
       const session = new CliSession({
         defaultCoordinator: target1,
-        coordinators: { [server2Pubkey]: target2 },
+        coordinators: { [server2Pubkey]: target2, [server3Pubkey]: target3 },
       });
       sessions.push(session);
-      return { session, target1, target2 };
+      return { session, target1, target2, target3 };
     },
     close: async () => {
       await Promise.allSettled(sessions.map((session) => session.disconnect()));
@@ -328,6 +341,107 @@ describe("coordinator handoff (session)", () => {
     await expect(bob.resendMessage("demo", one1Id(alice))).rejects.toThrow(
       "Only the author",
     );
+  }, 15_000);
+
+  test("unplanned failover: the approximate cut, roster discovery, and re-send healing of the dead tail", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice, target2 } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+
+    const one = await bootstrapGroup(alice, bob);
+
+    // Bob's write lands on the closing coordinator and alice never ingests it
+    // before the coordinator becomes unreachable (§10.1: policy-level).
+    const late = await bob.sendMessage("demo", "late");
+
+    // §10: a forced failover skips the closing stream entirely.
+    const { cursor: cutCursor } = await alice.switchCoordinator(
+      "demo",
+      target2,
+      { failover: true },
+    );
+    // §10.4: the commit is the new segment's first counted record.
+    expect(cutCursor).toBe(1);
+    // The old segment's cut is approximate: it states what one member had
+    // confirmed, and the unseen tail is not in it.
+    const routing = alice.getGroup("demo").metadata?.coordinatorRouting;
+    expect(routing?.handoffs[0]?.boundaryTips).toContain(one.id);
+    expect(routing?.handoffs[0]?.boundaryTips).not.toContain(late.id);
+
+    // §10.2: the stranded member attempts the roster and adopts the
+    // coordinator carrying the routing state.
+    const adopted = await bob.discoverCoordinator("demo");
+    expect(adopted?.toLowerCase()).toBe(harness.server2Pubkey.toLowerCase());
+    expect(bob.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server2Pubkey.toLowerCase(),
+    );
+
+    // Chat continues; the confirmed history counts via the approximate cut,
+    // while the dead tail stays unprocessed (orphaned) on bob's side.
+    await alice.sendMessage("demo", "two");
+    const bobSees = await bob.syncGroup("demo");
+    expect(bobSees.map((m) => m.content)).toEqual(["two"]);
+    expect(bob.listMessages("demo").map((m) => m.content)).toEqual([
+      "one",
+      "two",
+    ]);
+
+    // §10.6: the author re-sends the dead tail's identical envelope (§6.2).
+    // The fresh copy's stream is provenance the record adopts (§7.2).
+    await bob.resendMessage("demo", late.id);
+    const bobResent = await bob.syncGroup("demo");
+    expect(bobResent.map((m) => m.content)).toEqual(["late"]);
+    expect(bob.listMessages("demo").map((m) => m.content)).toEqual([
+      "one",
+      "late",
+      "two",
+    ]);
+
+    // The far side heals by the same record.
+    const healed = await alice.syncGroup("demo");
+    expect(healed.map((m) => m.content)).toEqual(["late"]);
+    expect(alice.listMessages("demo").map((m) => m.content)).toEqual([
+      "one",
+      "two",
+      "late",
+    ]);
+  }, 15_000);
+
+  test("forced failover to a never-used coordinator: the roster names it, and discovery walks past empty fallbacks in preference order", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice, target3 } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+
+    await bootstrapGroup(alice, bob);
+
+    // The group has never used coordinators 2 or 3; the roster must still
+    // name them (§4.4) or first-time failover targets are undiscoverable.
+    await alice.switchCoordinator("demo", target3, { failover: true });
+    const fallbacks =
+      alice
+        .getGroup("demo")
+        .metadata?.coordinatorRouting?.fallbacks.map((f) =>
+          f.pubkey.toLowerCase(),
+        ) ?? [];
+    expect(fallbacks).toEqual([
+      harness.server1Pubkey.toLowerCase(),
+      harness.server2Pubkey.toLowerCase(),
+    ]);
+
+    // Bob walks the roster in preference order (§10.2): coordinator 2 is
+    // reachable but empty (skipped); coordinator 3 carries the commit.
+    const adopted = await bob.discoverCoordinator("demo");
+    expect(adopted?.toLowerCase()).toBe(harness.server3Pubkey.toLowerCase());
+
+    await alice.sendMessage("demo", "two");
+    const bobSees = await bob.syncGroup("demo");
+    expect(bobSees.map((m) => m.content)).toEqual(["two"]);
+    expect(bob.listMessages("demo").map((m) => m.content)).toEqual([
+      "one",
+      "two",
+    ]);
   }, 15_000);
 });
 

@@ -84,6 +84,12 @@ export class CoordinatorClientRegistry {
     };
   }
 
+  /** Every configured coordinator key (insertion order — the client's own
+   *  preference order, used to fill handoff rosters and probe on failover). */
+  get registeredKeys(): string[] {
+    return [...this.targets.keys()];
+  }
+
   register(target: CoordinatorTarget): string {
     const key = target.serverPubkey;
     const existing = this.targets.get(key);

@@ -98,6 +98,7 @@ All `EnvelopeId` values MUST be canonical envelope `id` strings as defined in [`
 
 Rules:
 
+- Committers building routing state SHOULD include in `fallbacks` every coordinator they know that may still serve the group, including coordinators the group has never used — failover discovery (§10.2) can only reach what an earlier roster or local configuration names.
 - A routing update MUST append a `HandoffRecord` if and only if `active` changes. Roster edits that leave `active` unchanged MUST NOT append a record or renumber segments.
 - A locator MAY appear several times in the chain: each appearance is a fresh segment on a fresh stream, even for a coordinator the group used before (§5).
 - The locator recorded in `from` of a new entry MUST equal the `active` of the previous routing state.

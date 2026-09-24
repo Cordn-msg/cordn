@@ -140,6 +140,21 @@ function streamOf(group: GroupSessionState): number {
   return group.metadata?.coordinatorRouting?.handoffs.length ?? 0;
 }
 
+// ponytail: probe bound only. Full reachability policy (timeouts, retries) is
+// out of scope per coordinator-handoff §10.1 and belongs to the caller.
+const ROSTER_PROBE_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("coordinator probe timed out")),
+      ms,
+    );
+    timer.unref?.();
+    promise.then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
+
 export type GroupWatchStatus = "connecting" | "watching" | "errored";
 
 export interface GroupListEntry {
@@ -798,22 +813,30 @@ export class CliSession {
   }
 
   /**
-   * Coordinator handoff (spec/applications/coordinator-handoff.md §9): append
-   * a `HandoffRecord` to the group's routing state and move the group to
-   * `target`. The commit is the closing stream's final record, so it is posted
-   * before the switch; the switch itself happens when the routing commit is
-   * processed (§9 step 6, see `reconcileRouting`). Routing commits carry no
-   * confirmation-side effects (pending-op finalizers are add-member only), so
-   * none is enqueued.
+   * Coordinator handoff (spec/applications/coordinator-handoff.md §9, §10):
+   * append a `HandoffRecord` to the group's routing state and move the group
+   * to `target`. A planned handoff (§9) quiesces the closing stream and posts
+   * the commit there — it is that stream's final record. A forced failover
+   * (`options.failover`, §10) skips the unreachable coordinator and posts the
+   * commit to the target — it is the new segment's first counted record
+   * (§7.3). Either way the switch itself happens when the routing commit is
+   * processed (§9 step 6, see `reconcileRouting`), and routing commits carry
+   * no confirmation-side effects (pending-op finalizers are add-member only),
+   * so none is enqueued.
    */
   async switchCoordinator(
     groupAlias: string,
     target: CoordinatorTarget,
+    options: { failover?: boolean } = {},
   ): Promise<{ metadata: CordnGroupMetadata; cursor: number }> {
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
-      // §9 step 2: ingest the closing segment to quiescence before the cut.
-      await this.catchUpGroupIfNeeded(group);
+      // §9 step 2 (planned only): ingest the closing segment to quiescence
+      // before the cut. A failover's closing coordinator is unreachable — its
+      // cut is approximate (§10.4).
+      if (!options.failover) {
+        await this.catchUpGroupIfNeeded(group);
+      }
       this.assertGroupIsActive(group);
       assertCanAdministerGroup({
         groupAlias,
@@ -842,10 +865,18 @@ export class CliSession {
       // handoff record's `from` is the previous active locator.
       const routing: CordnCoordinatorRouting = {
         active: to,
+        // §4.4: the roster must also name coordinators the group has never
+        // used, or first-time failover targets are undiscoverable (§10.2).
         fallbacks: dedupeBy(
-          [from, ...previous.fallbacks.filter((f) => f.pubkey !== to.pubkey)],
+          [
+            from,
+            ...previous.fallbacks,
+            ...this.coordinatorRegistry.registeredKeys.map((key) =>
+              this.locatorOf(key),
+            ),
+          ],
           (locator) => locator.pubkey,
-        ),
+        ).filter((f) => f.pubkey !== to.pubkey),
         handoffs: [
           ...previous.handoffs,
           { from, boundaryTips: causalTips(group.messages) },
@@ -860,16 +891,75 @@ export class CliSession {
         state: group.state,
         metadata,
       });
-      // The commit lands on the closing coordinator: post before switching.
+      // Planned: the commit lands on the closing coordinator (its final
+      // record). Failover: it lands on the new one (§10.4).
       const posted = await this.postOutboundGroupMessage(
         group,
         prepared.commitMessageBase64,
+        options.failover ? nextKey : undefined,
       );
       this.adoptGroupState(group, prepared.newState);
       // The author processes its own commit immediately (§9 step 6).
       this.reconcileRouting(group);
       return { metadata: group.metadata ?? metadata, cursor: posted.cursor };
     });
+  }
+
+  /**
+   * Forced failover discovery (coordinator-handoff §10.2): the binding is
+   * unreachable, so attempt the fallback roster in preference order and adopt
+   * the first coordinator carrying the group's routing state. Returns the
+   * adopted coordinator key, or undefined when no candidate had the group.
+   */
+  async discoverCoordinator(groupAlias: string): Promise<string | undefined> {
+    return this.runGroupOperation(groupAlias, async () =>
+      this.adoptFromRoster(this.getGroup(groupAlias)),
+    );
+  }
+
+  private async adoptFromRoster(
+    group: GroupSessionState,
+  ): Promise<string | undefined> {
+    const gid = this.deriveGroupId(group.state);
+    const routing = group.metadata?.coordinatorRouting;
+    const candidates = dedupeBy(
+      [
+        ...(routing?.fallbacks ?? []).map((locator) => locator.pubkey),
+        ...this.coordinatorRegistry.registeredKeys,
+        this.coordinatorRegistry.defaultCoordinatorKey,
+      ],
+      (key) => key.toLowerCase(),
+    ).filter((key) => key.toLowerCase() !== group.coordinatorKey.toLowerCase());
+
+    for (const key of candidates) {
+      // ponytail: sequential probes in preference order (§10.2); a dead
+      // socket consumes the probe bound and is skipped.
+      const result = await withTimeout(
+        this.getCoordinatorClient(key).FetchManyGroupMessages({
+          groups: [{ gid }],
+        }),
+        ROSTER_PROBE_TIMEOUT_MS,
+      ).catch(() => undefined);
+      if (!result || result.messages.length === 0) continue;
+
+      // A non-adopting batch (e.g. an old home's leftover line) must not
+      // contaminate this binding's fetch progression.
+      const savedCursor = group.fetchCursor;
+      const savedLast = group.lastCursor;
+      await this.applyIncomingMessages(group, result.messages, {
+        stream: streamOf(group),
+        originKey: key,
+      });
+      if (
+        group.metadata?.coordinatorRouting?.active.pubkey.toLowerCase() ===
+        key.toLowerCase()
+      ) {
+        return key;
+      }
+      group.fetchCursor = savedCursor;
+      group.lastCursor = savedLast;
+    }
+    return undefined;
   }
 
   async fetchWelcomes(coordinatorKey?: string): Promise<StoredWelcome[]> {
@@ -1107,6 +1197,7 @@ export class CliSession {
         cursor: posted.cursor,
         createdAt: outbound.event.created_at,
         stream: streamOf(group),
+        postedMsgBase64: posted.postedMsgBase64,
         direction: "outbound",
         sender: this.stablePubkey,
         id: outbound.event.id,
@@ -1161,6 +1252,8 @@ export class CliSession {
         group,
         outbound.opaqueMessageBase64,
       );
+      // The newest copy's wrapper matches its echo (content-addressed).
+      held.postedMsgBase64 = posted.postedMsgBase64;
       group.lastCursor = Math.max(group.lastCursor, posted.cursor);
       return { cursor: posted.cursor };
     });
@@ -1227,6 +1320,7 @@ export class CliSession {
         cursor: posted.cursor,
         createdAt: outbound.event.created_at,
         stream: streamOf(group),
+        postedMsgBase64: posted.postedMsgBase64,
         direction: "outbound",
         sender: this.stablePubkey,
         id: outbound.event.id,
@@ -1292,14 +1386,26 @@ export class CliSession {
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
       const stream = streamOf(group);
-      const result = await this.fetchRawGroupMessages(
-        this.deriveGroupId(group.state),
-        group.fetchCursor,
-      );
+      const originKey = group.coordinatorKey;
+      let result: FetchGroupMessagesOutput;
+      try {
+        result = await this.fetchRawGroupMessages(
+          this.deriveGroupId(group.state),
+          group.fetchCursor,
+        );
+      } catch (error) {
+        // §10: the binding may be unreachable because the group already
+        // failed over. Probe the roster for the new home before giving up.
+        if (!(await this.adoptFromRoster(group))) throw error;
+        result = await this.fetchRawGroupMessages(
+          this.deriveGroupId(group.state),
+          group.fetchCursor,
+        );
+      }
       const { received } = await this.applyIncomingMessages(
         group,
         result.messages,
-        { stream },
+        { stream, originKey },
       );
       return received;
     });
@@ -1317,6 +1423,7 @@ export class CliSession {
     this.assertGroupIsActive(group);
     const groupId = this.deriveGroupId(group.state);
     const stream = streamOf(group);
+    const originKey = group.coordinatorKey;
     let resolveReady!: () => void;
     let rejectReady!: (error: unknown) => void;
     const ready = new Promise<void>((resolve, reject) => {
@@ -1350,6 +1457,7 @@ export class CliSession {
           await this.runGroupOperation(groupAlias, async () => {
             const result = await this.applyIncomingMessages(group, messages, {
               stream,
+              originKey,
             });
             this.emitMessageEvent(groupAlias, result.received, result.issues);
           });
@@ -1663,7 +1771,10 @@ export class CliSession {
       if (range.length === 0) continue;
       // Decrypt this epoch's messages with this epoch's state, then advance.
       group.state = states[i]!;
-      const r = await this.applyIncomingMessages(group, range, { stream });
+      const r = await this.applyIncomingMessages(group, range, {
+        stream,
+        originKey: group.coordinatorKey,
+      });
       allReceived.push(...r.received);
       allIssues.push(...r.issues);
     }
@@ -1691,6 +1802,7 @@ export class CliSession {
   private async postOutboundGroupMessage(
     group: GroupSessionState,
     mlsMessageBase64: string,
+    coordinatorKey?: string,
   ): Promise<{
     cursor: number;
     at: number;
@@ -1710,7 +1822,9 @@ export class CliSession {
         serializedMlsMessage: decodeBase64(mlsMessageBase64),
       })
     ).encryptedBase64;
-    const result = await this.getGroupClient(group).PostGroupMessage({
+    const result = await this.getCoordinatorClient(
+      coordinatorKey ?? group.coordinatorKey,
+    ).PostGroupMessage({
       msg_64,
       gid,
     });
@@ -1852,7 +1966,8 @@ export class CliSession {
       group.messages.map((message) => ({
         id: message.id,
         parents: prevLinksOf(message.tags),
-        stream: message.stream ?? 0,
+        // Seed provenance: a copy on the open stream counts (§6.2/§7.2).
+        stream: message.copyStream ?? message.stream ?? 0,
       })),
       routing?.handoffs.flatMap((handoff) => handoff.boundaryTips) ?? [],
       streamOf(group),
@@ -1912,7 +2027,10 @@ export class CliSession {
       this.deriveGroupId(group.state),
       group.fetchCursor,
     );
-    await this.applyIncomingMessages(group, result.messages, { stream });
+    await this.applyIncomingMessages(group, result.messages, {
+      stream,
+      originKey: group.coordinatorKey,
+    });
   }
 
   /**
@@ -1937,6 +2055,7 @@ export class CliSession {
     messages: FetchGroupMessagesOutput["messages"],
     options: {
       stream: number;
+      originKey: string;
       suppressIssue?: (issue: SyncIssue) => boolean;
     },
   ): Promise<{
@@ -1950,6 +2069,7 @@ export class CliSession {
     const allAppliedPending = new Set<string>();
     const countedBefore = this.countedIds(group);
     const allRejectedPending = new Set<string>();
+    let stream = options.stream;
 
     const pendingOps = this.store.pendingOperations;
 
@@ -1968,6 +2088,22 @@ export class CliSession {
       if (pendingOp) {
         opaqueMessageBase64 = pendingOp.commitMessageBase64;
       } else {
+        // Self-echo of our own application post, matched by content (§6.2
+        // re-sends re-seal, so `resendMessage` refreshes the stamp): confirm
+        // only, and the fresh copy's stream is provenance the record adopts.
+        // Immune to cursor collisions across streams.
+        const echo = group.messages.find(
+          (stored) => stored.postedMsgBase64 === message.msg_64,
+        );
+        if (echo) {
+          echo.copyStream = Math.max(
+            echo.copyStream ?? echo.stream ?? 0,
+            stream,
+          );
+          group.fetchCursor = Math.max(group.fetchCursor, message.cursor);
+          group.lastCursor = Math.max(group.lastCursor, message.cursor);
+          continue;
+        }
         try {
           const { serializedMlsMessage } = await decryptGroupPayload({
             state: group.state,
@@ -2000,8 +2136,19 @@ export class CliSession {
         getPendingEpochOperation: (opaque: string) =>
           getPendingEpochOperation(pendingOps, group.alias, opaque),
         localStablePubkey: this.stablePubkey,
-        stream: options.stream,
+        stream,
       });
+
+      // §7.3 seam: a routing commit that opens a stint on the fetched line
+      // makes the rest of that line the new segment's. Records from a line
+      // that no longer serves the open stream keep this call's stamp.
+      const active = group.metadata?.coordinatorRouting?.active.pubkey;
+      if (
+        active !== undefined &&
+        active.toLowerCase() === options.originKey.toLowerCase()
+      ) {
+        stream = streamOf(group);
+      }
 
       allIssues.push(...sync.issues);
       for (const m of sync.appliedPendingCommitMessages) {
@@ -2080,6 +2227,7 @@ export class CliSession {
     // retain decryptable messages sent after the member was added.
     return this.applyIncomingMessages(group, result.messages, {
       stream: streamOf(group),
+      originKey: group.coordinatorKey,
       suppressIssue: (issue) =>
         issue.createdAt <= welcomeCreatedAt &&
         (issue.detail ===
