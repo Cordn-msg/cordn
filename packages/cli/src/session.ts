@@ -5,7 +5,10 @@ import {
   getCordnGroupMetadataExtension,
   type CordnGroupMetadata,
 } from "./groupMetadata.ts";
-import { createUnsignedCordnMessageEvent } from "./messageEnvelope.ts";
+import {
+  causalPrevTags,
+  createUnsignedCordnMessageEvent,
+} from "./messageEnvelope.ts";
 import {
   createApplicationMessageBase64,
   decryptGroupPayload,
@@ -996,6 +999,7 @@ export class CliSession {
         event: createUnsignedCordnMessageEvent({
           pubkey: this.stablePubkey,
           content,
+          tags: causalPrevTags(group.messages),
         }),
         authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
       });
@@ -1069,7 +1073,7 @@ export class CliSession {
         event: createUnsignedCordnMessageEvent({
           pubkey: this.stablePubkey,
           content: params.caption ?? "",
-          tags: [imeta],
+          tags: [...causalPrevTags(group.messages), imeta],
         }),
         authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
       });

@@ -73,19 +73,23 @@ describe("CliSession", () => {
       await bob.fetchWelcomes();
       await bob.acceptWelcome(invitation.keyPackageReference, "demo");
 
-      await alice.sendMessage("demo", "hello bob");
+      const first = await alice.sendMessage("demo", "hello bob");
       const synced = await bob.syncGroup("demo");
 
       expect(synced).toHaveLength(1);
       expect(synced[0]?.content).toBe("hello bob");
       expect(synced[0]?.sender).toBe(alice.stablePubkey);
 
-      await bob.sendMessage("demo", "hello alice");
+      const reply = await bob.sendMessage("demo", "hello alice");
       const aliceSynced = await alice.syncGroup("demo");
 
       expect(aliceSynced).toHaveLength(1);
       expect(aliceSynced[0]?.content).toBe("hello alice");
       expect(aliceSynced[0]?.sender).toBe(bob.stablePubkey);
+      // The reply links every tip of bob's known DAG (coordinator-handoff §6.3).
+      expect(
+        reply.tags.some((tag) => tag[0] === "prev" && tag[1] === first.id),
+      ).toBe(true);
     } finally {
       await server.transport.close();
     }
