@@ -8,6 +8,11 @@
  * the test file records the finding.
  */
 
+/**
+ * A record's place in history (§5). Cursors restart per segment — a
+ * coordinator serving the group again opens a fresh numbering space — so
+ * `(segment, cursor)` is unambiguous and order is lexicographic.
+ */
 export interface Position {
   segment: number;
   cursor: number;
@@ -16,16 +21,16 @@ export interface Position {
 export interface HistoryRecord {
   /** Envelope `id` ([`spec/02.md`] §4) — the DAG node identity (§6.2). */
   id: string;
-  /** Envelope `id` values named by `prev` tags. Empty = unlinked (§6.1). */
+  /** Envelope `id` values named by `prev` tags. Empty = a DAG root (§6.3). */
   parents: string[];
   position: Position;
 }
 
-/** The `HandoffRecord` fields that matter for adjudication (§4.4). */
-export interface SegmentCut {
-  boundaryCursor: number;
-  boundaryTips: string[];
-}
+/**
+ * A closing commit's `boundary_tips` (§4.4) — the committer's tip set. Its
+ * ancestor closure is exactly what that member had ingested (§7.1).
+ */
+export type SegmentCut = string[];
 
 /** The routing fields that matter for the §4.4 chain rules. */
 export interface RoutingState {
@@ -71,11 +76,10 @@ interface Entry {
 /**
  * Counted/orphaned adjudication (§7.1, §7.2). Counted history is the
  * ancestor-closure of the seeds: open-segment records (provisionally
- * counted), `boundary_tips` of every cut, and legacy-tolerated unlinked
- * records at or below their segment's `boundary_cursor`. Entries whose
- * copies all lie in closed segments and fall outside that closure are
- * orphaned. Referenced ids nobody holds are gaps (§8). Duplicate copies of
- * one `id` (re-sends, §6.2) are one record.
+ * counted) and the `boundary_tips` of every cut. Entries whose copies all
+ * lie in closed segments and fall outside that closure are orphaned.
+ * Referenced ids nobody holds are gaps (§8). Duplicate copies of one `id`
+ * (re-sends, §6.2) are one record. Cursor values never decide anything.
  */
 export function adjudicate(
   records: Iterable<HistoryRecord>,
@@ -103,19 +107,13 @@ export function adjudicate(
   };
 
   for (const [id, entry] of entries) {
-    for (const position of entry.positions) {
-      const cut = cuts[position.segment];
-      if (cut === undefined) {
-        seed(id); // any copy in the open segment: provisionally counted
-        break;
-      }
-      if (entry.parents.length === 0 && position.cursor <= cut.boundaryCursor) {
-        seed(id); // legacy tolerance (§7.1)
-        break;
-      }
+    if (
+      entry.positions.some((position) => cuts[position.segment] === undefined)
+    ) {
+      seed(id); // any copy in the open segment: provisionally counted
     }
   }
-  for (const cut of cuts) for (const tip of cut.boundaryTips) seed(tip);
+  for (const tips of cuts) for (const tip of tips) seed(tip);
 
   // Pull-in: ancestors of counted records are counted (§7.1).
   const queue = [...counted];
