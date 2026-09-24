@@ -63,7 +63,12 @@ export interface KeyPackageSummary {
 
 export interface StoredMessage {
   cursor: number;
+  /** The envelope's `created_at` — the record's own timestamp, kept so the
+   *  envelope re-derives its exact `id` on re-send (coordinator-handoff §6.2). */
   createdAt: number;
+  /** Stream provenance (coordinator-handoff §2/§7.1): the ordinal of the
+   *  segment whose coordinator served this record. Absent = 0 (genesis). */
+  stream?: number;
   direction: "inbound" | "outbound";
   sender: string;
   id: string;

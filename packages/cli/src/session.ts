@@ -7,8 +7,15 @@ import {
 } from "./groupMetadata.ts";
 import {
   causalPrevTags,
+  causalTips,
   createUnsignedCordnMessageEvent,
+  prevLinksOf,
 } from "./messageEnvelope.ts";
+import { adjudicate } from "./countedHistory.ts";
+import type {
+  CoordinatorLocator,
+  CordnCoordinatorRouting,
+} from "./coordinatorRouting.ts";
 import {
   createApplicationMessageBase64,
   decryptGroupPayload,
@@ -46,7 +53,10 @@ import {
   type FetchGroupMessagesOutput,
   type ListAvailableKeyPackagesOutput,
 } from "@cordn/core";
-import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
+import {
+  CoordinatorClientRegistry,
+  type CoordinatorTarget,
+} from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";
 import type { FetchManyPendingJoinRequestsOutput } from "@cordn/core";
 import type { ConsumedJoinRequestRef, ConsumedWelcomeRef } from "@cordn/core";
@@ -120,6 +130,14 @@ function dedupeBy<T>(values: T[], keyOf: (value: T) => string): T[] {
     seen.add(key);
     return true;
   });
+}
+
+/** The open stream's ordinal: the handoff chain's length (coordinator-handoff
+ *  §2, §4.4). A group with no routing state is at stint 0. Cursors never
+ *  decide anything; this ordinal is the only cursor-derived fact countedness
+ *  uses (§7.1 provenance). */
+function streamOf(group: GroupSessionState): number {
+  return group.metadata?.coordinatorRouting?.handoffs.length ?? 0;
 }
 
 export type GroupWatchStatus = "connecting" | "watching" | "errored";
@@ -779,6 +797,81 @@ export class CliSession {
     });
   }
 
+  /**
+   * Coordinator handoff (spec/applications/coordinator-handoff.md §9): append
+   * a `HandoffRecord` to the group's routing state and move the group to
+   * `target`. The commit is the closing stream's final record, so it is posted
+   * before the switch; the switch itself happens when the routing commit is
+   * processed (§9 step 6, see `reconcileRouting`). Routing commits carry no
+   * confirmation-side effects (pending-op finalizers are add-member only), so
+   * none is enqueued.
+   */
+  async switchCoordinator(
+    groupAlias: string,
+    target: CoordinatorTarget,
+  ): Promise<{ metadata: CordnGroupMetadata; cursor: number }> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      // §9 step 2: ingest the closing segment to quiescence before the cut.
+      await this.catchUpGroupIfNeeded(group);
+      this.assertGroupIsActive(group);
+      assertCanAdministerGroup({
+        groupAlias,
+        metadata: group.metadata,
+        stablePubkey: this.stablePubkey,
+      });
+      if (!group.metadata) {
+        throw new Error(
+          "Coordinator routing requires group metadata (coordinator-handoff §4)",
+        );
+      }
+
+      const nextKey = this.coordinatorRegistry.register(target);
+      const from = this.locatorOf(group.coordinatorKey);
+      if (nextKey === group.coordinatorKey) {
+        throw new Error(`Group ${groupAlias} is already on that coordinator`);
+      }
+      const to = this.locatorOf(nextKey);
+      const previous = group.metadata.coordinatorRouting ?? {
+        active: from,
+        fallbacks: [],
+        handoffs: [],
+      };
+
+      // §9 steps 3–5: the cut is the tips of everything ingested, and the
+      // handoff record's `from` is the previous active locator.
+      const routing: CordnCoordinatorRouting = {
+        active: to,
+        fallbacks: dedupeBy(
+          [from, ...previous.fallbacks.filter((f) => f.pubkey !== to.pubkey)],
+          (locator) => locator.pubkey,
+        ),
+        handoffs: [
+          ...previous.handoffs,
+          { from, boundaryTips: causalTips(group.messages) },
+        ],
+      };
+
+      const metadata: CordnGroupMetadata = {
+        ...group.metadata,
+        coordinatorRouting: routing,
+      };
+      const prepared = await updateGroupMetadataExtension({
+        state: group.state,
+        metadata,
+      });
+      // The commit lands on the closing coordinator: post before switching.
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        prepared.commitMessageBase64,
+      );
+      this.adoptGroupState(group, prepared.newState);
+      // The author processes its own commit immediately (§9 step 6).
+      this.reconcileRouting(group);
+      return { metadata: group.metadata ?? metadata, cursor: posted.cursor };
+    });
+  }
+
   async fetchWelcomes(coordinatorKey?: string): Promise<StoredWelcome[]> {
     const resolvedCoordinatorKey = this.resolveCoordinatorKey(coordinatorKey);
     const toAck = this.store.peekConsumedWelcomes(resolvedCoordinatorKey);
@@ -1012,7 +1105,8 @@ export class CliSession {
 
       const stored: StoredMessage = {
         cursor: posted.cursor,
-        createdAt: posted.at,
+        createdAt: outbound.event.created_at,
+        stream: streamOf(group),
         direction: "outbound",
         sender: this.stablePubkey,
         id: outbound.event.id,
@@ -1024,6 +1118,51 @@ export class CliSession {
       group.messages.push(stored);
       group.lastCursor = Math.max(group.lastCursor, posted.cursor);
       return stored;
+    });
+  }
+
+  /**
+   * Re-sends a held envelope unchanged — same `id`, re-sealed only
+   * (coordinator-handoff §6.2) — so a member who missed it can pull it in
+   * (§7.2). Author-only: the envelope `pubkey` must match the MLS sender.
+   */
+  async resendMessage(
+    groupAlias: string,
+    envelopeId: string,
+  ): Promise<{ cursor: number }> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      await this.catchUpGroupIfNeeded(group);
+      this.assertGroupIsActive(group);
+      const held = group.messages.find((message) => message.id === envelopeId);
+      if (!held) {
+        throw new Error(`Unknown envelope id: ${envelopeId}`);
+      }
+      if (held.sender.toLowerCase() !== this.stablePubkey.toLowerCase()) {
+        throw new Error("Only the author may re-send an envelope");
+      }
+
+      const outbound = await createApplicationMessageBase64({
+        state: group.state,
+        event: createUnsignedCordnMessageEvent({
+          pubkey: held.sender,
+          content: held.content,
+          createdAt: held.createdAt,
+          kind: held.kind,
+          tags: held.tags,
+        }),
+        authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
+      });
+      if (outbound.event.id !== envelopeId) {
+        throw new Error("Stored message does not re-derive its envelope id");
+      }
+      group.state = outbound.newState;
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        outbound.opaqueMessageBase64,
+      );
+      group.lastCursor = Math.max(group.lastCursor, posted.cursor);
+      return { cursor: posted.cursor };
     });
   }
 
@@ -1086,7 +1225,8 @@ export class CliSession {
 
       const stored: StoredMessage = {
         cursor: posted.cursor,
-        createdAt: posted.at,
+        createdAt: outbound.event.created_at,
+        stream: streamOf(group),
         direction: "outbound",
         sender: this.stablePubkey,
         id: outbound.event.id,
@@ -1151,6 +1291,7 @@ export class CliSession {
 
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
+      const stream = streamOf(group);
       const result = await this.fetchRawGroupMessages(
         this.deriveGroupId(group.state),
         group.fetchCursor,
@@ -1158,6 +1299,7 @@ export class CliSession {
       const { received } = await this.applyIncomingMessages(
         group,
         result.messages,
+        { stream },
       );
       return received;
     });
@@ -1174,6 +1316,7 @@ export class CliSession {
     const group = this.getGroup(groupAlias);
     this.assertGroupIsActive(group);
     const groupId = this.deriveGroupId(group.state);
+    const stream = streamOf(group);
     let resolveReady!: () => void;
     let rejectReady!: (error: unknown) => void;
     const ready = new Promise<void>((resolve, reject) => {
@@ -1205,7 +1348,9 @@ export class CliSession {
         },
         onMessages: async (messages) => {
           await this.runGroupOperation(groupAlias, async () => {
-            const result = await this.applyIncomingMessages(group, messages);
+            const result = await this.applyIncomingMessages(group, messages, {
+              stream,
+            });
             this.emitMessageEvent(groupAlias, result.received, result.issues);
           });
         },
@@ -1483,6 +1628,7 @@ export class CliSession {
       return { received: [], issues: [] };
     }
     const localCursor = group.fetchCursor;
+    const stream = streamOf(group);
 
     // Fetch the whole gap (messages after the local cursor). ponytail: one
     // fetch; paginate if real gaps grow large enough to trip a batch limit.
@@ -1517,7 +1663,7 @@ export class CliSession {
       if (range.length === 0) continue;
       // Decrypt this epoch's messages with this epoch's state, then advance.
       group.state = states[i]!;
-      const r = await this.applyIncomingMessages(group, range);
+      const r = await this.applyIncomingMessages(group, range, { stream });
       allReceived.push(...r.received);
       allIssues.push(...r.issues);
     }
@@ -1527,9 +1673,13 @@ export class CliSession {
   }
 
   listMessages(groupAlias: string): StoredMessage[] {
-    return [...this.getGroup(groupAlias).messages].sort(
-      (a, b) => a.cursor - b.cursor,
-    );
+    const group = this.getGroup(groupAlias);
+    const counted = this.countedIds(group);
+    // Cursor order within a stream, stream order across segments (§5: order
+    // is cursor order within a stream; across streams it is client-local).
+    return group.messages
+      .filter((message) => counted.has(message.id))
+      .sort((a, b) => (a.stream ?? 0) - (b.stream ?? 0) || a.cursor - b.cursor);
   }
 
   listSyncIssues(groupAlias: string): SyncIssue[] {
@@ -1694,16 +1844,75 @@ export class CliSession {
     group.metadata = getCordnGroupMetadataExtension(state);
   }
 
+  /** Counted history (coordinator-handoff §7.1): ancestor-closure of every
+   *  cut's `boundary_tips` plus everything fetched from the open stream. */
+  private countedIds(group: GroupSessionState): Set<string> {
+    const routing = group.metadata?.coordinatorRouting;
+    return adjudicate(
+      group.messages.map((message) => ({
+        id: message.id,
+        parents: prevLinksOf(message.tags),
+        stream: message.stream ?? 0,
+      })),
+      routing?.handoffs.flatMap((handoff) => handoff.boundaryTips) ?? [],
+      streamOf(group),
+    ).counted;
+  }
+
+  private locatorOf(coordinatorKey: string): CoordinatorLocator {
+    const target = this.coordinatorRegistry.getTarget(coordinatorKey);
+    return {
+      pubkey: target.serverPubkey.toLowerCase(),
+      relayUrls: [...(target.relays ?? [])],
+    };
+  }
+
+  /**
+   * Coordinator-handoff §9 step 6: a routing commit whose `active` differs
+   * from the group's binding IS the segment switch — rebind, restart fetch
+   * progression, and hand the watch over to the new coordinator.
+   */
+  private reconcileRouting(group: GroupSessionState): void {
+    const active = group.metadata?.coordinatorRouting?.active;
+    if (
+      !active ||
+      active.pubkey.toLowerCase() === group.coordinatorKey.toLowerCase()
+    ) {
+      return;
+    }
+    try {
+      this.coordinatorRegistry.register({
+        serverPubkey: active.pubkey,
+        relays: active.relayUrls.length > 0 ? [...active.relayUrls] : undefined,
+      });
+    } catch {
+      // A pre-configured target (e.g. a live relay handler) wins over the
+      // locator's relay hints.
+    }
+    group.coordinatorKey = active.pubkey;
+    group.fetchCursor = 0;
+    group.lastCursor = 0;
+    if (this.isWatching(group.alias)) {
+      // Restarting the watch from inside its own callback would deadlock.
+      queueMicrotask(() => {
+        void this.unwatchGroup(group.alias)
+          .then(() => this.watchGroup(group.alias))
+          .catch(() => undefined);
+      });
+    }
+  }
+
   private async catchUpGroupIfNeeded(group: GroupSessionState): Promise<void> {
     if (this.getWatchStatus(group.alias) === "watching") {
       return;
     }
 
+    const stream = streamOf(group);
     const result = await this.fetchRawGroupMessages(
       this.deriveGroupId(group.state),
       group.fetchCursor,
     );
-    await this.applyIncomingMessages(group, result.messages);
+    await this.applyIncomingMessages(group, result.messages, { stream });
   }
 
   /**
@@ -1727,8 +1936,9 @@ export class CliSession {
     group: GroupSessionState,
     messages: FetchGroupMessagesOutput["messages"],
     options: {
+      stream: number;
       suppressIssue?: (issue: SyncIssue) => boolean;
-    } = {},
+    },
   ): Promise<{
     received: StoredMessage[];
     issues: SyncIssue[];
@@ -1736,9 +1946,9 @@ export class CliSession {
     // Process messages one-at-a-time so that state-advancing commits
     // update the exporter secret before subsequent messages from the
     // new epoch are decrypted.
-    const allReceived: StoredMessage[] = [];
     const allIssues: SyncIssue[] = [];
     const allAppliedPending = new Set<string>();
+    const countedBefore = this.countedIds(group);
     const allRejectedPending = new Set<string>();
 
     const pendingOps = this.store.pendingOperations;
@@ -1790,9 +2000,9 @@ export class CliSession {
         getPendingEpochOperation: (opaque: string) =>
           getPendingEpochOperation(pendingOps, group.alias, opaque),
         localStablePubkey: this.stablePubkey,
+        stream: options.stream,
       });
 
-      allReceived.push(...sync.received);
       allIssues.push(...sync.issues);
       for (const m of sync.appliedPendingCommitMessages) {
         allAppliedPending.add(m);
@@ -1832,8 +2042,21 @@ export class CliSession {
       });
     }
 
+    // §9 step 6: processing a routing commit that changed `active` is the
+    // segment switch. Runs after the confirmation finalizers so a pending
+    // Welcome is still stored on the coordinator its Commit was posted to.
+    this.reconcileRouting(group);
+
+    const countedNow = this.countedIds(group);
+    // Newly counted since this call started: fresh deliveries plus §7.2
+    // re-ingests of records pulled back in by new linkage. Computed after the
+    // switch so records past a cut in this very batch stay unprocessed (§13).
+    const received = group.messages.filter(
+      (message) => countedNow.has(message.id) && !countedBefore.has(message.id),
+    );
+
     return {
-      received: allReceived,
+      received,
       issues: options.suppressIssue
         ? this.removeSuppressedIssues(
             group,
@@ -1856,6 +2079,7 @@ export class CliSession {
     // Pre-join payloads fail exporter decryption and are skipped naturally;
     // retain decryptable messages sent after the member was added.
     return this.applyIncomingMessages(group, result.messages, {
+      stream: streamOf(group),
       suppressIssue: (issue) =>
         issue.createdAt <= welcomeCreatedAt &&
         (issue.detail ===

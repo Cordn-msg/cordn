@@ -14,11 +14,12 @@ export interface HistoryRecord {
   /** Envelope `id` values named by `prev` tags. Empty = a DAG root (§6.3). */
   parents: string[];
   /**
-   * The stream this copy was fetched from (§2). Provenance is the only
+   * The stream this copy was fetched from (§2), as the ordinal of the
+   * segment whose coordinator served the fetch. Provenance is the only
    * cursor-derived fact adjudication uses: whether the copy came from the
    * stream serving the open segment (§7.1 provisional seeds).
    */
-  stream: string;
+  stream: number;
 }
 
 /** The routing fields that matter for the §4.4 chain rules. */
@@ -47,7 +48,7 @@ export function tipsOf(records: Iterable<HistoryRecord>): string[] {
 
 interface Entry {
   parents: string[];
-  streams: string[];
+  streams: number[];
 }
 
 /**
@@ -61,7 +62,7 @@ interface Entry {
 export function adjudicate(
   records: Iterable<HistoryRecord>,
   cutTips: Iterable<string>,
-  activeStream: string,
+  activeStream: number,
 ): Adjudication {
   const entries = new Map<string, Entry>();
   for (const record of records) {

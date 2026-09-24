@@ -16,23 +16,23 @@ import {
 
 function rec(
   id: string,
-  stream: string,
+  stream: number,
   parents: string[] = [],
 ): HistoryRecord {
   return { id, parents, stream };
 }
 
 describe("spec §13 worked example", () => {
-  // Stream "A" is segment 0 (cursors 1..40); stream "B" is the open segment.
-  const root = rec("root", "A"); // unlinked; the committer knew it, so it is one of its tips
-  const r36 = rec("r36", "A");
-  const r37 = rec("r37", "A", ["r36"]);
-  const slow = rec("slow", "A", ["r37"]); // written before the cut, not ingested by the committer
-  const late = rec("late", "A", ["r37"]); // written after the cut
-  const next = rec("next", "B", ["slow"]); // author's first record on the new stream
+  // Stream 0 is segment 0 (coordinator A); stream 1 is the open segment (B).
+  const root = rec("root", 0); // unlinked; the committer knew it, so it is one of its tips
+  const r36 = rec("r36", 0);
+  const r37 = rec("r37", 0, ["r36"]);
+  const slow = rec("slow", 0, ["r37"]); // written before the cut, not ingested by the committer
+  const late = rec("late", 0, ["r37"]); // written after the cut
+  const next = rec("next", 1, ["slow"]); // author's first record on the new stream
   const cutTips = ["r37", "root"]; // the committer's tips: its whole knowledge
 
-  const result = adjudicate([root, r36, r37, slow, late, next], cutTips, "B");
+  const result = adjudicate([root, r36, r37, slow, late, next], cutTips, 1);
 
   test("late write to the closed stream is orphaned", () => {
     expect(result.orphaned.has("late")).toBe(true);
@@ -56,72 +56,68 @@ describe("spec §13 worked example", () => {
 
 describe("§7.1/§7.2 adjudication rules", () => {
   test("records fetched from the open stream are provisionally counted", () => {
-    const result = adjudicate([rec("o", "B", ["tip"])], ["tip"], "B");
+    const result = adjudicate([rec("o", 1, ["tip"])], ["tip"], 1);
     expect(result.counted.has("o")).toBe(true);
     expect(result.orphaned.size).toBe(0);
   });
 
   test("a root outside the cut closure is orphaned", () => {
-    const result = adjudicate(
-      [rec("tip", "A"), rec("root", "A")],
-      ["tip"],
-      "B",
-    );
+    const result = adjudicate([rec("tip", 0), rec("root", 0)], ["tip"], 1);
     expect(result.counted.has("tip")).toBe(true);
     expect(result.orphaned.has("root")).toBe(true);
   });
 
   test("pull-in is transitive across streams", () => {
-    const x = rec("x", "A");
-    const a = rec("a", "A", ["x"]);
-    const b = rec("b", "A", ["a"]);
-    const c = rec("c", "B", ["b"]); // open stream: seeds the pull-in
-    const result = adjudicate([x, a, b, c], [], "B");
+    const x = rec("x", 0);
+    const a = rec("a", 0, ["x"]);
+    const b = rec("b", 0, ["a"]);
+    const c = rec("c", 1, ["b"]); // open stream: seeds the pull-in
+    const result = adjudicate([x, a, b, c], [], 1);
     expect(result.counted.has("b")).toBe(true); // direct parent of an open-stream record
     expect(result.counted.has("a")).toBe(true); // transitive
     expect(result.counted.has("x")).toBe(true);
   });
 
   test("gaps are soft: a gappy record still counts; unknown parents and tips are gaps (§8)", () => {
-    const result = adjudicate([rec("x", "B", ["ghost"])], ["phantom"], "B");
+    const result = adjudicate([rec("x", 1, ["ghost"])], ["phantom"], 1);
     expect([...result.gaps].sort()).toEqual(["ghost", "phantom"]);
     expect(result.counted.has("x")).toBe(true);
   });
 
   test("classification is provisional: counted → orphaned → counted as the stream closes (§7.1)", () => {
-    const s = rec("s", "A");
+    const s = rec("s", 0);
     // Live receipt on the open stream: provisionally counted.
-    expect(adjudicate([s], [], "A").counted.has("s")).toBe(true);
+    expect(adjudicate([s], [], 0).counted.has("s")).toBe(true);
     // The segment closes without it and nothing links it: orphaned (discard).
-    const closing = adjudicate([s], [], "B");
+    const closing = adjudicate([s], [], 1);
     expect(closing.orphaned.has("s")).toBe(true);
     // Its author's next record pulls it back in: counted again (re-ingest).
-    const pulled = adjudicate([s, rec("n", "B", ["s"])], [], "B");
+    const pulled = adjudicate([s, rec("n", 1, ["s"])], [], 1);
     expect(pulled.counted.has("s")).toBe(true);
   });
 });
 
 describe("§10 forced failover and forks", () => {
   test("adopting one racing cut orphans the rival's exclusive records; later linkage rescues them", () => {
-    const x = rec("x", "A"); // only committer 1 had ingested it
-    const y = rec("y", "A"); // only committer 2 had ingested it
+    const x = rec("x", 0); // only committer 1 had ingested it
+    const y = rec("y", 0); // only committer 2 had ingested it
     // The two commits raced at the same epoch; the group adopts commit 1.
-    const adopted = adjudicate([x, y], ["x"], "B");
+    const adopted = adjudicate([x, y], ["x"], 1);
     expect(adopted.counted.has("x")).toBe(true);
     expect(adopted.orphaned.has("y")).toBe(true);
     // A later record linking y pulls it back in (§7.1).
-    const rescued = adjudicate([x, y, rec("n", "B", ["y"])], ["x"], "B");
+    const rescued = adjudicate([x, y, rec("n", 1, ["y"])], ["x"], 1);
     expect(rescued.counted.has("y")).toBe(true);
     expect(rescued.counted.has("n")).toBe(true);
   });
 
   test("recovering one dead-tail record recovers its ancestry (§10)", () => {
-    const c = rec("c", "A"); // the failover committer's tip: all it confirmed
-    const u = rec("u", "A"); // dead tail, unlinked
-    const t1 = rec("t1", "A"); // dead tail
-    const t2 = rec("t2", "A", ["t1"]);
-    const n = rec("n", "B", ["t2"]); // first record on the fallback links the tail
-    const result = adjudicate([c, u, t1, t2, n], ["c"], "B");
+    const c = rec("c", 0); // the failover committer's tip: all it confirmed
+    const u = rec("u", 0); // dead tail, unlinked
+    const t1 = rec("t1", 0); // dead tail
+    const t2 = rec("t2", 0, ["t1"]);
+    const n = rec("n", 1, ["t2"]); // first record on the fallback links the tail
+    const result = adjudicate([c, u, t1, t2, n], ["c"], 1);
     expect(result.counted.has("c")).toBe(true);
     expect(result.counted.has("t2")).toBe(true);
     expect(result.counted.has("t1")).toBe(true); // ancestry recovered by one link
@@ -131,11 +127,11 @@ describe("§10 forced failover and forks", () => {
 
 describe("§6.2 re-sent identity", () => {
   test("a re-sent id is one record wherever it lands, in any arrival order", () => {
-    const original = rec("m", "A");
-    const copy = rec("m", "B");
+    const original = rec("m", 0);
+    const copy = rec("m", 1);
 
-    const first = adjudicate([original, copy], [], "B");
-    const second = adjudicate([copy, original], [], "B");
+    const first = adjudicate([original, copy], [], 1);
+    const second = adjudicate([copy, original], [], 1);
 
     expect([...first.counted]).toEqual(["m"]); // one record; the open-stream copy counts
     expect([...first.orphaned]).toEqual([]);
@@ -215,20 +211,20 @@ describe("§5 stream-local cursors and stale markers", () => {
 
 describe("§6.3 linking rule", () => {
   test("a chain has one tip; a merge joins concurrent tips", () => {
-    const a = rec("a", "A");
-    const b = rec("b", "A", ["a"]); // sender saw only a
-    const c = rec("c", "A", ["a"]); // concurrent sender also saw only a
+    const a = rec("a", 0);
+    const b = rec("b", 0, ["a"]); // sender saw only a
+    const c = rec("c", 0, ["a"]); // concurrent sender also saw only a
     expect(tipsOf([a, b, c]).sort()).toEqual(["b", "c"]);
 
-    const merge = rec("merge", "A", ["b", "c"]);
+    const merge = rec("merge", 0, ["b", "c"]);
     expect(tipsOf([a, b, c, merge])).toEqual(["merge"]);
-    expect(adjudicate([a, b, c, merge], [], "A").counted.has("a")).toBe(true);
+    expect(adjudicate([a, b, c, merge], [], 0).counted.has("a")).toBe(true);
   });
 
   test("unlinked records each become a link target once, then tip counts collapse", () => {
-    const roots = [rec("l1", "A"), rec("l2", "A"), rec("l3", "A")];
+    const roots = [rec("l1", 0), rec("l2", 0), rec("l3", 0)];
     expect(tipsOf(roots)).toHaveLength(3);
-    const catchingUp = rec("catchup", "A", tipsOf(roots));
+    const catchingUp = rec("catchup", 0, tipsOf(roots));
     expect(tipsOf([...roots, catchingUp])).toEqual(["catchup"]);
   });
 });
@@ -255,6 +251,7 @@ describe("stress: randomized worlds (3 streams, 2 cuts)", () => {
     { label: "compliant", link: 1, resend: 0, drop: 0 },
     { label: "noisy", link: 0.85, resend: 0.15, drop: 0 },
     { label: "chaotic", link: 0.5, resend: 0.4, drop: 0.1 },
+    { label: "adversarial", link: 0.3, resend: 0.6, drop: 0.3 },
   ];
 
   function randomWorld(
@@ -277,17 +274,16 @@ describe("stress: randomized worlds (3 streams, 2 cuts)", () => {
 
     for (const [segment, count] of segCounts.entries()) {
       for (let i = 0; i < count; i += 1) {
-        const stream = `s${segment}`;
         if (rand() < profile.resend && all.length > 0) {
           // Re-send: same envelope (same id and links) fetched on this
           // stream too (§6.2) — one record, wherever it lands.
           const source = all[Math.floor(rand() * all.length)]!;
-          all.push({ id: source.id, parents: source.parents, stream });
+          all.push({ id: source.id, parents: source.parents, stream: segment });
         } else {
           // Compliant senders link every known tip (§6.3); the rest send
           // unlinked records (DAG roots).
           const parents = rand() < profile.link ? tipsOf(all) : [];
-          all.push({ id: `r${all.length}`, parents, stream });
+          all.push({ id: `r${all.length}`, parents, stream: segment });
         }
       }
     }
@@ -352,15 +348,15 @@ describe("stress: randomized worlds (3 streams, 2 cuts)", () => {
     }
   }
 
-  test("invariants hold across 900 random worlds (compliant → chaotic)", () => {
-    for (let i = 0; i < 900; i += 1) {
+  test("invariants hold across 1200 random worlds (compliant → adversarial)", () => {
+    for (let i = 0; i < 1200; i += 1) {
       const profile = profiles[i % profiles.length]!;
       const seed = 1 + Math.floor(i / profiles.length);
       const { records, droppedIds, cutTips, rivalTips, earlyIds } = randomWorld(
         seed,
         profile,
       );
-      const result = adjudicate(records, cutTips, "s2");
+      const result = adjudicate(records, cutTips, 2);
       const parentsById = new Map(
         records.map((record) => [record.id, record.parents]),
       );
@@ -372,7 +368,7 @@ describe("stress: randomized worlds (3 streams, 2 cuts)", () => {
       const rand = mulberry32(seed * 7919);
       for (let round = 0; round < 3; round += 1) {
         const shuffled = [...records].sort(() => rand() - 0.5);
-        const other = adjudicate(shuffled, cutTips, "s2");
+        const other = adjudicate(shuffled, cutTips, 2);
         expect(sorted(other.counted)).toBe(sorted(result.counted));
         expect(sorted(other.orphaned)).toBe(sorted(result.orphaned));
       }
@@ -385,7 +381,7 @@ describe("stress: randomized worlds (3 streams, 2 cuts)", () => {
 
       // I5: a fork's losing branch is equally coherent under the same rules
       // (adopting the rival committer's cut keeps the invariants).
-      const rival = adjudicate(records, rivalTips, "s2");
+      const rival = adjudicate(records, rivalTips, 2);
       expectClosedAndDisjoint(rival, parentsById, seed);
 
       // I6: holes are visible gaps (§8), never silent holes in counted sets.

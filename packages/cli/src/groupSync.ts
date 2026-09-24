@@ -92,9 +92,13 @@ export async function ingestGroupMessages(params: {
     opaqueMessageBase64: string,
   ) => PendingEpochOperation | undefined;
   localStablePubkey: string;
+  /** Stream provenance (coordinator-handoff §2/§7.1): ordinal of the segment
+   *  whose coordinator served this fetch. Defaults to 0 (genesis stream). */
+  stream?: number;
 }): Promise<GroupIngestionResult> {
   const { group, messages, getPendingEpochOperation, localStablePubkey } =
     params;
+  const stream = params.stream ?? 0;
   const received: StoredMessage[] = [];
   const issues: GroupSessionState["syncIssues"] = [];
   const appliedPendingCommitMessages = new Set<string>();
@@ -121,7 +125,12 @@ export async function ingestGroupMessages(params: {
     if (
       group.messages.some(
         (stored) =>
-          stored.direction === "outbound" && stored.cursor === message.cursor,
+          stored.direction === "outbound" &&
+          stored.cursor === message.cursor &&
+          // Cursors are stream-local (coordinator-handoff §5): only the echo
+          // from the same stream may match, or a later line's cursor collides
+          // with an old outbound record and swallows it.
+          (stored.stream ?? 0) === stream,
       )
     ) {
       group.fetchCursor = message.cursor;
@@ -256,9 +265,19 @@ export async function ingestGroupMessages(params: {
         throw new Error("Cordn message envelope pubkey does not match sender");
       }
 
+      // §6.2: a re-sent envelope is one record — dedupe by id.
+      if (group.messages.some((stored) => stored.id === event.id)) {
+        group.fetchCursor = message.cursor;
+        group.lastCursor = Math.max(group.lastCursor, message.cursor);
+        continue;
+      }
+
       const stored: StoredMessage = {
         cursor: message.cursor,
-        createdAt: message.createdAt,
+        // The envelope's own timestamp, so the record re-derives its exact id
+        // on re-send (§6.2). The coordinator's `at` is delivery bookkeeping.
+        createdAt: event.created_at,
+        stream,
         direction: "inbound",
         sender,
         id: event.id,
