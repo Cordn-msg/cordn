@@ -7,6 +7,7 @@ import {
   PrivateKeySigner,
   ApplesauceRelayPool,
   EncryptionMode,
+  GiftWrapMode,
 } from "@contextvm/sdk";
 import type { ZodType } from "zod";
 import {
@@ -88,6 +89,36 @@ export type coordinatorClient = {
   }>;
 };
 
+/**
+ * How coordinator requests travel on the relays.
+ *
+ * - `disabled` (default): plaintext ContextVM events. The method, group id,
+ *   cursors and timing are public to relay readers (MLS payloads stay
+ *   end-to-end encrypted), and `@contextvm/sdk` only de-duplicates
+ *   gift-wrapped events, so a request carried by N relays reaches the
+ *   coordinator N times.
+ * - `required`: NIP-59 gift wraps of the ephemeral kind, so relays do not
+ *   store them (the plaintext kind is ephemeral too). The coordinator answers
+ *   in kind; the stock server accepts both modes.
+ */
+export type TransportEncryption = "disabled" | "required";
+
+export const TRANSPORT_ENCRYPTION_MODES: readonly TransportEncryption[] = [
+  "disabled",
+  "required",
+];
+
+function transportEncryptionOptions(
+  mode: TransportEncryption,
+): Pick<NostrTransportOptions, "encryptionMode" | "giftWrapMode"> {
+  return mode === "required"
+    ? {
+        encryptionMode: EncryptionMode.REQUIRED,
+        giftWrapMode: GiftWrapMode.EPHEMERAL,
+      }
+    : { encryptionMode: EncryptionMode.DISABLED };
+}
+
 export class cordnClient implements coordinatorClient {
   static readonly DEFAULT_RELAYS = [...DEFAULT_RELAY_URLS];
   private readonly stableClient: Client;
@@ -102,6 +133,7 @@ export class cordnClient implements coordinatorClient {
       privateKey?: string;
       ephemeralPrivateKey?: string;
       relays?: string[];
+      transportEncryption?: TransportEncryption;
     } = {},
   ) {
     this.stableClient = new Client({
@@ -135,8 +167,11 @@ export class cordnClient implements coordinatorClient {
       relays: ___,
       relayHandler: _____,
       signer: providedSigner,
+      transportEncryption = "disabled",
       ...rest
     } = options;
+    // Explicit encryptionMode/giftWrapMode in `rest` still win (spread last).
+    const transport = transportEncryptionOptions(transportEncryption);
 
     this.stableTransport = new NostrClientTransport({
       serverPubkey,
@@ -144,7 +179,7 @@ export class cordnClient implements coordinatorClient {
       relayHandler,
       isStateless: true,
       logLevel: "silent",
-      encryptionMode: EncryptionMode.DISABLED,
+      ...transport,
       openStream: {
         enabled: true,
       },
@@ -162,7 +197,7 @@ export class cordnClient implements coordinatorClient {
       relayHandler,
       isStateless: true,
       logLevel: "silent",
-      encryptionMode: EncryptionMode.DISABLED,
+      ...transport,
       openStream: {
         enabled: true,
       },

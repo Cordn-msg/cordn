@@ -14,6 +14,14 @@ relays:
 
 The coordinator and relays are routing infrastructure; MLS message content remains encrypted in transit. Override these values with `--server-pubkey` and `--relay` when using another deployment. Explicit options take precedence over restored state, restored state over environment configuration, and environment configuration over bundled defaults.
 
+## Coordinator transport
+
+By default, requests to the coordinator are plaintext ContextVM events. MLS payloads inside them stay end-to-end encrypted, but anyone reading the relays can see which method was called, the delivery group id, cursors, sizes and timing, and which client key made the request.
+
+`--transport-encryption required` (or `CORDN_TRANSPORT_ENCRYPTION=required`) sends every request as a NIP-59 gift wrap of the ephemeral kind, which relays do not store, so that envelope is hidden from relay operators. The coordinator answers in the same mode; the stock server accepts both.
+
+It also matters with more than one relay. The transport de-duplicates gift-wrapped requests by event id, but not plaintext ones, so without encryption a request that reaches the coordinator through N relays is processed N times, and a posted message is stored at N cursors; other members then fail to decrypt the copies ("generation in the past"). Library callers pass `transportEncryption: "required"` to `openPersistentSession`.
+
 The CLI retains `CORDN_SERVER_PRIVATE_KEY` only as a local-development fallback for deriving a coordinator public key. Never distribute a coordinator private key to clients.
 
 ## Client identity and snapshot

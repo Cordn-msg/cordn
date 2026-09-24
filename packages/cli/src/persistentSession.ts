@@ -2,6 +2,7 @@ import { CliSession } from "./session.ts";
 import type { CliSessionSnapshot } from "./session.ts";
 import type { CliSessionOptions } from "./sessionState.ts";
 import type { MediaStore } from "./mediaStore.ts";
+import type { TransportEncryption } from "./coordinatorClient.ts";
 import {
   acquireStateLock,
   loadEncryptedState,
@@ -29,6 +30,12 @@ export interface OpenPersistentSessionOptions {
    */
   fallback?: { serverPubkey?: string; relays?: string[] };
   mediaStore?: MediaStore;
+  /**
+   * Coordinator request transport. "required" gift-wraps every request so
+   * relays see neither the method nor the group id, and lets the transport
+   * de-duplicate a request relayed more than once. Default "disabled".
+   */
+  transportEncryption?: TransportEncryption;
   onLocalStateAdvance?: CliSessionOptions["onLocalStateAdvance"];
 }
 
@@ -106,6 +113,7 @@ export async function openPersistentSession(
           : ((useSavedRelays ? savedCoordinator?.relays : undefined) ??
             options.fallback?.relays ?? [...DEFAULT_RELAY_URLS]),
       mediaStore: options.mediaStore,
+      transportEncryption: options.transportEncryption,
       onLocalStateAdvance: options.onLocalStateAdvance,
     });
     session = activeSession;

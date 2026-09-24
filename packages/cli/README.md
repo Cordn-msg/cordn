@@ -38,7 +38,7 @@ relays:
   wss://relay.primal.net
 ```
 
-Override these with `--server-pubkey` and one or more `--relay` options. Persistent snapshots remember the coordinator and relays used to create them. Local development can continue deriving the coordinator public key from `CORDN_SERVER_PRIVATE_KEY` and reading comma-separated `CORDN_RELAY_URLS`.
+Override these with `--server-pubkey` and one or more `--relay` options. Persistent snapshots remember the coordinator and relays used to create them. Local development can continue deriving the coordinator public key from `CORDN_SERVER_PRIVATE_KEY` and reading comma-separated `CORDN_RELAY_URLS`. `--transport-encryption required` (or `CORDN_TRANSPORT_ENCRYPTION=required`) gift-wraps coordinator requests so relays cannot read their metadata; see `cordn docs security`.
 
 ## Quickstart
 
