@@ -861,6 +861,28 @@ export class CliSession {
         throw new Error(`Group ${groupAlias} is already on that coordinator`);
       }
       const to = this.locatorOf(nextKey);
+      if (options.failover) {
+        // §10 step 3: fetch-first discipline applies to the target too. The
+        // chosen fallback is reachable and may already carry another
+        // member's failover commit — ingest it before committing so racing
+        // commits serialize into one chain instead of forking.
+        const gid = this.deriveGroupId(group.state);
+        const seen = await withTimeout(
+          this.getCoordinatorClient(nextKey).FetchManyGroupMessages({
+            groups: [{ gid }],
+          }),
+          ROSTER_PROBE_TIMEOUT_MS,
+        ).catch(() => undefined);
+        if (seen && seen.messages.length > 0) {
+          await this.applyIncomingMessages(group, seen.messages, {
+            stream: streamOf(group),
+            originKey: nextKey,
+          });
+        }
+        if (group.coordinatorKey.toLowerCase() === nextKey.toLowerCase()) {
+          throw new Error(`Group ${groupAlias} is already on that coordinator`);
+        }
+      }
       const previous = group.metadata.coordinatorRouting;
       if (!previous) {
         // §4.4: an absent roster is the group's decision — no handoff exists.

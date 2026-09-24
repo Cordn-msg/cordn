@@ -497,6 +497,35 @@ describe("coordinator handoff (session)", () => {
       expect.arrayContaining(["a", "b", "c"]),
     );
   }, 15_000);
+
+  test("same-fallback racing failover: the later committer ingests the target first, so the race serializes (§10)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice, target2 } = harness.makeSession();
+    const { session: bob, target2: bobTarget2 } = harness.makeSession();
+    await bootstrapGroup(alice, bob, harness);
+
+    // alice fails over first. bob is stale and races her with the same
+    // target: his call runs before he has ingested anything.
+    await alice.switchCoordinator("demo", target2, { failover: true });
+    await expect(
+      bob.switchCoordinator("demo", bobTarget2, { failover: true }),
+    ).rejects.toThrow(/already on that coordinator/);
+
+    // Serialized: one commit, one handoff record, one linear chain.
+    expect(
+      bob.getGroup("demo").metadata?.coordinatorRouting?.handoffs,
+    ).toHaveLength(1);
+    expect(bob.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server2Pubkey.toLowerCase(),
+    );
+
+    // Current members survive the race: chat continues on the new one.
+    await alice.sendMessage("demo", "two");
+    expect((await bob.syncGroup("demo")).map((m) => m.content)).toEqual([
+      "two",
+    ]);
+  }, 15_000);
 });
 
 /** alice's first chat record id, for the author-only re-send check. */

@@ -210,7 +210,7 @@ Procedure:
 4. The commit is posted to the **closing** segment's coordinator. It is the final record of that segment.
 5. After the commit is stored, the sender and every member that processes it MUST NOT post further records to the closing segment. All subsequent records go to `active`, appended to that coordinator's stream: numbering starts at cursor `1` for every new segment (§5).
 6. Clients treat processing the routing commit as the segment switch: fetch progression follows the new stream (§5). The existing fetch-then-subscribe ingestion model ([`packages/cli/README.md`](../../packages/cli/README.md)) continues to apply per stream.
-7. Non-message coordinator state is migrated per §11.
+7. Non-message coordinator state does not migrate (§11).
 
 A straggler that misses the routing commit and posts to the closing segment produces an orphan candidate: the record can only become counted by the §7.1 pull-in rule, and it can never finalize a pending epoch operation, because inbound confirmation for it requires ingesting past the cut, which no compliant client performs. On catching up, the straggler retries its pending record on the new segment.
 
@@ -222,26 +222,22 @@ Procedure:
 
 1. Members determine unreachability by local policy (timeouts and retry counts are out of scope for this document).
 2. Members attempt the `fallbacks` roster in preference order. Discovery is the declared roster and nothing else: the chosen fallback MUST be a roster member (§4.4), so stranded members are guaranteed to look in the right place. All members SHOULD prefer the first reachable fallback, which concentrates handoff commits on one coordinator and lets that coordinator's ordering serialize them.
-3. The first member to commit on the chosen fallback creates a `group_context_extensions` update: `active` set to the chosen fallback, `handoffs` appended with `from` equal to the unreachable coordinator's locator and `boundary_tips` equal to the committer's tip set.
+3. Before committing, the member ingests the chosen fallback's current line for the group — fetch-first discipline applies to the target too. If an earlier failover commit is present, it is adopted instead and no commit is created. Otherwise the first member to commit creates a `group_context_extensions` update: `active` set to the chosen fallback, `handoffs` appended with `from` equal to the unreachable coordinator's locator and `boundary_tips` equal to the committer's tip set.
 4. The commit is posted to the **new** coordinator. It is the first counted record of the new segment. The old segment's cut is approximate: `boundary_tips` states what one member had confirmed, and §7.1 adjudicates the rest.
 5. Every member adopts the routing commit on processing it and switches write targets (§9 step 6 for the stream switch).
 6. Authors of records that never achieved inbound confirmation on the dead segment MAY re-send them on the new segment. Re-sends reuse the original envelope `id` and deduplicate (§6.2); unconfirmed Commits cannot be re-sent and are superseded by new Commits on the new segment.
 
 Requirements and failure notes:
 
-- Concurrent failover commits that land on the **same** fallback serialize into a linear handoff chain through that coordinator's ordering: the later commit, created after ingesting the earlier one, appends an ordinary subsequent `HandoffRecord` or merely edits the roster.
-- Concurrent failover commits that land on **different** fallbacks fork the routing state. This is the same class as the known equal-epoch limitation of [`multi-device.md`](multi-device.md). Members MUST adopt the routing state carried by the MLS state they converge on per that document's reconcile procedure and MUST treat the discarded branch's segment as never having existed; §5 voids references to its stream.
+- Failover commits on the **same** fallback serialize into one linear handoff chain through that coordinator's ordering: the target is reachable, so the later committer ingests the earlier commit first (step 3) and merely edits the roster — or adopts the switch and creates no commit at all.
+- Commits created without ingesting each other — a race inside the commit window, or failover commits landing on **different** fallbacks — fork the routing state. This is the same class as the known equal-epoch limitation of [`multi-device.md`](multi-device.md). Members MUST adopt the routing state carried by the MLS state they converge on per that document's reconcile procedure and MUST treat the discarded branch's segment as never having existed; §5 voids references to its stream.
 - The tail that existed only on the dead coordinator is lost. This is consistent with the storage model of [`spec/00.md`](../00.md): coordinators provide temporary storage, and durability of history is not a coordinator guarantee. Loss of unconfirmed application messages is acceptable; loss of group state is repaired via [`multi-device.md`](multi-device.md) document chains.
 
 ### 11. Non-Message Coordinator State
 
-A coordinator also stores Welcomes, join requests, and published KeyPackages. This state does not migrate automatically; owners re-establish it on the active coordinator:
+A coordinator also stores Welcomes, join requests, and published KeyPackages. This state does not migrate across a handoff, and nothing here tries to make it: anything stranded on a former coordinator is treated as lost. A handoff protects **current members** — their group state and history (§7, §10) — not pending invitations.
 
-- **Welcomes**: Welcomes stranded on a former coordinator's queue are stale after a planned handoff and lost after a forced failover. Inviters SHOULD re-store pending Welcomes on the active coordinator. A re-stored Welcome's `after` hint MUST be minted as a cursor of the active stream (§5).
-- **Join requests**: requesters whose pending request was stranded SHOULD re-submit it to the active coordinator ([`join-requests.md`](join-requests.md)).
-- **KeyPackages**: publishers SHOULD re-publish their current KeyPackages to the active coordinator. Last-resort KeyPackages make this non-destructive ([`spec/00.md`](../00.md) §11).
-
-Welcomes minted after the switch embed the group's MLS state and therefore the routing state: an invitee learns the active coordinator and the full fallback roster before ever contacting a coordinator.
+When the pending work is still wanted, its owner simply starts over on the active coordinator: an inviter runs an ordinary `addMember`, a requester re-submits its join request ([`join-requests.md`](join-requests.md)), a publisher re-publishes its KeyPackages ([`spec/00.md`](../00.md) §11). Welcomes minted after the switch embed the group's MLS state and therefore the routing state: an invitee learns the active coordinator and the full fallback roster before ever contacting a coordinator.
 
 ### 12. Interaction with Other Specifications
 
@@ -252,7 +248,7 @@ Welcomes minted after the switch embed the group's MLS state and therefore the r
 - [`group-ref.md`](group-ref.md): a group reference's coordinator coordinates are one locator (§3). A reference minted after a handoff SHOULD carry the active locator and MAY carry fallback relays as additional relay hints.
 - [`welcome-delivery.md`](welcome-delivery.md): the `after` hint is a cursor of the stream whose coordinator stores the Welcome (§5).
 - [`multi-device.md`](multi-device.md): the group document `cursor` is a cursor of the stream named by the document's `coordinator` field (§5). Its compare-and-advance rules (§8) apply within one stream; there is no cross-stream cursor comparison. Fork healing continues to follow that document's reconcile procedure.
-- [`join-requests.md`](join-requests.md): stranding and re-submission are as §11.
+- [`join-requests.md`](join-requests.md): a request stranded by a handoff is lost and re-submitted (§11).
 
 ### 13. Worked Example
 
