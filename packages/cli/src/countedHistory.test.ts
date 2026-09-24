@@ -3,12 +3,11 @@ import { describe, expect, test } from "vitest";
 import {
   adjudicate,
   canonicalPosition,
+  chainLocators,
   checkRoutingChain,
   comparePositions,
-  isVoidPosition,
-  segmentLocator,
+  isVoidMarker,
   tipsOf,
-  virtualCursor,
   type Adjudication,
   type HistoryRecord,
   type RoutingState,
@@ -37,23 +36,13 @@ describe("spec §13 worked example", () => {
 
   const result = adjudicate([r36, r37, slow, late, next], [cut]);
 
-  test("chat message at (0, 12) displays as virtual 12", () => {
-    expect(virtualCursor({ segment: 0, cursor: 12 }, [cut])).toBe(12);
-  });
-
-  test("seam numbering: (1, 1) displays as virtual 41", () => {
-    expect(virtualCursor({ segment: 0, cursor: 39 }, [cut])).toBe(39);
-    expect(virtualCursor({ segment: 1, cursor: 1 }, [cut])).toBe(41);
-  });
-
   test("late write to the closed segment is orphaned", () => {
     expect(result.orphaned.has("late")).toBe(true);
     expect(result.counted.has("late")).toBe(false);
   });
 
-  test("pre-cut record pulled in by later linkage is counted at (0, 38), virtual 38", () => {
+  test("pre-cut record pulled in by later linkage is counted at (0, 38)", () => {
     expect(result.counted.has("slow")).toBe(true);
-    expect(virtualCursor(slow.position, [cut])).toBe(38);
   });
 
   test("boundary tips and their ancestors are counted; no gaps", () => {
@@ -184,14 +173,14 @@ describe("§4.4 routing chain rules", () => {
     ).toHaveLength(1);
   });
 
-  test("re-activating a coordinator that already served the group is a violation (§4.4)", () => {
+  test("returning to a previous coordinator is allowed: its stream continues (§4.4, §5)", () => {
     expect(
       checkRoutingChain([
         { active: "A", handoffFroms: [] },
         { active: "B", handoffFroms: ["A"] },
-        { active: "A", handoffFroms: ["A", "B"] }, // well-formed append, but A served already
+        { active: "A", handoffFroms: ["A", "B"] },
       ]),
-    ).toHaveLength(1);
+    ).toEqual([]);
   });
 
   test("concurrent planned handoffs serialize into a chain-violating sequence — detectable here, and the spec voids the stale update (§7.3, §14)", () => {
@@ -205,22 +194,7 @@ describe("§4.4 routing chain rules", () => {
   });
 });
 
-describe("§5 positions, numbering, and stale markers", () => {
-  const cuts: SegmentCut[] = [
-    { boundaryCursor: 10, boundaryTips: [] },
-    { boundaryCursor: 5, boundaryTips: [] },
-  ];
-
-  test("bases accumulate boundary_cursor + 1 per segment", () => {
-    expect(virtualCursor({ segment: 0, cursor: 10 }, cuts)).toBe(10);
-    expect(virtualCursor({ segment: 1, cursor: 1 }, cuts)).toBe(12);
-    expect(virtualCursor({ segment: 2, cursor: 1 }, cuts)).toBe(18);
-  });
-
-  test("records above a closed segment's boundary have no virtual number", () => {
-    expect(virtualCursor({ segment: 0, cursor: 11 }, cuts)).toBeUndefined();
-  });
-
+describe("§5 positions and stale markers", () => {
   test("positions compare lexicographically", () => {
     expect(
       comparePositions({ segment: 0, cursor: 99 }, { segment: 1, cursor: 1 }),
@@ -230,16 +204,12 @@ describe("§5 positions, numbering, and stale markers", () => {
     ).toBe(0);
   });
 
-  test("a marker from a discarded fork branch is void", () => {
+  test("a marker from a discarded fork branch is void; one naming a chain locator is not", () => {
     const adopted: RoutingState = { active: "B", handoffFroms: ["dead"] };
-    expect(segmentLocator(adopted, 0)).toBe("dead");
-    expect(segmentLocator(adopted, 1)).toBe("B");
-    expect(segmentLocator(adopted, 2)).toBeUndefined();
-    expect(isVoidPosition({ segment: 1, cursor: 5 }, "C", adopted)).toBe(true);
-    expect(isVoidPosition({ segment: 1, cursor: 5 }, "B", adopted)).toBe(false);
-    expect(isVoidPosition({ segment: 0, cursor: 30 }, "dead", adopted)).toBe(
-      false,
-    );
+    expect(chainLocators(adopted)).toEqual(["dead", "B"]);
+    expect(isVoidMarker("C", adopted)).toBe(true);
+    expect(isVoidMarker("B", adopted)).toBe(false);
+    expect(isVoidMarker("dead", adopted)).toBe(false);
   });
 });
 
@@ -349,13 +319,6 @@ describe("stress: randomized worlds (3 segments, 2 cuts, re-sends)", () => {
       const parentsById = new Map(
         records.map((record) => [record.id, record.parents]),
       );
-      const positionsById = new Map<string, Set<string>>();
-      for (const record of records) {
-        const key = `${record.position.segment}:${record.position.cursor}`;
-        const bucket = positionsById.get(record.id) ?? new Set<string>();
-        bucket.add(key);
-        positionsById.set(record.id, bucket);
-      }
 
       // I1: counted history is ancestor-closed (no counted record depends on
       // an orphan).
@@ -385,19 +348,7 @@ describe("stress: randomized worlds (3 segments, 2 cuts, re-sends)", () => {
         expect(result.orphaned.has(id)).toBe(false);
       }
 
-      // I4: virtual numbering is collision-free over counted records at
-      // their canonical positions.
-      const virtuals = [...result.counted].map((id) => {
-        const positions = [...(positionsById.get(id) ?? [])].map((key) => {
-          const [segment, cursor] = key.split(":").map(Number);
-          return { segment: segment!, cursor: cursor! };
-        });
-        return virtualCursor(canonicalPosition(positions), cuts);
-      });
-      const defined = virtuals.filter((value) => value !== undefined);
-      expect(new Set(defined).size).toBe(defined.length);
-
-      // I5: no false loss — everything the later committer ingested before
+      // I4: no false loss — everything the later committer ingested before
       // its cut is counted.
       for (const id of earlyIds) {
         expect(result.counted.has(id), `seed ${seed}: lost ${id}`).toBe(true);

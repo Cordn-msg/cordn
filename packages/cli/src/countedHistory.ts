@@ -143,50 +143,21 @@ export function adjudicate(
   return { counted, orphaned, gaps };
 }
 
-/**
- * Dense virtual cursor for display (§5). Undefined for records of a closed
- * segment beyond its `boundary_cursor`.
- */
-export function virtualCursor(
-  position: Position,
-  cuts: SegmentCut[],
-): number | undefined {
-  if (position.segment > cuts.length) return undefined;
-  let base = 0;
-  for (let segment = 0; segment < position.segment; segment += 1) {
-    base += cuts[segment]!.boundaryCursor + 1;
-  }
-  const cut = cuts[position.segment];
-  if (cut !== undefined && position.cursor > cut.boundaryCursor) {
-    return undefined;
-  }
-  return base + position.cursor;
-}
-
-/** The locator the adopted chain assigns to a segment (§5). */
-export function segmentLocator(
-  state: RoutingState,
-  segment: number,
-): string | undefined {
-  if (segment < state.handoffFroms.length) return state.handoffFroms[segment];
-  return segment === state.handoffFroms.length ? state.active : undefined;
+/** Every locator that served or serves the group (§5). */
+export function chainLocators(state: RoutingState): string[] {
+  return [...state.handoffFroms, state.active];
 }
 
 /**
- * A cursor reference whose accompanying locator is not the adopted chain's
- * locator for its segment is stale (e.g. minted on a discarded fork branch)
- * and void (§5).
+ * A cursor reference whose accompanying locator does not appear in the
+ * adopted chain is stale (e.g. minted on a discarded fork branch) and void
+ * (§5).
  */
-export function isVoidPosition(
-  position: Position,
-  locator: string,
-  state: RoutingState,
-): boolean {
-  return segmentLocator(state, position.segment) !== locator;
+export function isVoidMarker(locator: string, state: RoutingState): boolean {
+  return !chainLocators(state).includes(locator);
 }
 
-/** The §4.4 chain rules: append iff `active` changes; `from` == previous
- *  active; never re-activate a coordinator that already served the group. */
+/** The §4.4 chain rules: append iff `active` changes; `from` == previous active. */
 export function checkRoutingChain(states: RoutingState[]): string[] {
   const errors: string[] = [];
   for (let i = 1; i < states.length; i += 1) {
@@ -202,11 +173,6 @@ export function checkRoutingChain(states: RoutingState[]): string[] {
       ) {
         errors.push(
           `update ${i}: handoff record 'from' must equal the previous active locator`,
-        );
-      }
-      if (prev.handoffFroms.includes(cur.active)) {
-        errors.push(
-          `update ${i}: active re-activates a coordinator that already served the group`,
         );
       }
     } else if (cur.handoffFroms.length !== prev.handoffFroms.length) {

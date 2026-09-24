@@ -27,7 +27,8 @@ This document adds no coordinator protocol surface. All fetch, store, and subscr
 ### 2. Terminology
 
 - **Locator**: where a coordinator can be reached: its public key plus optional relay hints (§3).
-- **Segment**: one contiguous stretch of the group's delivery stream as served by one coordinator. Segment indices are `0, 1, 2, …` in handoff order. Each segment has its own cursor space.
+- **Stream**: one `gid`'s cursor space on one coordinator. Cursors are assigned by that coordinator and never renumbered.
+- **Segment**: one contiguous stretch of the group's history served under one active coordinator. Segment indices are `0, 1, 2, …` in handoff order. A segment maps to exactly one stream; several segments may share one stream when the group returns to a coordinator (§5).
 - **Position**: a pair `(segment, cursor)` naming a record's place in the group's history (§5).
 - **Link**: a `prev` tag in a message envelope naming another record by envelope `id` (§6).
 - **Tip**: a record whose `id` is not referenced as a link target by any known record.
@@ -108,7 +109,7 @@ Rules:
 
 - Segment `k < len(handoffs)` is served by `handoffs[k].from`. Segment `0` at first installation is served by `handoffs[0].from` when the first entry records a migration into this extension, otherwise by the `active` at installation.
 - A routing update MUST append a `HandoffRecord` if and only if `active` changes. Roster edits that leave `active` unchanged MUST NOT append a record or renumber segments.
-- The `active` locator MUST NOT name a coordinator that already served the group (any `from` in `handoffs`). A returning service MUST use a fresh coordinator identity. This keeps every segment's cursor space fresh (records restart at cursor `1`) and every locator mapped to exactly one segment.
+- A locator MAY appear several times in the chain: a group returning to a previous coordinator reuses that coordinator's stream, whose cursors continue where they left off (§5).
 - The locator recorded in `from` of a new entry MUST equal the `active` of the previous extension state.
 - `boundary_cursor` is the highest cursor of the closing segment that the committer had ingested at commit time.
 - `boundary_tips` is the committer's tip set of the group's causal DAG at commit time (§6). It MAY be empty.
@@ -121,25 +122,19 @@ Rules:
 
 ### 5. Segments and Cursor Positions
 
-Cursors remain exactly as defined in [`spec/00.md`](../00.md) §4–§5: monotonic per group, scoped to one coordinator's view of the group's stream, never canonical message identities. This document adds that every cursor belongs to a **segment**.
+Cursors remain exactly as defined in [`spec/00.md`](../00.md) §4–§5: monotonic per group, scoped to one coordinator's view of the group's stream, never canonical message identities. This document adds that every cursor belongs to a **segment**, and that cursor spaces belong to **streams**.
 
-- A position `(k, c)` names cursor `c` in segment `k`'s cursor space.
+- A stream is one `gid`'s cursor space on one coordinator. Cursors continue increasing for a stream even if the group leaves and later returns; a returning segment simply continues the numbering where the stream left off. Clients need no stream boundary markers: within a stream, order is cursor order, and countedness is decided by linkage (§7).
+- A position `(k, c)` names cursor `c` of the stream that segment `k` is served by.
 - Cursor values MUST NOT be compared or combined across segments except by comparing positions lexicographically: `(k, c) < (k', c')` iff `k < k'`, or `k = k'` and `c < c'`.
-- A cursor reference that travels with a coordinator locator is implicitly qualified by that coordinator's segment. No format change is required:
-  - the Welcome `after` hint ([`welcome-delivery.md`](welcome-delivery.md)) names a cursor of the segment whose coordinator stores the Welcome;
-  - a group document's `cursor` ([`multi-device.md`](multi-device.md) §4) names a cursor of the segment whose coordinator the document names in its `coordinator` field;
-  - client-local fetch progression and read markers name cursors of the segment the client is currently ingesting.
+- A cursor reference that travels with a coordinator locator is implicitly qualified by that coordinator's stream. No format change is required:
+  - the Welcome `after` hint ([`welcome-delivery.md`](welcome-delivery.md)) names a cursor of the stream whose coordinator stores the Welcome;
+  - a group document's `cursor` ([`multi-device.md`](multi-device.md) §4) names a cursor of the stream whose coordinator the document names in its `coordinator` field;
+  - client-local fetch progression and read markers name cursors of the stream the client is currently ingesting.
 - A cursor reference with no accompanying locator, in a group with `len(handoffs) > 0`, is ambiguous and MUST NOT be used for comparison across segments.
-- A cursor reference whose accompanying locator is not the one the adopted chain assigns to its segment — for example a marker minted on a discarded fork branch (§10) — is stale and MUST be treated as void.
+- A cursor reference whose accompanying locator does not appear in the adopted chain — for example a marker minted on a discarded fork branch (§10) — is stale and MUST be treated as void.
 
-Implementations MAY derive a dense virtual cursor numbering for display and compact storage:
-
-- `base(0) = 0`; `base(k + 1) = base(k) + handoffs[k].boundary_cursor + 1`
-- a record at position `(k, c)` with `c <= handoffs[k].boundary_cursor` displays as `base(k) + c`
-- the handoff commit that appended `handoffs[k]` displays as `base(k + 1)` (the seam)
-- records of a closed segment beyond `boundary_cursor` have no virtual number. They MAY still be counted through §7.1 pull-in; they simply display by position instead of by dense number
-
-Virtual numbering is presentational. It MUST NOT be used to decide whether a record is counted (§7), and it MUST NOT appear on the wire as anything other than an ordinary cursor within one segment.
+There is deliberately no derived or dense numbering across segments: history identity comes from the link chain (§6), order from `(segment, cursor)`, and offsets would add arithmetic without adding meaning.
 
 ### 6. Causal Links and Message Identity
 
@@ -225,7 +220,7 @@ Procedure:
 2. The committing member ingests the closing segment to quiescence (fetch-first discipline; late records should be linked before the cut, §7.1 pull-in).
 3. The committing member creates a `group_context_extensions` proposal and Commit replacing `cordn_coordinator_routing` with: `active` set to the target locator, `fallbacks` updated as desired, and a `HandoffRecord` appended with `from` equal to the previous `active`, `boundary_cursor` equal to the committer's highest ingested cursor of the closing segment, and `boundary_tips` equal to the committer's tip set.
 4. The commit is posted to the **closing** segment's coordinator. It is the final record of that segment.
-5. After the commit is stored, the sender and every member that processes it MUST NOT post further records to the closing segment. All subsequent records go to `active`, starting at that segment's cursor `1`.
+5. After the commit is stored, the sender and every member that processes it MUST NOT post further records to the closing segment. All subsequent records go to `active`, appended to that coordinator's stream: a stream new to the group starts at cursor `1`, a returning one continues its numbering (§5).
 6. Clients treat processing the routing commit as the segment switch: fetch progression for positions `(k, c)` maps to the closing coordinator with `afterCursor = c`, and for `(k + 1, c)` to the new `active` with `afterCursor = c`. The existing fetch-then-subscribe ingestion model ([`packages/cli/README.md`](../../packages/cli/README.md)) continues to apply per segment.
 7. Non-message coordinator state is migrated per §11.
 
@@ -275,11 +270,11 @@ Welcomes minted after the switch embed the group's MLS state and therefore the r
 
 A group lives on coordinator A. Its stream is segment `0`, cursors `1..40`, where cursor 40 is a planned handoff commit to coordinator B with `boundary_cursor = 39` and `boundary_tips = [<id at (0, 37)>]`.
 
-- A chat message at `(0, 12)` displays (optionally) as virtual `12`.
-- The handoff commit at `(0, 40)` is the seam and displays as virtual `40` (`base(1) = 0 + 39 + 1`).
-- B serves segment `1` from cursor `1`; its first chat message `(1, 1)` displays as virtual `41`.
-- A message written to A at cursor 41 after the cut is fetched later: it is orphaned (not linked by `boundary_tips`, not pulled in) and MUST NOT be processed. It has no virtual number.
-- A message that a slow member wrote to A at cursor 38 before the cut, which the committer had not ingested, is pulled in when the author's next record on B links its `id`. It is counted at `(0, 38)`, virtual `38`.
+- A chat message sits at `(0, 12)`.
+- The handoff commit is the seam at `(0, 40)`.
+- B serves segment `1` on its own stream; its first chat message is `(1, 1)`.
+- A message written to A at cursor 41 after the cut is fetched later: it is orphaned (not linked by `boundary_tips`, not pulled in) and MUST NOT be processed.
+- A message that a slow member wrote to A at cursor 38 before the cut, which the committer had not ingested, is pulled in when the author's next record on B links its `id`. It is counted at `(0, 38)`.
 
 ### 14. Interoperability Requirements
 
@@ -303,7 +298,7 @@ The design keeps coordinators dumb and moves all survivability into group state 
 - **Causal links over cursor arithmetic.** Dense offset schemes (continuing one coordinator's numbering on the next) require knowing the exact last cursor assigned before the cut. That number is unknowable after a crash, so offsets either collide (two records claiming one position, silently skipping fetches) or gap unpredictably. Link-based adjudication is exact under the same races: a record is counted because someone counted links it, and the pull-in rule of §7.1 covers the ordinary straggler without losing messages. This replaces trust in cursor bookkeeping with verifiable ancestry.
 - **Envelope `id` as node identity.** It is computed once by the author and mandatorily re-derived by receivers today ([`spec/02.md`](../02.md) §4), so the DAG inherits verification for free. It is content-derived, so a re-send of a lost record after re-sealing keeps its identity and deduplicates — where a hash over the sealed blob would differ on every fresh nonce. And it never surfaces outside the seal, so coordinators cannot even compute the DAG's node identities.
 - **Links in `tags`.** Tags are the designated extension point of the envelope ([`spec/02.md`](../02.md) §6), they are covered by the `id` derivation (same id ⇒ same link set), and conforming decoders carry them through untouched. This makes the mechanism strictly additive: pre-feature clients keep verifying records fully and simply ignore causality.
-- **Positions instead of global cursors.** Cursors are already per-group and coordinator-local ([`spec/00.md`](../00.md) §4). Qualifying them by segment preserves every existing wire format; because each durable cursor reference in the protocol already travels alongside a coordinator locator, qualification is implicit and no format changes are required anywhere.
+- **Positions instead of global cursors.** Cursors are already per-group and coordinator-local ([`spec/00.md`](../00.md) §4). Qualifying them by segment preserves every existing wire format; because each durable cursor reference in the protocol already travels alongside a coordinator locator, qualification is implicit and no format changes are required anywhere. Derived virtual numbering is deliberately absent: history identity comes from the link chain and order from `(segment, cursor)`, so dense offsets would add arithmetic without meaning — and dropping them lets a returning coordinator simply continue its stream instead of restarting the numbering.
 - **Orphans are evidence-based.** The old instinct — cap fetches at a cursor and hope — is trust in the switcher's arithmetic. Ancestry makes orphanhood provable, and it coincides exactly with the existing finalization rule: orphaned records are precisely those that never achieved inbound confirmation.
 - **Provisional classification with reconcile-on-change.** Rare boundary races reclassify records in both directions (a straggler orphaned at the cut, then pulled in by its author's next record). Accepting reclassification buys convergence: every member holding the same records computes the same history, with no permanent disagreement about stragglers.
 - **No consensus over the DAG.** The DAG expresses causality; ordering remains the coordinator's job. A fork-choice rule over links would be a second consensus mechanism duplicating the single-writer discipline. The residual race — two handoff commits at the same epoch on different coordinators — is inherited openly from the known [`multi-device.md`](multi-device.md) limitation and healed by the same procedure.
