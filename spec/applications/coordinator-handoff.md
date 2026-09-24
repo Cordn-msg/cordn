@@ -78,7 +78,6 @@ struct {
 
 struct {
     CoordinatorLocator from;
-    uint64 boundary_cursor;
     EnvelopeId boundary_tips<0..2^16-1>;
 } HandoffRecord;
 
@@ -103,7 +102,7 @@ All `EnvelopeId` values MUST be canonical envelope `id` strings as defined in [`
 
 - `active` is the group's current coordinator. It is the only coordinator the group writes to.
 - `fallbacks` is the preference-ordered recovery roster. It MUST contain at least one locator. Members attempt fallbacks in order when the active coordinator is unreachable (§10).
-- `handoffs` is the append-only handoff chain. Entry `k` closes segment `k`: `from` names segment `k`'s coordinator, `boundary_cursor` and `boundary_tips` mark the cut (§5, §7). The open segment has index `len(handoffs)` and is served by `active`.
+- `handoffs` is the append-only handoff chain. Entry `k` closes segment `k`: `from` names segment `k`'s coordinator and `boundary_tips` marks the cut (§7). The open segment has index `len(handoffs)` and is served by `active`.
 
 Rules:
 
@@ -111,14 +110,11 @@ Rules:
 - A routing update MUST append a `HandoffRecord` if and only if `active` changes. Roster edits that leave `active` unchanged MUST NOT append a record or renumber segments.
 - A locator MAY appear several times in the chain: a group returning to a previous coordinator reuses that coordinator's stream, whose cursors continue where they left off (§5).
 - The locator recorded in `from` of a new entry MUST equal the `active` of the previous extension state.
-- `boundary_cursor` is the highest cursor of the closing segment that the committer had ingested at commit time.
 - `boundary_tips` is the committer's tip set of the group's causal DAG at commit time (§6). It MAY be empty.
 
 #### 4.5 Lifecycle and Updates
 
-- The extension MAY be set at group creation or added, replaced, or removed by MLS `group_context_extensions` proposals and the commits that apply them, mirroring [`spec/01.md`](../01.md) §8.
-- MLS GroupContext extension updates replace the full extension list, so senders updating this extension MUST preserve any other GroupContext extensions that remain in use.
-- Implementations MUST serialize the complete `CordnCoordinatorRouting` structure on every update.
+Lifecycle follows [`spec/01.md`](../01.md) §8: the extension MAY be set at group creation or updated by `group_context_extensions` proposals and the commits that apply them. Each update MUST serialize the complete `CordnCoordinatorRouting` structure and MUST preserve any other GroupContext extensions that remain in use.
 
 ### 5. Segments and Cursor Positions
 
@@ -131,8 +127,7 @@ Cursors remain exactly as defined in [`spec/00.md`](../00.md) §4–§5: monoton
   - the Welcome `after` hint ([`welcome-delivery.md`](welcome-delivery.md)) names a cursor of the stream whose coordinator stores the Welcome;
   - a group document's `cursor` ([`multi-device.md`](multi-device.md) §4) names a cursor of the stream whose coordinator the document names in its `coordinator` field;
   - client-local fetch progression and read markers name cursors of the stream the client is currently ingesting.
-- A cursor reference with no accompanying locator, in a group with `len(handoffs) > 0`, is ambiguous and MUST NOT be used for comparison across segments.
-- A cursor reference whose accompanying locator does not appear in the adopted chain — for example a marker minted on a discarded fork branch (§10) — is stale and MUST be treated as void.
+- A cursor reference MUST travel with its locator. One with no locator in a group with `len(handoffs) > 0`, or whose locator does not appear in the adopted chain — for example a marker minted on a discarded fork branch (§10) — is void.
 
 There is deliberately no derived or dense numbering across segments: history identity comes from the link chain (§6), order from `(segment, cursor)`, and offsets would add arithmetic without adding meaning.
 
@@ -142,7 +137,7 @@ Causal links make history continuity verifiable without trusting coordinator cur
 
 #### 6.1 The `prev` Tag
 
-A message envelope MAY carry one or more `prev` tags in its `tags` array ([`spec/02.md`](../02.md) §2, §6):
+Message envelopes carry causal links as one or more `prev` tags in the `tags` array ([`spec/02.md`](../02.md) §2, §6):
 
 ```json
 "tags": [["prev", "<parent envelope id>"]]
@@ -165,9 +160,9 @@ The node identity of a record in the causal DAG is the envelope `id` defined in 
 
 When sending a record, a sender MUST include one `prev` tag for every tip of its known DAG for the group.
 
-- In the common case this is exactly one tag, naming the sender's latest ingested record. A client catching up on unlinked legacy records links each of them once, after which tip counts collapse back to one.
+- In the common case this is exactly one tag, naming the sender's latest ingested record.
 - After ingesting concurrent records, the sender's next record links all resulting tips, merging them. Linking only the latest tip would strand concurrent tips forever, so the rule is all tips, not one.
-- A record with no `prev` tags is **unlinked**. Unlinked records are tolerated: they carry no causality information and are adjudicated by position alone (§7).
+- A record with no `prev` tags is a DAG root — for example the group's first record — and is a tip until something links it. It is adjudicated like any other record (§7).
 
 Links are carried inside the sealed payload ([`spec/03.md`](../03.md) §4). Coordinators see no link structure and gain no visibility into reply, merge, or interaction patterns.
 
@@ -178,12 +173,11 @@ Links are carried inside the sealed payload ([`spec/03.md`](../03.md) §4). Coor
 A record of a closed segment `k` is **counted** if and only if either:
 
 - it is an ancestor of one of `handoffs[k].boundary_tips`, or
-- it becomes linked as an ancestor of any later counted record (pull-in), or
-- it is unlinked and its cursor is at most `handoffs[k].boundary_cursor` (legacy tolerance).
+- it becomes linked as an ancestor of any later counted record (pull-in).
+
+The cut counts exactly what the cutting committer had ingested: `boundary_tips` is that member's tip set, and the ancestor closure of a tip set is everything its holder knew — linked records walk back through their ancestors, and records with no `prev` tags are themselves tips. **Countedness is decided by linkage alone**; cursor values never decide it.
 
 Classification is provisional and grows with knowledge: an open-segment record is provisionally counted when received (and adjudication is not final at segment close, because later linkage can still pull records in), a segment's closing can orphan records the group never linked, and later linkage can pull records back in. All members holding the same records converge on the same classification. Clients MUST reconcile on change: a record that becomes counted MUST be ingested (re-fetched per §8 when no longer held), and a record that proves orphaned MUST be discarded (§7.2). Reclamation requires the relevant records; implementations bound retention as [`multi-device.md`](multi-device.md) document chains do, and a record that can no longer be recovered remains a gap (§8).
-
-`boundary_cursor` is advisory for fetch bounding and display (§5). **Countedness is decided by linkage, never by cursor comparison.** A record above `boundary_cursor` can be pulled in by later linkage, and a record below it can be orphaned if never linked.
 
 #### 7.2 Orphaned Records
 
@@ -200,7 +194,7 @@ MLS handshake records (Proposals and Commits) are not message envelopes and carr
 - a Commit is counted if and only if its resulting epoch lies in the epoch chain of the group's adopted MLS state (the transcript hash chains every Commit to its predecessors, [`RFC 9420`](https://www.rfc-editor.org/rfc/rfc9420));
 - in a planned handoff, the commit carrying the routing update is by definition the final record of the closing segment;
 - in a forced failover, the commit carrying the routing update is by definition the first counted record of the new segment;
-- two competing Commits at the same epoch (possible only when failover or handoff commits race, §9, §10) are a fork of the same class as the known equal-epoch limitation of [`multi-device.md`](multi-device.md); healing follows that document's reconcile procedure, and the discarded branch's routing updates and segment never existed (§5 marks references to them void).
+- two competing Commits at the same epoch fork the group — the known equal-epoch limitation of [`multi-device.md`](multi-device.md); §10 defines how handoff and failover forks resolve.
 
 ### 8. Gap Detection and Recovery
 
@@ -218,13 +212,13 @@ Procedure:
 
 1. The group chooses the target locator by its application-level decision process.
 2. The committing member ingests the closing segment to quiescence (fetch-first discipline; late records should be linked before the cut, §7.1 pull-in).
-3. The committing member creates a `group_context_extensions` proposal and Commit replacing `cordn_coordinator_routing` with: `active` set to the target locator, `fallbacks` updated as desired, and a `HandoffRecord` appended with `from` equal to the previous `active`, `boundary_cursor` equal to the committer's highest ingested cursor of the closing segment, and `boundary_tips` equal to the committer's tip set.
+3. The committing member creates a `group_context_extensions` proposal and Commit replacing `cordn_coordinator_routing` with: `active` set to the target locator, `fallbacks` updated as desired, and a `HandoffRecord` appended with `from` equal to the previous `active` and `boundary_tips` equal to the committer's tip set.
 4. The commit is posted to the **closing** segment's coordinator. It is the final record of that segment.
 5. After the commit is stored, the sender and every member that processes it MUST NOT post further records to the closing segment. All subsequent records go to `active`, appended to that coordinator's stream: a stream new to the group starts at cursor `1`, a returning one continues its numbering (§5).
 6. Clients treat processing the routing commit as the segment switch: fetch progression for positions `(k, c)` maps to the closing coordinator with `afterCursor = c`, and for `(k + 1, c)` to the new `active` with `afterCursor = c`. The existing fetch-then-subscribe ingestion model ([`packages/cli/README.md`](../../packages/cli/README.md)) continues to apply per segment.
 7. Non-message coordinator state is migrated per §11.
 
-A straggler that misses the routing commit and posts to the closing segment produces an orphan candidate: the record can only become counted by the §7.1 pull-in rule, and it can never finalize a pending epoch operation, because inbound confirmation for it requires a fetch past a boundary that no compliant client performs. On catching up, the straggler retries its pending record on the new segment.
+A straggler that misses the routing commit and posts to the closing segment produces an orphan candidate: the record can only become counted by the §7.1 pull-in rule, and it can never finalize a pending epoch operation, because inbound confirmation for it requires ingesting past the cut, which no compliant client performs. On catching up, the straggler retries its pending record on the new segment.
 
 ### 10. Forced Failover
 
@@ -234,15 +228,15 @@ Procedure:
 
 1. Members determine unreachability by local policy (timeouts and retry counts are out of scope for this document).
 2. Members attempt the `fallbacks` roster in preference order. All members SHOULD prefer the first reachable fallback, which concentrates handoff commits on one coordinator and lets that coordinator's ordering serialize them.
-3. The first member to commit on the chosen fallback creates a `group_context_extensions` update: `active` set to the chosen fallback, `handoffs` appended with `from` equal to the unreachable coordinator's locator, `boundary_cursor` equal to the committer's highest ingested cursor of the dead segment, and `boundary_tips` equal to the committer's tip set.
-4. The commit is posted to the **new** coordinator. It is the first counted record of the new segment. The old segment's cut is approximate: `boundary_cursor` and `boundary_tips` state what one member had confirmed, and §7.1 adjudicates the rest.
+3. The first member to commit on the chosen fallback creates a `group_context_extensions` update: `active` set to the chosen fallback, `handoffs` appended with `from` equal to the unreachable coordinator's locator and `boundary_tips` equal to the committer's tip set.
+4. The commit is posted to the **new** coordinator. It is the first counted record of the new segment. The old segment's cut is approximate: `boundary_tips` states what one member had confirmed, and §7.1 adjudicates the rest.
 5. Every member adopts the routing commit on processing it and switches write targets (§9 step 6 for progression mapping).
 6. Authors of records that never achieved inbound confirmation on the dead segment MAY re-send them on the new segment. Re-sends reuse the original envelope `id` and deduplicate (§6.2); unconfirmed Commits cannot be re-sent and are superseded by new Commits on the new segment.
 
 Requirements and failure notes:
 
 - Concurrent failover commits that land on the **same** fallback serialize into a linear handoff chain through that coordinator's ordering: the later commit, created after ingesting the earlier one, appends an ordinary subsequent `HandoffRecord` or merely edits the roster.
-- Concurrent failover commits that land on **different** fallbacks fork the routing state. This is the same class as the known equal-epoch limitation of [`multi-device.md`](multi-device.md). Members MUST adopt the routing state carried by the MLS state they converge on per that document's reconcile procedure and MUST treat the discarded branch's segment as never having existed for positioning.
+- Concurrent failover commits that land on **different** fallbacks fork the routing state. This is the same class as the known equal-epoch limitation of [`multi-device.md`](multi-device.md). Members MUST adopt the routing state carried by the MLS state they converge on per that document's reconcile procedure and MUST treat the discarded branch's segment as never having existed; §5 voids references to its stream.
 - The tail that existed only on the dead coordinator is lost. This is consistent with the storage model of [`spec/00.md`](../00.md): coordinators provide temporary storage, and durability of history is not a coordinator guarantee. Loss of unconfirmed application messages is acceptable; loss of group state is repaired via [`multi-device.md`](multi-device.md) document chains.
 
 ### 11. Non-Message Coordinator State
@@ -268,13 +262,14 @@ Welcomes minted after the switch embed the group's MLS state and therefore the r
 
 ### 13. Worked Example
 
-A group lives on coordinator A. Its stream is segment `0`, cursors `1..40`, where cursor 40 is a planned handoff commit to coordinator B with `boundary_cursor = 39` and `boundary_tips = [<id at (0, 37)>]`.
+A group lives on coordinator A. Its stream is segment `0`, cursors `1..40`, where cursor 40 is a planned handoff commit to coordinator B carrying `boundary_tips = [<id at (0, 37)>]` — the committer's tips, whose ancestor closure is everything that committer had ingested.
 
 - A chat message sits at `(0, 12)`.
 - The handoff commit is the seam at `(0, 40)`.
 - B serves segment `1` on its own stream; its first chat message is `(1, 1)`.
 - A message written to A at cursor 41 after the cut is fetched later: it is orphaned (not linked by `boundary_tips`, not pulled in) and MUST NOT be processed.
 - A message that a slow member wrote to A at cursor 38 before the cut, which the committer had not ingested, is pulled in when the author's next record on B links its `id`. It is counted at `(0, 38)`.
+- An older record with no `prev` tags that the committer had ingested is a tip, so it appears in `boundary_tips` itself and is counted.
 
 ### 14. Interoperability Requirements
 
