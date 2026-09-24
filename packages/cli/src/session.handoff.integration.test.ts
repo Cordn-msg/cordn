@@ -19,7 +19,7 @@ import { MockRelayHub } from "@cordn/test-utils";
 import { PrivateKeySigner } from "@contextvm/sdk";
 
 /** Coordinator handoff end-to-end (spec/applications/coordinator-handoff.md):
- * two real coordinators, real MLS groups, planned handoffs, the counted-history
+ * three real coordinators, real MLS groups, planned handoffs, the counted-history
  * gate, late writes to a closing stream, author rescue by re-linking, and
  * §6.2 re-sends healing gaps. */
 
@@ -174,7 +174,7 @@ async function bootstrapGroup(
           locator(harness.server2Pubkey),
           locator(harness.server3Pubkey),
         ],
-        handoffs: [],
+        boundaryTips: [],
       },
     },
   });
@@ -213,11 +213,8 @@ describe("coordinator handoff (session)", () => {
     expect(routing?.active.pubkey.toLowerCase()).toBe(
       harness.server2Pubkey.toLowerCase(),
     );
-    expect(routing?.handoffs).toHaveLength(1);
-    expect(routing?.handoffs[0]?.from.pubkey.toLowerCase()).toBe(
-      harness.server1Pubkey.toLowerCase(),
-    );
-    expect(routing?.handoffs[0]?.boundaryTips).toContain(one.id);
+    // The cut carries exactly the committer's confirmed tips (§7.1).
+    expect(routing?.boundaryTips).toEqual([one.id]);
     expect(routing?.fallbacks.map((f) => f.pubkey.toLowerCase())).toContain(
       harness.server1Pubkey.toLowerCase(),
     );
@@ -236,8 +233,8 @@ describe("coordinator handoff (session)", () => {
     );
     expect(bob.getGroup("demo").fetchCursor).toBe(0);
     expect(
-      bob.getGroup("demo").metadata?.coordinatorRouting?.handoffs,
-    ).toHaveLength(1);
+      bob.getGroup("demo").metadata?.coordinatorRouting?.boundaryTips,
+    ).toEqual([one.id]);
 
     // Chat continues on the new coordinator (fresh line, first cursor).
     const two = await alice.sendMessage("demo", "two");
@@ -258,10 +255,7 @@ describe("coordinator handoff (session)", () => {
     // on a continuing line — §5).
     await bob.switchCoordinator("demo", bobTarget1);
     const returnRouting = bob.getGroup("demo").metadata?.coordinatorRouting;
-    expect(returnRouting?.handoffs).toHaveLength(2);
-    expect(returnRouting?.handoffs[1]?.from.pubkey.toLowerCase()).toBe(
-      harness.server2Pubkey.toLowerCase(),
-    );
+    expect(returnRouting?.boundaryTips).toEqual([one.id, two.id]);
     expect(returnRouting?.active.pubkey.toLowerCase()).toBe(
       harness.server1Pubkey.toLowerCase(),
     );
@@ -383,8 +377,8 @@ describe("coordinator handoff (session)", () => {
     // The old segment's cut is approximate: it states what one member had
     // confirmed, and the unseen tail is not in it.
     const routing = alice.getGroup("demo").metadata?.coordinatorRouting;
-    expect(routing?.handoffs[0]?.boundaryTips).toContain(one.id);
-    expect(routing?.handoffs[0]?.boundaryTips).not.toContain(late.id);
+    expect(routing?.boundaryTips).toContain(one.id);
+    expect(routing?.boundaryTips).not.toContain(late.id);
 
     // §10.2: the stranded member attempts the roster and adopts the
     // coordinator carrying the routing state.
@@ -503,7 +497,7 @@ describe("coordinator handoff (session)", () => {
     harnesses.push(harness);
     const { session: alice, target2 } = harness.makeSession();
     const { session: bob, target2: bobTarget2 } = harness.makeSession();
-    await bootstrapGroup(alice, bob, harness);
+    const one = await bootstrapGroup(alice, bob, harness);
 
     // alice fails over first. bob is stale and races her with the same
     // target: his call runs before he has ingested anything.
@@ -512,10 +506,10 @@ describe("coordinator handoff (session)", () => {
       bob.switchCoordinator("demo", bobTarget2, { failover: true }),
     ).rejects.toThrow(/already on that coordinator/);
 
-    // Serialized: one commit, one handoff record, one linear chain.
+    // Serialized: one commit, one cut, one switch.
     expect(
-      bob.getGroup("demo").metadata?.coordinatorRouting?.handoffs,
-    ).toHaveLength(1);
+      bob.getGroup("demo").metadata?.coordinatorRouting?.boundaryTips,
+    ).toEqual([one.id]);
     expect(bob.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
       harness.server2Pubkey.toLowerCase(),
     );

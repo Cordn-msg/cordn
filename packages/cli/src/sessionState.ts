@@ -97,6 +97,9 @@ export interface GroupSessionState {
   metadata?: CordnGroupMetadata;
   status: "active" | "removed";
   removedAtCursor?: number;
+  /** Client-local ordinal of the current stream (coordinator-handoff §5):
+   *  bumped whenever the active coordinator changes. Absent = 0. */
+  stream?: number;
   lastCursor: number;
   fetchCursor: number;
   messages: StoredMessage[];

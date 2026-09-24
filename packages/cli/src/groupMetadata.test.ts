@@ -39,12 +39,7 @@ describe("cordn group metadata codec", () => {
     const routing = {
       active: { pubkey: "11".repeat(32), relayUrls: ["wss://a.example"] },
       fallbacks: [{ pubkey: "22".repeat(32), relayUrls: [] }],
-      handoffs: [
-        {
-          from: { pubkey: "11".repeat(32), relayUrls: ["wss://a.example"] },
-          boundaryTips: ["ab".repeat(32)],
-        },
-      ],
+      boundaryTips: ["ab".repeat(32)],
     };
     const encoded = encodeCordnGroupMetadata({
       name: "demo",
@@ -77,7 +72,7 @@ describe("cordn group metadata codec", () => {
     const routing = {
       active: { pubkey: "11".repeat(32), relayUrls: [] },
       fallbacks: [{ pubkey: "22".repeat(32), relayUrls: [] }],
-      handoffs: [],
+      boundaryTips: [],
     };
     const encoded = encodeCordnGroupMetadata({
       name: "demo",

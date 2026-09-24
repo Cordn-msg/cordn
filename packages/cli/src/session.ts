@@ -137,7 +137,7 @@ function dedupeBy<T>(values: T[], keyOf: (value: T) => string): T[] {
  *  decide anything; this ordinal is the only cursor-derived fact countedness
  *  uses (§7.1 provenance). */
 function streamOf(group: GroupSessionState): number {
-  return group.metadata?.coordinatorRouting?.handoffs.length ?? 0;
+  return group.stream ?? 0;
 }
 
 // ponytail: probe bound only. Full reachability policy (timeouts, retries) is
@@ -813,6 +813,9 @@ export class CliSession {
 
       this.adoptGroupState(group, prepared.newState);
       pendingOperation.localStateApplied = true;
+      // A metadata edit may itself change `active` (a handoff by another
+      // name, §4.4): rebind exactly as a routing commit would.
+      this.reconcileRouting(group);
 
       return { metadata: group.metadata ?? metadata };
     });
@@ -820,7 +823,7 @@ export class CliSession {
 
   /**
    * Coordinator handoff (spec/applications/coordinator-handoff.md §9, §10):
-   * append a `HandoffRecord` to the group's routing state and move the group
+   * extend the routing state's cut and move the group
    * to `target`. A planned handoff (§9) quiesces the closing stream and posts
    * the commit there — it is that stream's final record. A forced failover
    * (`options.failover`, §10) skips the unreachable coordinator and posts the
@@ -856,7 +859,6 @@ export class CliSession {
       }
 
       const nextKey = this.coordinatorRegistry.register(target);
-      const from = this.locatorOf(group.coordinatorKey);
       if (nextKey === group.coordinatorKey) {
         throw new Error(`Group ${groupAlias} is already on that coordinator`);
       }
@@ -907,13 +909,17 @@ export class CliSession {
         // is a known-good one). The roster is ordinary metadata — edit it
         // through `updateGroupMetadata` like the document (§4.4).
         fallbacks: dedupeBy(
-          [from, ...previous.fallbacks.filter((f) => f.pubkey !== to.pubkey)],
+          [
+            previous.active,
+            ...previous.fallbacks.filter((f) => f.pubkey !== to.pubkey),
+          ],
           (locator) => locator.pubkey,
         ),
-        handoffs: [
-          ...previous.handoffs,
-          { from, boundaryTips: causalTips(group.messages) },
-        ],
+        // §7.1: the cut accumulates every handoff committer's confirmed tips.
+        boundaryTips: dedupeBy(
+          [...previous.boundaryTips, ...causalTips(group.messages)],
+          (tip) => tip,
+        ),
       };
 
       const metadata: CordnGroupMetadata = {
@@ -2001,7 +2007,7 @@ export class CliSession {
         // Seed provenance: a copy on the open stream counts (§6.2/§7.2).
         stream: message.copyStream ?? message.stream ?? 0,
       })),
-      routing?.handoffs.flatMap((handoff) => handoff.boundaryTips) ?? [],
+      routing?.boundaryTips ?? [],
       streamOf(group),
     ).counted;
   }
@@ -2037,6 +2043,8 @@ export class CliSession {
       // locator's relay hints.
     }
     group.coordinatorKey = active.pubkey;
+    // A new stint: client-local stream ordinal (§5) for provenance stamps.
+    group.stream = (group.stream ?? 0) + 1;
     group.fetchCursor = 0;
     group.lastCursor = 0;
     if (this.isWatching(group.alias)) {

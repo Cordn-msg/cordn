@@ -13,16 +13,12 @@ export interface CoordinatorLocator {
   relayUrls: string[];
 }
 
-export interface HandoffRecord {
-  from: CoordinatorLocator;
-  /** Envelope `id` values of the closing commit's `boundary_tips` (§4.4). */
-  boundaryTips: string[];
-}
-
 export interface CordnCoordinatorRouting {
   active: CoordinatorLocator;
   fallbacks: CoordinatorLocator[];
-  handoffs: HandoffRecord[];
+  /** Envelope `id` values the group has confirmed — the accumulated cut
+   *  (§7.1): one handoff committer's tip set at a time. */
+  boundaryTips: string[];
 }
 
 const ENVELOPE_ID = /^[0-9a-f]{64}$/;
@@ -95,13 +91,6 @@ function encodeLocator(locator: CoordinatorLocator): Uint8Array {
   return concat(Buffer.from(locator.pubkey, "hex"), encodeField(relays));
 }
 
-function encodeHandoff(record: HandoffRecord): Uint8Array {
-  const tips = concat(
-    ...record.boundaryTips.map((id) => encodeField(encoder.encode(id))),
-  );
-  return concat(encodeLocator(record.from), encodeField(tips));
-}
-
 function decodeStrings(bytes: Uint8Array): string[] {
   const values: string[] = [];
   let offset = 0;
@@ -139,35 +128,21 @@ function decodeLocators(bytes: Uint8Array): CoordinatorLocator[] {
   return locators;
 }
 
-function decodeHandoffs(bytes: Uint8Array): HandoffRecord[] {
-  const records: HandoffRecord[] = [];
-  let offset = 0;
-  while (offset < bytes.length) {
-    const [from, afterFrom] = decodeLocator(bytes, offset);
-    const [tips, next] = decodeField(bytes, afterFrom);
-    records.push({
-      from,
-      boundaryTips: decodeStrings(tips).map(normalizeEnvelopeId),
-    });
-    offset = next;
-  }
-  return records;
-}
-
 export function encodeCordnCoordinatorRouting(
   routing: CordnCoordinatorRouting,
 ): Uint8Array {
   const fallbacks = routing.fallbacks.map(normalizeLocator);
-  const handoffs = routing.handoffs.map((record) => ({
-    from: normalizeLocator(record.from),
-    boundaryTips: record.boundaryTips.map(normalizeEnvelopeId),
-  }));
+  const tips = concat(
+    ...routing.boundaryTips.map((id) =>
+      encodeField(encoder.encode(normalizeEnvelopeId(id))),
+    ),
+  );
 
   return concat(
     encodeUint16(1),
     encodeLocator(normalizeLocator(routing.active)),
     encodeField(concat(...fallbacks.map(encodeLocator))),
-    encodeField(concat(...handoffs.map(encodeHandoff))),
+    encodeField(tips),
   );
 }
 
@@ -186,8 +161,8 @@ export function decodeCordnCoordinatorRouting(
   offset = afterActive;
   const [fallbacksBlob, afterFallbacks] = decodeField(bytes, offset);
   offset = afterFallbacks;
-  const [handoffsBlob, afterHandoffs] = decodeField(bytes, offset);
-  offset = afterHandoffs;
+  const [tipsBlob, afterTips] = decodeField(bytes, offset);
+  offset = afterTips;
 
   const fallbacks = decodeLocators(fallbacksBlob);
 
@@ -195,5 +170,9 @@ export function decodeCordnCoordinatorRouting(
     throw new Error("Unexpected trailing bytes in cordn coordinator routing");
   }
 
-  return { active, fallbacks, handoffs: decodeHandoffs(handoffsBlob) };
+  return {
+    active,
+    fallbacks,
+    boundaryTips: decodeStrings(tipsBlob).map(normalizeEnvelopeId),
+  };
 }

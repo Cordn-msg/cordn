@@ -27,7 +27,6 @@ export type { CoordinatorTarget } from "./coordinatorRegistry.ts";
 export type {
   CoordinatorLocator,
   CordnCoordinatorRouting,
-  HandoffRecord,
 } from "./coordinatorRouting.ts";
 export type { CordnGroupMetadata } from "./groupMetadata.ts";
 export { FileMediaStore, type MediaStore } from "./mediaStore.ts";

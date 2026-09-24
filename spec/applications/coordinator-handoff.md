@@ -6,7 +6,7 @@
 
 This document defines how a `cordn` group survives its coordinator. It covers coordinator migration (planned handoff), coordinator loss (forced failover), and coordinator discovery (preferred coordinator and a preference-ordered fallback roster agreed in group state).
 
-The design rests on two pieces. First, a `coordinator_routing` field of the cordn group metadata document carrying the group's preferred coordinator, fallback roster, and append-only handoff chain. Second, causal `prev` links carried inside sealed message envelopes, over the envelope identifiers already defined in [`spec/02.md`](../02.md), giving the group a self-certifying history whose completeness and boundaries are verifiable without trusting any coordinator. Cursors stay exactly as [`spec/00.md`](../00.md) defines them — stream-local addresses — and are given no cross-stream meaning.
+The design rests on two pieces. First, a `coordinator_routing` field of the cordn group metadata document carrying the group's preferred coordinator, fallback roster, and accumulated cut. Second, causal `prev` links carried inside sealed message envelopes, over the envelope identifiers already defined in [`spec/02.md`](../02.md), giving the group a self-certifying history whose completeness and boundaries are verifiable without trusting any coordinator. Cursors stay exactly as [`spec/00.md`](../00.md) defines them — stream-local addresses — and are given no cross-stream meaning.
 
 Coordinators are unchanged. They remain uniform, content-opaque delivery services as defined in [`spec/00.md`](../00.md) and [`spec/03.md`](../03.md); every mechanism in this document is client-side or group-state-side.
 
@@ -72,15 +72,10 @@ struct {
 } CoordinatorLocator;
 
 struct {
-    CoordinatorLocator from;
-    EnvelopeId boundary_tips<0..2^16-1>;
-} HandoffRecord;
-
-struct {
     uint16 version;
     CoordinatorLocator active;
-    CoordinatorLocator fallbacks<1..2^16-1>;
-    HandoffRecord handoffs<0..2^16-1>;
+    CoordinatorLocator fallbacks<0..2^16-1>;
+    EnvelopeId boundary_tips<0..2^16-1>;
 } CordnCoordinatorRouting;
 ```
 
@@ -94,20 +89,18 @@ All `EnvelopeId` values MUST be canonical envelope `id` strings as defined in [`
 
 - `active` is the group's current coordinator. It is the only coordinator the group writes to.
 - `fallbacks` is the preference-ordered recovery roster: the coordinators the group may move to, and the only place discovery looks (§10.2). It MAY be empty — an absent or empty roster is the group's decision that no handoff can exist. Members attempt fallbacks in order when the active coordinator is unreachable (§10).
-- `handoffs` is the append-only handoff chain. Entry `k` closes segment `k`: `from` names segment `k`'s coordinator and `boundary_tips` marks the cut (§7). The open segment has index `len(handoffs)` and is served by `active`.
+- `boundary_tips` is the accumulated cut (§7): the envelope `id` values confirmed by the group's handoff commits, one committer's tip set at a time.
 
 Rules:
 
 - The roster is ordinary group metadata: written with the document, at birth or at any later metadata commit (§4.5). Its contents are the group's declaration — clients invent none.
 - A routing update's new `active` MUST be a `fallbacks` member of the previous routing state. That is what makes a switch discoverable to members stranded on the old coordinator (§10.2): with no declared fallback, no handoff can exist.
-- A routing update MUST append a `HandoffRecord` if and only if `active` changes. Roster edits that leave `active` unchanged MUST NOT append a record or renumber segments.
-- A locator MAY appear several times in the chain: each appearance is a fresh segment on a fresh stream, even for a coordinator the group used before (§5).
-- The locator recorded in `from` of a new entry MUST equal the `active` of the previous routing state.
-- `boundary_tips` is the committer's tip set of the group's causal DAG at commit time (§6). It MAY be empty.
+- A routing update that changes `active` MUST add the committer's tip set of the group's causal DAG at commit time (§6) to `boundary_tips`; the tip set MAY be empty. Roster edits that leave `active` unchanged MUST NOT touch `boundary_tips`.
+- A locator MAY serve the group again later; each stint opens a fresh stream (§5).
 
 #### 4.5 Lifecycle and Updates
 
-Lifecycle follows [`spec/01.md`](../01.md) §8: the metadata document MAY be set at group creation or updated by `group_context_extensions` proposals and the commits that apply them. Each update MUST serialize the complete metadata document — including a complete `CordnCoordinatorRouting` structure whenever routing state is present, never a partial chain — and MUST preserve any other GroupContext extensions that remain in use.
+Lifecycle follows [`spec/01.md`](../01.md) §8: the metadata document MAY be set at group creation or updated by `group_context_extensions` proposals and the commits that apply them. Each update MUST serialize the complete metadata document — including a complete `CordnCoordinatorRouting` structure whenever routing state is present, never a partial structure — and MUST preserve any other GroupContext extensions that remain in use.
 
 ### 5. Streams and Cursors
 
@@ -119,7 +112,7 @@ Cursors remain exactly as defined in [`spec/00.md`](../00.md) §4–§5: monoton
   - the Welcome `after` hint ([`welcome-delivery.md`](welcome-delivery.md)) names a cursor of the stream whose coordinator stores the Welcome;
   - a group document's `cursor` ([`multi-device.md`](multi-device.md) §4) names a cursor of the stream whose coordinator the document names in its `coordinator` field;
   - client-local fetch progression and read markers name cursors of the stream the client is currently ingesting.
-- A cursor reference with no locator in a group with `len(handoffs) > 0`, or whose locator does not appear in the adopted chain — for example a marker minted on a discarded fork branch (§10) — is void.
+- A cursor reference with no locator, or minted on a discarded fork branch (§10), is void.
 
 There is deliberately no numbering or ordering across streams: history identity and order come from the link chain (§6), and display order across streams is client-local.
 
@@ -164,7 +157,7 @@ Links are carried inside the sealed payload ([`spec/03.md`](../03.md) §4). Coor
 
 A record is **counted** if and only if it lies in the ancestor closure of the counted seeds:
 
-- every `boundary_tips` entry of every `handoffs` record, and
+- the routing state's `boundary_tips` (the accumulated cut), and
 - every record fetched from the stream serving the open segment (provisional seeds).
 
 Everything else a client holds is **orphaned** (§7.2). The closure of one cut's tips is exactly the cutting committer's knowledge: `boundary_tips` is that member's tip set, and the ancestor closure of a tip set is everything its holder knew — linked records walk back through their ancestors, and records with no `prev` tags are themselves tips. Any cut's tips may pull a record in, and any counted record links its ancestors in with it. **Countedness is decided by linkage and stream provenance, never by cursor values.**
@@ -206,7 +199,7 @@ Procedure:
 
 1. The group chooses the target locator by its application-level decision process. The target MUST be a currently declared `fallbacks` member (§4.4); a group without a roster cannot hand off.
 2. The committing member ingests the closing segment to quiescence (fetch-first discipline; late records should be linked before the cut, §7.1 pull-in).
-3. The committing member creates a `group_context_extensions` proposal and Commit replacing the group metadata document's `coordinator_routing` field with: `active` set to the target locator, `fallbacks` updated as desired, and a `HandoffRecord` appended with `from` equal to the previous `active` and `boundary_tips` equal to the committer's tip set.
+3. The committing member creates a `group_context_extensions` proposal and Commit replacing the group metadata document's `coordinator_routing` field with: `active` set to the target locator, `fallbacks` updated as desired, and the committer's tip set added to `boundary_tips`.
 4. The commit is posted to the **closing** segment's coordinator. It is the final record of that segment.
 5. After the commit is stored, the sender and every member that processes it MUST NOT post further records to the closing segment. All subsequent records go to `active`, appended to that coordinator's stream: numbering starts at cursor `1` for every new segment (§5).
 6. Clients treat processing the routing commit as the segment switch: fetch progression follows the new stream (§5). The existing fetch-then-subscribe ingestion model ([`packages/cli/README.md`](../../packages/cli/README.md)) continues to apply per stream.
@@ -222,14 +215,14 @@ Procedure:
 
 1. Members determine unreachability by local policy (timeouts and retry counts are out of scope for this document).
 2. Members attempt the `fallbacks` roster in preference order. Discovery is the declared roster and nothing else: the chosen fallback MUST be a roster member (§4.4), so stranded members are guaranteed to look in the right place. All members SHOULD prefer the first reachable fallback, which concentrates handoff commits on one coordinator and lets that coordinator's ordering serialize them.
-3. Before committing, the member ingests the chosen fallback's current line for the group — fetch-first discipline applies to the target too. If an earlier failover commit is present, it is adopted instead and no commit is created. Otherwise the first member to commit creates a `group_context_extensions` update: `active` set to the chosen fallback, `handoffs` appended with `from` equal to the unreachable coordinator's locator and `boundary_tips` equal to the committer's tip set.
+3. Before committing, the member ingests the chosen fallback's current line for the group — fetch-first discipline applies to the target too. If an earlier failover commit is present, it is adopted instead and no commit is created. Otherwise the first member to commit creates a `group_context_extensions` update: `active` set to the chosen fallback, and the committer's tip set added to `boundary_tips`.
 4. The commit is posted to the **new** coordinator. It is the first counted record of the new segment. The old segment's cut is approximate: `boundary_tips` states what one member had confirmed, and §7.1 adjudicates the rest.
 5. Every member adopts the routing commit on processing it and switches write targets (§9 step 6 for the stream switch).
 6. Authors of records that never achieved inbound confirmation on the dead segment MAY re-send them on the new segment. Re-sends reuse the original envelope `id` and deduplicate (§6.2); unconfirmed Commits cannot be re-sent and are superseded by new Commits on the new segment.
 
 Requirements and failure notes:
 
-- Failover commits on the **same** fallback serialize into one linear handoff chain through that coordinator's ordering: the target is reachable, so the later committer ingests the earlier commit first (step 3) and merely edits the roster — or adopts the switch and creates no commit at all.
+- Failover commits on the **same** fallback serialize through that coordinator's ordering: the target is reachable, so the later committer ingests the earlier commit first (step 3) and merely edits the roster — or adopts the switch and creates no commit at all.
 - Commits created without ingesting each other — a race inside the commit window, or failover commits landing on **different** fallbacks — fork the routing state. This is the same class as the known equal-epoch limitation of [`multi-device.md`](multi-device.md). Members MUST adopt the routing state carried by the MLS state they converge on per that document's reconcile procedure and MUST treat the discarded branch's segment as never having existed; §5 voids references to its stream.
 - The tail that existed only on the dead coordinator is lost. This is consistent with the storage model of [`spec/00.md`](../00.md): coordinators provide temporary storage, and durability of history is not a coordinator guarantee. Loss of unconfirmed application messages is acceptable; loss of group state is repaired via [`multi-device.md`](multi-device.md) document chains.
 
@@ -268,11 +261,11 @@ Implementations MUST agree on all of the following:
 - the `coordinator_routing` field's placement in the metadata document, serialization, and versioning rules
 - the `prev` tag name, one-parent-per-tag shape, and the linking rule of §6.3
 - envelope `id` semantics from [`spec/02.md`](../02.md) §4 as DAG node identity, including deduplication on re-send (§6.2)
-- stream-local cursor semantics, the rule that cursor references travel with their locator, and the stale-stream void rule of §5
+- stream-local cursor semantics, the rule that cursor references travel with their locator, and the void rule of §5
 - the counted/orphaned adjudication of §7 and the commit rules of §7.3
 - the planned handoff and forced failover procedures of §9 and §10, including the single-writer discipline
 
-Implementations MUST reject malformed routing payloads, invalid UTF-8, and `prev` values that are not valid envelope ids. An extension update that violates the chain rules of §4.4 MUST be treated as void rather than applied; such an update can only arrive from a discarded fork branch (§7.3), and the §4.4 rules remain the conformance target for update authors.
+Implementations MUST reject malformed routing payloads, invalid UTF-8, and `prev` values that are not valid envelope ids. An extension update that violates the update rules of §4.4 MUST be treated as void rather than applied; such an update can only arrive from a discarded fork branch (§7.3), and the §4.4 rules remain the conformance target for update authors.
 
 ### 15. Rationale
 

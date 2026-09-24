@@ -29,10 +29,7 @@ describe("cordn coordinator routing codec", () => {
     const routing: CordnCoordinatorRouting = {
       active: A,
       fallbacks: [B, { pubkey: "33".repeat(32), relayUrls: ["wss://c"] }],
-      handoffs: [
-        { from: A, boundaryTips: [TIP] },
-        { from: B, boundaryTips: [] },
-      ],
+      boundaryTips: [TIP],
     };
 
     expect(
@@ -44,7 +41,7 @@ describe("cordn coordinator routing codec", () => {
     const routing: CordnCoordinatorRouting = {
       active: A,
       fallbacks: [B],
-      handoffs: [],
+      boundaryTips: [],
     };
 
     expect(
@@ -56,18 +53,18 @@ describe("cordn coordinator routing codec", () => {
     const encoded = encodeCordnCoordinatorRouting({
       active: { pubkey: "AB".repeat(32), relayUrls: [] },
       fallbacks: [B],
-      handoffs: [{ from: B, boundaryTips: ["CD".repeat(32)] }],
+      boundaryTips: ["CD".repeat(32)],
     });
 
     expect(decodeCordnCoordinatorRouting(encoded)).toEqual({
       active: { pubkey: "ab".repeat(32), relayUrls: [] },
       fallbacks: [B],
-      handoffs: [{ from: B, boundaryTips: ["cd".repeat(32)] }],
+      boundaryTips: ["cd".repeat(32)],
     });
   });
 
   test("an empty roster is a legal declaration (no handoffs possible)", () => {
-    const routing = { active: A, fallbacks: [], handoffs: [] };
+    const routing = { active: A, fallbacks: [], boundaryTips: [] };
     expect(
       decodeCordnCoordinatorRouting(encodeCordnCoordinatorRouting(routing)),
     ).toEqual(routing);
@@ -77,7 +74,7 @@ describe("cordn coordinator routing codec", () => {
     const encoded = encodeCordnCoordinatorRouting({
       active: A,
       fallbacks: [B],
-      handoffs: [],
+      boundaryTips: [],
     });
     encoded[0] = 0;
     encoded[1] = 0;
@@ -89,7 +86,7 @@ describe("cordn coordinator routing codec", () => {
     const encoded = encodeCordnCoordinatorRouting({
       active: A,
       fallbacks: [B],
-      handoffs: [],
+      boundaryTips: [],
     });
 
     expect(() => decodeCordnCoordinatorRouting(bytes(encoded, [9, 9]))).toThrow(
@@ -104,7 +101,7 @@ describe("cordn coordinator routing codec", () => {
     const routing: CordnCoordinatorRouting = {
       active: A,
       fallbacks: [B],
-      handoffs: [{ from: B, boundaryTips: [TIP] }],
+      boundaryTips: [TIP],
     };
     const encoded = encodeCordnCoordinatorRouting(routing);
     encoded[1] = 2; // pretend version 2 appended fields we do not know
@@ -119,27 +116,25 @@ describe("cordn coordinator routing codec", () => {
       encodeCordnCoordinatorRouting({
         active: { pubkey: "zz", relayUrls: [] },
         fallbacks: [B],
-        handoffs: [],
+        boundaryTips: [],
       }),
     ).toThrow(/pubkey/i);
     expect(() =>
       encodeCordnCoordinatorRouting({
         active: A,
         fallbacks: [B],
-        handoffs: [{ from: B, boundaryTips: ["not-an-id"] }],
+        boundaryTips: ["not-an-id"],
       }),
     ).toThrow(/envelope id/);
 
-    // version 1 + locator A + fallbacks[B] + handoffs[locator B + tip "hi"]
-    // (tips blob content is length-prefixed ids)
+    // version 1 + locator A + fallbacks[B] + a tips field carrying the
+    // length-prefixed id "hi"
     expect(() =>
       decodeCordnCoordinatorRouting(
         bytes(
           [0, 1],
           locator(0x11),
           [0, 34],
-          locator(0x22),
-          [0, 40],
           locator(0x22),
           [0, 4],
           [0, 2, 0x68, 0x69],

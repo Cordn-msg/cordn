@@ -2,13 +2,9 @@ import { describe, expect, test } from "vitest";
 
 import {
   adjudicate,
-  chainLocators,
-  checkRoutingChain,
-  isVoidMarker,
   tipsOf,
   type Adjudication,
   type HistoryRecord,
-  type RoutingState,
 } from "./countedHistory.ts";
 
 /** spec/applications/coordinator-handoff.md conformance and stress tests for
@@ -137,75 +133,6 @@ describe("§6.2 re-sent identity", () => {
     expect([...first.orphaned]).toEqual([]);
     expect([...second.counted]).toEqual(["m"]);
     expect([...second.orphaned]).toEqual([]);
-  });
-});
-
-describe("§4.4 routing chain rules", () => {
-  test("planned handoff appends exactly one record with from == previous active", () => {
-    expect(
-      checkRoutingChain([
-        { active: "A", handoffFroms: [] },
-        { active: "B", handoffFroms: ["A"] },
-        { active: "B", handoffFroms: ["A"] }, // roster edit: chain unchanged
-      ]),
-    ).toEqual([]);
-  });
-
-  test("active change without an appended record is a violation", () => {
-    expect(
-      checkRoutingChain([
-        { active: "A", handoffFroms: [] },
-        { active: "B", handoffFroms: [] },
-      ]),
-    ).toHaveLength(1);
-  });
-
-  test("appended record whose 'from' differs from previous active is a violation", () => {
-    expect(
-      checkRoutingChain([
-        { active: "A", handoffFroms: [] },
-        { active: "B", handoffFroms: ["C"] },
-      ]),
-    ).toHaveLength(1);
-  });
-
-  test("chain growth with unchanged active is a violation", () => {
-    expect(
-      checkRoutingChain([
-        { active: "A", handoffFroms: [] },
-        { active: "A", handoffFroms: ["A"] },
-      ]),
-    ).toHaveLength(1);
-  });
-
-  test("returning to a previous coordinator is allowed: a fresh segment and stream (§4.4, §5)", () => {
-    expect(
-      checkRoutingChain([
-        { active: "A", handoffFroms: [] },
-        { active: "B", handoffFroms: ["A"] },
-        { active: "A", handoffFroms: ["A", "B"] },
-      ]),
-    ).toEqual([]);
-  });
-
-  test("concurrent planned handoffs serialize into a chain-violating sequence — detectable here, and the spec voids the stale update (§7.3, §14)", () => {
-    // Two members build updates against A; B's commit lands first, C's second.
-    const errors = checkRoutingChain([
-      { active: "A", handoffFroms: [] },
-      { active: "B", handoffFroms: ["A"] },
-      { active: "C", handoffFroms: ["A"] }, // stale: 'from' should be "B"
-    ]);
-    expect(errors.length).toBeGreaterThan(0);
-  });
-});
-
-describe("§5 stream-local cursors and stale markers", () => {
-  test("a marker from a discarded fork branch is void; one naming a chain locator is not", () => {
-    const adopted: RoutingState = { active: "B", handoffFroms: ["dead"] };
-    expect(chainLocators(adopted)).toEqual(["dead", "B"]);
-    expect(isVoidMarker("C", adopted)).toBe(true);
-    expect(isVoidMarker("B", adopted)).toBe(false);
-    expect(isVoidMarker("dead", adopted)).toBe(false);
   });
 });
 

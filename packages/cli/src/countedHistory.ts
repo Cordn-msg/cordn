@@ -14,19 +14,12 @@ export interface HistoryRecord {
   /** Envelope `id` values named by `prev` tags. Empty = a DAG root (§6.3). */
   parents: string[];
   /**
-   * The stream this copy was fetched from (§2), as the ordinal of the
-   * segment whose coordinator served the fetch. Provenance is the only
-   * cursor-derived fact adjudication uses: whether the copy came from the
-   * stream serving the open segment (§7.1 provisional seeds).
+   * The client-local stream ordinal this copy was fetched from (§5): stints
+   * are numbered locally. Provenance is the only derived fact adjudication
+   * uses: whether the copy came from the stream serving the open stint
+   * (§7.1 provisional seeds).
    */
   stream: number;
-}
-
-/** The routing fields that matter for the §4.4 chain rules. */
-export interface RoutingState {
-  active: string;
-  /** `from` locator of each handoff record, in segment order. */
-  handoffFroms: string[];
 }
 
 export interface Adjudication {
@@ -113,45 +106,4 @@ export function adjudicate(
     if (!counted.has(id)) orphaned.add(id);
   }
   return { counted, orphaned, gaps };
-}
-
-/** Every locator that served or serves the group (§5). */
-export function chainLocators(state: RoutingState): string[] {
-  return [...state.handoffFroms, state.active];
-}
-
-/**
- * A cursor reference whose accompanying locator does not appear in the
- * adopted chain is stale (e.g. minted on a discarded fork branch) and void
- * (§5).
- */
-export function isVoidMarker(locator: string, state: RoutingState): boolean {
-  return !chainLocators(state).includes(locator);
-}
-
-/** The §4.4 chain rules: append iff `active` changes; `from` == previous active. */
-export function checkRoutingChain(states: RoutingState[]): string[] {
-  const errors: string[] = [];
-  for (let i = 1; i < states.length; i += 1) {
-    const prev = states[i - 1]!;
-    const cur = states[i]!;
-    if (cur.active !== prev.active) {
-      if (cur.handoffFroms.length !== prev.handoffFroms.length + 1) {
-        errors.push(
-          `update ${i}: active changed without exactly one appended handoff record`,
-        );
-      } else if (
-        cur.handoffFroms[cur.handoffFroms.length - 1] !== prev.active
-      ) {
-        errors.push(
-          `update ${i}: handoff record 'from' must equal the previous active locator`,
-        );
-      }
-    } else if (cur.handoffFroms.length !== prev.handoffFroms.length) {
-      errors.push(
-        `update ${i}: active unchanged, so the handoff chain must not change`,
-      );
-    }
-  }
-  return errors;
 }
