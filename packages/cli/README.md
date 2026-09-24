@@ -163,7 +163,10 @@ await opened.close();
 `openPersistentSession` provides exactly what the daemon relies on: an exclusive
 state lock, snapshot restore, identity check, coordinator/relay precedence, and
 a serialized durable-write queue (`persist`, `flush`, `close`). Omit `stateFile`
-for an ephemeral session. Everything else (`CliSession`, snapshot helpers,
+for an ephemeral session. `transportEncryption: "required"` gift-wraps coordinator
+requests, and `coordinators` (keyed by server pubkey, each with its own relays)
+makes further coordinators reachable next to the default one; neither is saved
+in the snapshot, so pass them on every open. Everything else (`CliSession`, snapshot helpers,
 queue helpers, defaults, error classes) is exported from the same barrel.
 
 When consuming the package from a source checkout (for example `link:` to

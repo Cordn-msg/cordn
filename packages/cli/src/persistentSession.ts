@@ -3,6 +3,7 @@ import type { CliSessionSnapshot } from "./session.ts";
 import type { CliSessionOptions } from "./sessionState.ts";
 import type { MediaStore } from "./mediaStore.ts";
 import type { TransportEncryption } from "./coordinatorClient.ts";
+import type { CoordinatorTarget } from "./coordinatorRegistry.ts";
 import {
   acquireStateLock,
   loadEncryptedState,
@@ -29,6 +30,13 @@ export interface OpenPersistentSessionOptions {
    * CLI passes env-derived values here; library callers usually omit it.
    */
   fallback?: { serverPubkey?: string; relays?: string[] };
+  /**
+   * Coordinators besides the default one, keyed by server pubkey, each with
+   * its own relays or relay handler. Not saved in the snapshot: pass them on
+   * every open. A group remembers its coordinator key; without a matching
+   * entry here it is reached through the default coordinator's relays.
+   */
+  coordinators?: Record<string, CoordinatorTarget>;
   mediaStore?: MediaStore;
   /**
    * Coordinator request transport. "required" gift-wraps every request so
@@ -112,6 +120,7 @@ export async function openPersistentSession(
           ? options.relays
           : ((useSavedRelays ? savedCoordinator?.relays : undefined) ??
             options.fallback?.relays ?? [...DEFAULT_RELAY_URLS]),
+      coordinators: options.coordinators,
       mediaStore: options.mediaStore,
       transportEncryption: options.transportEncryption,
       onLocalStateAdvance: options.onLocalStateAdvance,

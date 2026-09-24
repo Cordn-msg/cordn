@@ -9,6 +9,7 @@ import { MockRelayHub } from "@cordn/test-utils";
 import { encodeBase64 } from "@cordn/core";
 import { cordnClient, type TransportEncryption } from "./coordinatorClient.ts";
 import { CliSession } from "./session.ts";
+import { openPersistentSession } from "./persistentSession.ts";
 
 const PLAINTEXT_KIND = 25910;
 const EPHEMERAL_GIFT_WRAP_KIND = 21059;
@@ -74,6 +75,9 @@ describe("coordinator transport encryption", () => {
         .map((event) => event.kind),
     );
 
+  // Documents the @contextvm/sdk gap: plaintext events are not de-duplicated
+  // by id. Once the SDK de-duplicates them this stores 1, and the test should
+  // be flipped rather than treated as a regression.
   test("by default a request relayed twice is stored twice", async () => {
     const { relayHub, serverPubkey, client } = await setup();
     const posted = await client.PostGroupMessage({
@@ -131,5 +135,44 @@ describe("coordinator transport encryption", () => {
     expect(clientKinds(relayHub, serverPubkey)).toEqual(
       new Set([EPHEMERAL_GIFT_WRAP_KIND]),
     );
+  });
+
+  test("openPersistentSession reaches extra coordinators through their own relays", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+    cleanups.push(() => server.transport.close());
+    const opened = await openPersistentSession({
+      // Never contacted: every call below names the extra coordinator.
+      serverPubkey: await new PrivateKeySigner().getPublicKey(),
+      relays: ["wss://relay.invalid"],
+      coordinators: {
+        [serverPubkey]: {
+          serverPubkey,
+          relayHandler: relayHub.createRelayHandler(),
+        },
+      },
+      transportEncryption: "required",
+    });
+    cleanups.push(() => opened.close());
+
+    await opened.session.generateKeyPackage("kp", {
+      lastResort: true,
+      coordinatorKey: serverPubkey,
+    });
+    expect(await opened.session.fetchWelcomes(serverPubkey)).toEqual([]);
+
+    expect(clientKinds(relayHub, serverPubkey)).toEqual(
+      new Set([EPHEMERAL_GIFT_WRAP_KIND]),
+    );
+    expect(
+      (await opened.session.listAvailableKeyPackages(serverPubkey)).map(
+        (entry) => entry.pk,
+      ),
+    ).toEqual([opened.session.stablePubkey]);
   });
 });
