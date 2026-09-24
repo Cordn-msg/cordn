@@ -158,9 +158,6 @@ export function encodeCordnCoordinatorRouting(
   routing: CordnCoordinatorRouting,
 ): Uint8Array {
   const fallbacks = routing.fallbacks.map(normalizeLocator);
-  if (fallbacks.length === 0) {
-    throw new Error("cordn coordinator routing requires at least one fallback");
-  }
   const handoffs = routing.handoffs.map((record) => ({
     from: normalizeLocator(record.from),
     boundaryTips: record.boundaryTips.map(normalizeEnvelopeId),
@@ -193,9 +190,6 @@ export function decodeCordnCoordinatorRouting(
   offset = afterHandoffs;
 
   const fallbacks = decodeLocators(fallbacksBlob);
-  if (fallbacks.length === 0) {
-    throw new Error("cordn coordinator routing requires at least one fallback");
-  }
 
   if (version === 1 && offset !== bytes.length) {
     throw new Error("Unexpected trailing bytes in cordn coordinator routing");

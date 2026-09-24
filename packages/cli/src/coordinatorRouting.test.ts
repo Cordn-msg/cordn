@@ -66,17 +66,11 @@ describe("cordn coordinator routing codec", () => {
     });
   });
 
-  test("requires at least one fallback", () => {
-    expect(() =>
-      encodeCordnCoordinatorRouting({ active: A, fallbacks: [], handoffs: [] }),
-    ).toThrow(/fallback/);
-
-    // version 1 + locator A + empty fallbacks + empty handoffs
-    expect(() =>
-      decodeCordnCoordinatorRouting(
-        bytes([0, 1], locator(0x11), [0, 0], [0, 0]),
-      ),
-    ).toThrow(/fallback/);
+  test("an empty roster is a legal declaration (no handoffs possible)", () => {
+    const routing = { active: A, fallbacks: [], handoffs: [] };
+    expect(
+      decodeCordnCoordinatorRouting(encodeCordnCoordinatorRouting(routing)),
+    ).toEqual(routing);
   });
 
   test("rejects reserved version 0", () => {

@@ -783,7 +783,13 @@ export class CliSession {
 
       const prepared = await updateGroupMetadataExtension({
         state: group.state,
-        metadata,
+        metadata: {
+          ...metadata,
+          // The roster is editable here (coordinator-handoff §4.4) but
+          // omission means "unchanged": a name edit must not drop it.
+          coordinatorRouting:
+            metadata.coordinatorRouting ?? group.metadata?.coordinatorRouting,
+        },
       });
 
       const pendingOperation: PendingEpochOperation = {
@@ -855,28 +861,33 @@ export class CliSession {
         throw new Error(`Group ${groupAlias} is already on that coordinator`);
       }
       const to = this.locatorOf(nextKey);
-      const previous = group.metadata.coordinatorRouting ?? {
-        active: from,
-        fallbacks: [],
-        handoffs: [],
-      };
+      const previous = group.metadata.coordinatorRouting;
+      if (!previous) {
+        // §4.4: an absent roster is the group's decision — no handoff exists.
+        throw new Error(
+          `Group ${groupAlias} has no declared fallback roster (coordinator-handoff §4.4)`,
+        );
+      }
+      // §9/§10: the target must be a currently declared fallback — that is
+      // what makes the switch discoverable to members stranded on the old
+      // coordinator (§10.2).
+      if (!previous.fallbacks.some((f) => f.pubkey === to.pubkey)) {
+        throw new Error(
+          `Coordinator ${nextKey} is not a declared fallback of ${groupAlias} (coordinator-handoff §9)`,
+        );
+      }
 
       // §9 steps 3–5: the cut is the tips of everything ingested, and the
       // handoff record's `from` is the previous active locator.
       const routing: CordnCoordinatorRouting = {
         active: to,
-        // §4.4: the roster must also name coordinators the group has never
-        // used, or first-time failover targets are undiscoverable (§10.2).
+        // Convenience default: alternates to the new active (the old active
+        // is a known-good one). The roster is ordinary metadata — edit it
+        // through `updateGroupMetadata` like the document (§4.4).
         fallbacks: dedupeBy(
-          [
-            from,
-            ...previous.fallbacks,
-            ...this.coordinatorRegistry.registeredKeys.map((key) =>
-              this.locatorOf(key),
-            ),
-          ],
+          [from, ...previous.fallbacks.filter((f) => f.pubkey !== to.pubkey)],
           (locator) => locator.pubkey,
-        ).filter((f) => f.pubkey !== to.pubkey),
+        ),
         handoffs: [
           ...previous.handoffs,
           { from, boundaryTips: causalTips(group.messages) },
@@ -922,14 +933,13 @@ export class CliSession {
   ): Promise<string | undefined> {
     const gid = this.deriveGroupId(group.state);
     const routing = group.metadata?.coordinatorRouting;
-    const candidates = dedupeBy(
-      [
-        ...(routing?.fallbacks ?? []).map((locator) => locator.pubkey),
-        ...this.coordinatorRegistry.registeredKeys,
-        this.coordinatorRegistry.defaultCoordinatorKey,
-      ],
-      (key) => key.toLowerCase(),
-    ).filter((key) => key.toLowerCase() !== group.coordinatorKey.toLowerCase());
+    // §10.2: discovery is the declared roster, in preference order — nothing
+    // else. An absent or empty roster means no handoff can exist (§4.4).
+    const candidates = (routing?.fallbacks ?? [])
+      .map((locator) => locator.pubkey)
+      .filter(
+        (key) => key.toLowerCase() !== group.coordinatorKey.toLowerCase(),
+      );
 
     for (const key of candidates) {
       // ponytail: sequential probes in preference order (§10.2); a dead

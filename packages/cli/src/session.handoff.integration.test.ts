@@ -154,12 +154,29 @@ async function postStaleOutbound(params: {
 async function bootstrapGroup(
   alice: CliSession,
   bob: CliSession,
+  harness: Harness,
 ): Promise<{ id: string; cursor: number }> {
+  const locator = (pubkey: string) => ({
+    pubkey: pubkey.toLowerCase(),
+    relayUrls: [],
+  });
   await alice.generateKeyPackage("alice-main");
   await bob.generateKeyPackage("bob-main");
   await alice.createGroup("demo", {
     keyPackageAlias: "alice-main",
-    metadata: { name: "demo" },
+    metadata: {
+      name: "demo",
+      // The roster rides the metadata document: declared at birth here,
+      // editable any time like the rest of the document (§4.4/§4.5).
+      coordinatorRouting: {
+        active: locator(harness.server1Pubkey),
+        fallbacks: [
+          locator(harness.server2Pubkey),
+          locator(harness.server3Pubkey),
+        ],
+        handoffs: [],
+      },
+    },
   });
   const invitation = await alice.addMember("demo", bob.stablePubkey);
   await alice.syncGroup("demo");
@@ -183,7 +200,7 @@ describe("coordinator handoff (session)", () => {
     const { session: alice, target2 } = harness.makeSession();
     const { session: bob, target1: bobTarget1 } = harness.makeSession();
 
-    const one = await bootstrapGroup(alice, bob);
+    const one = await bootstrapGroup(alice, bob, harness);
 
     const { cursor: cutCursor } = await alice.switchCoordinator(
       "demo",
@@ -271,7 +288,7 @@ describe("coordinator handoff (session)", () => {
     const { session: alice, target2 } = harness.makeSession();
     const { session: bob } = harness.makeSession();
 
-    await bootstrapGroup(alice, bob);
+    await bootstrapGroup(alice, bob, harness);
     await alice.switchCoordinator("demo", target2);
 
     // Bob's device is behind the cut and writes to the closing coordinator.
@@ -349,7 +366,7 @@ describe("coordinator handoff (session)", () => {
     const { session: alice, target2 } = harness.makeSession();
     const { session: bob } = harness.makeSession();
 
-    const one = await bootstrapGroup(alice, bob);
+    const one = await bootstrapGroup(alice, bob, harness);
 
     // Bob's write lands on the closing coordinator and alice never ingests it
     // before the coordinator becomes unreachable (§10.1: policy-level).
@@ -414,7 +431,7 @@ describe("coordinator handoff (session)", () => {
     const { session: alice, target3 } = harness.makeSession();
     const { session: bob } = harness.makeSession();
 
-    await bootstrapGroup(alice, bob);
+    await bootstrapGroup(alice, bob, harness);
 
     // The group has never used coordinators 2 or 3; the roster must still
     // name them (§4.4) or first-time failover targets are undiscoverable.
@@ -442,6 +459,43 @@ describe("coordinator handoff (session)", () => {
       "one",
       "two",
     ]);
+  }, 15_000);
+
+  test("send-window race: concurrent sends are siblings, and the next send links both tips", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+    const one = await bootstrapGroup(alice, bob, harness);
+    const prev = (m: { tags: string[][] }) =>
+      m.tags.filter((tag) => tag[0] === "prev").map((tag) => tag[1]);
+
+    // Bob's record lands in the window before alice ingests it (§6.3): both
+    // authors linked only what they had seen, so the records are siblings.
+    const a = await alice.sendMessage("demo", "a");
+    const late = await postStaleOutbound({
+      session: bob,
+      relayHub: harness.relayHub,
+      serverPubkey: harness.server1Pubkey,
+      content: "b",
+    });
+    expect(prev(a)).toEqual([one.id]);
+    expect(prev(bob.getGroup("demo").messages.at(-1)!)).toEqual([one.id]);
+    void late;
+
+    // Siblings are first-class (§6.3): both count, and the next send links
+    // both tips, collapsing the fork.
+    await alice.syncGroup("demo");
+    const c = await alice.sendMessage("demo", "c");
+    expect(new Set(prev(c))).toEqual(new Set([a.id, late.id]));
+    expect(alice.listMessages("demo").map((m) => m.content)).toEqual(
+      expect.arrayContaining(["a", "b", "c"]),
+    );
+
+    await bob.syncGroup("demo");
+    expect(bob.listMessages("demo").map((m) => m.content)).toEqual(
+      expect.arrayContaining(["a", "b", "c"]),
+    );
   }, 15_000);
 });
 

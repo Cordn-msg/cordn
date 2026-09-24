@@ -93,12 +93,13 @@ All `EnvelopeId` values MUST be canonical envelope `id` strings as defined in [`
 #### 4.4 Field Semantics
 
 - `active` is the group's current coordinator. It is the only coordinator the group writes to.
-- `fallbacks` is the preference-ordered recovery roster. It MUST contain at least one locator. Members attempt fallbacks in order when the active coordinator is unreachable (§10).
+- `fallbacks` is the preference-ordered recovery roster: the coordinators the group may move to, and the only place discovery looks (§10.2). It MAY be empty — an absent or empty roster is the group's decision that no handoff can exist. Members attempt fallbacks in order when the active coordinator is unreachable (§10).
 - `handoffs` is the append-only handoff chain. Entry `k` closes segment `k`: `from` names segment `k`'s coordinator and `boundary_tips` marks the cut (§7). The open segment has index `len(handoffs)` and is served by `active`.
 
 Rules:
 
-- Committers building routing state SHOULD include in `fallbacks` every coordinator they know that may still serve the group, including coordinators the group has never used — failover discovery (§10.2) can only reach what an earlier roster or local configuration names.
+- The roster is ordinary group metadata: written with the document, at birth or at any later metadata commit (§4.5). Its contents are the group's declaration — clients invent none.
+- A routing update's new `active` MUST be a `fallbacks` member of the previous routing state. That is what makes a switch discoverable to members stranded on the old coordinator (§10.2): with no declared fallback, no handoff can exist.
 - A routing update MUST append a `HandoffRecord` if and only if `active` changes. Roster edits that leave `active` unchanged MUST NOT append a record or renumber segments.
 - A locator MAY appear several times in the chain: each appearance is a fresh segment on a fresh stream, even for a coordinator the group used before (§5).
 - The locator recorded in `from` of a new entry MUST equal the `active` of the previous routing state.
@@ -153,6 +154,7 @@ When sending a record, a sender MUST include one `prev` tag for every tip of its
 - In the common case this is exactly one tag, naming the sender's latest ingested record.
 - After ingesting concurrent records, the sender's next record links all resulting tips, merging them. Linking only the latest tip would strand concurrent tips forever, so the rule is all tips, not one.
 - A record with no `prev` tags is a DAG root — for example the group's first record — and is a tip until something links it. It is adjudicated like any other record (§7).
+- Links state what the author had ingested at send time. A record landing in the window between building the record and the coordinator's receipt becomes a sibling of it — a first-class concurrency edge, not a fork to repair: both records count (§7), siblings order by cursor within a stream (§5), and the next sender links both tips, collapsing the fork.
 
 Links are carried inside the sealed payload ([`spec/03.md`](../03.md) §4). Coordinators see no link structure and gain no visibility into reply, merge, or interaction patterns.
 
@@ -202,7 +204,7 @@ A planned handoff moves the group to a new coordinator while the current one is 
 
 Procedure:
 
-1. The group chooses the target locator by its application-level decision process.
+1. The group chooses the target locator by its application-level decision process. The target MUST be a currently declared `fallbacks` member (§4.4); a group without a roster cannot hand off.
 2. The committing member ingests the closing segment to quiescence (fetch-first discipline; late records should be linked before the cut, §7.1 pull-in).
 3. The committing member creates a `group_context_extensions` proposal and Commit replacing the group metadata document's `coordinator_routing` field with: `active` set to the target locator, `fallbacks` updated as desired, and a `HandoffRecord` appended with `from` equal to the previous `active` and `boundary_tips` equal to the committer's tip set.
 4. The commit is posted to the **closing** segment's coordinator. It is the final record of that segment.
@@ -219,7 +221,7 @@ A forced failover moves the group to a fallback coordinator after the active coo
 Procedure:
 
 1. Members determine unreachability by local policy (timeouts and retry counts are out of scope for this document).
-2. Members attempt the `fallbacks` roster in preference order. All members SHOULD prefer the first reachable fallback, which concentrates handoff commits on one coordinator and lets that coordinator's ordering serialize them.
+2. Members attempt the `fallbacks` roster in preference order. Discovery is the declared roster and nothing else: the chosen fallback MUST be a roster member (§4.4), so stranded members are guaranteed to look in the right place. All members SHOULD prefer the first reachable fallback, which concentrates handoff commits on one coordinator and lets that coordinator's ordering serialize them.
 3. The first member to commit on the chosen fallback creates a `group_context_extensions` update: `active` set to the chosen fallback, `handoffs` appended with `from` equal to the unreachable coordinator's locator and `boundary_tips` equal to the committer's tip set.
 4. The commit is posted to the **new** coordinator. It is the first counted record of the new segment. The old segment's cut is approximate: `boundary_tips` states what one member had confirmed, and §7.1 adjudicates the rest.
 5. Every member adopts the routing commit on processing it and switches write targets (§9 step 6 for the stream switch).
