@@ -864,22 +864,15 @@ export class CliSession {
       }
       const to = this.locatorOf(nextKey);
       if (options.failover) {
-        // §10 step 3: fetch-first discipline applies to the target too. The
-        // chosen fallback is reachable and may already carry another
-        // member's failover commit — ingest it before committing so racing
-        // commits serialize into one chain instead of forking.
-        const gid = this.deriveGroupId(group.state);
-        const seen = await withTimeout(
-          this.getCoordinatorClient(nextKey).FetchManyGroupMessages({
-            groups: [{ gid }],
-          }),
-          ROSTER_PROBE_TIMEOUT_MS,
-        ).catch(() => undefined);
-        if (seen && seen.messages.length > 0) {
-          await this.applyIncomingMessages(group, seen.messages, {
-            stream: streamOf(group),
-            originKey: nextKey,
-          });
+        // §10 step 3: probe the roster in preference order before committing.
+        // Any earlier failover commit is adopted instead — even one on a
+        // fallback other than the chosen target — so competing failovers
+        // converge on one commit instead of forking.
+        const adopted = await this.adoptFromRoster(group);
+        if (adopted && adopted.toLowerCase() !== nextKey.toLowerCase()) {
+          throw new Error(
+            `Group ${groupAlias} already failed over to ${adopted} (coordinator-handoff §10)`,
+          );
         }
         if (group.coordinatorKey.toLowerCase() === nextKey.toLowerCase()) {
           throw new Error(`Group ${groupAlias} is already on that coordinator`);
@@ -971,13 +964,17 @@ export class CliSession {
 
     for (const key of candidates) {
       // ponytail: sequential probes in preference order (§10.2); a dead
-      // socket consumes the probe bound and is skipped.
-      const result = await withTimeout(
-        this.getCoordinatorClient(key).FetchManyGroupMessages({
-          groups: [{ gid }],
-        }),
-        ROSTER_PROBE_TIMEOUT_MS,
-      ).catch(() => undefined);
+      // socket consumes the probe bound twice and is skipped.
+      const probe = () =>
+        withTimeout(
+          this.getCoordinatorClient(key).FetchManyGroupMessages({
+            groups: [{ gid }],
+          }),
+          ROSTER_PROBE_TIMEOUT_MS,
+        ).catch(() => undefined);
+      // §10 step 1: one failure must not condemn a live coordinator — a
+      // false-dead probe manufactures forks, so retry once before skipping.
+      const result = (await probe()) ?? (await probe());
       if (!result || result.messages.length === 0) continue;
 
       // A non-adopting batch (e.g. an old home's leftover line) must not

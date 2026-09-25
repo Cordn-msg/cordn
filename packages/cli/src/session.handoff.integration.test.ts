@@ -12,6 +12,8 @@ import {
   encodeAuthenticatedSender,
   encryptGroupPayload,
 } from "./utils/mlsMessages.ts";
+import { updateGroupMetadataExtension } from "./utils/mlsGroupLifecycle.ts";
+import type { CordnCoordinatorRouting } from "./coordinatorRouting.ts";
 import { decodeBase64 } from "./utils/mlsBase.ts";
 import { createPrivateKeyHex } from "./utils/mlsIdentity.ts";
 import { connectServer } from "@cordn/server";
@@ -146,6 +148,42 @@ async function postStaleOutbound(params: {
     });
     group.lastCursor = Math.max(group.lastCursor, posted.cursor);
     return { id: outbound.event.id, cursor: posted.cursor };
+  } finally {
+    await client.disconnect().catch(() => undefined);
+  }
+}
+
+/** A stale device's blind failover commit — the §10 "commits created without
+ *  ingesting each other" fork: built from the member's current state and
+ *  posted raw to a fallback, exactly as postStaleOutbound posts late writes. */
+async function postStaleRoutingCommit(params: {
+  session: CliSession;
+  relayHub: MockRelayHub;
+  serverPubkey: string;
+  routing: CordnCoordinatorRouting;
+}): Promise<{ cursor: number }> {
+  const group = params.session.getGroup("demo");
+  const prepared = await updateGroupMetadataExtension({
+    state: group.state,
+    metadata: { ...group.metadata!, coordinatorRouting: params.routing },
+  });
+  const msg_64 = (
+    await encryptGroupPayload({
+      state: group.state,
+      serializedMlsMessage: decodeBase64(prepared.commitMessageBase64),
+    })
+  ).encryptedBase64;
+  const client = new cordnClient({
+    serverPubkey: params.serverPubkey,
+    relayHandler: params.relayHub.createRelayHandler(),
+    privateKey: createPrivateKeyHex(),
+  });
+  try {
+    const posted = await client.PostGroupMessage({
+      msg_64,
+      gid: params.session.deriveGroupId(group.state),
+    });
+    return { cursor: posted.cursor };
   } finally {
     await client.disconnect().catch(() => undefined);
   }
@@ -518,6 +556,88 @@ describe("coordinator handoff (session)", () => {
     await alice.sendMessage("demo", "two");
     expect((await bob.syncGroup("demo")).map((m) => m.content)).toEqual([
       "two",
+    ]);
+  }, 15_000);
+
+  test("failover prevention: a rival failover commit anywhere in the roster wins over the member's chosen target — no fork is created (§10)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const {
+      session: alice,
+      target2,
+      target3: aliceTarget3,
+    } = harness.makeSession();
+    const { session: bob, target2: bobTarget2 } = harness.makeSession();
+    const one = await bootstrapGroup(alice, bob, harness);
+
+    // bob fails over to the first fallback. alice, unaware, aims at the
+    // second — the roster probe finds bob's commit and adopts it instead.
+    await bob.switchCoordinator("demo", bobTarget2, { failover: true });
+    await expect(
+      alice.switchCoordinator("demo", aliceTarget3, { failover: true }),
+    ).rejects.toThrow(/already failed over/);
+
+    // No fork: alice landed on bob's commit (the higher-preference carrier),
+    // and nothing was committed to her chosen target.
+    expect(alice.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server2Pubkey.toLowerCase(),
+    );
+    expect(
+      alice.getGroup("demo").metadata?.coordinatorRouting?.boundaryTips,
+    ).toEqual([one.id]);
+
+    // The group carries on as one.
+    await bob.sendMessage("demo", "two");
+    expect((await alice.syncGroup("demo")).map((m) => m.content)).toEqual([
+      "two",
+    ]);
+  }, 15_000);
+
+  test("equal-epoch fork: a blind commit to the lower-preference fallback loses — discovery converges on the higher-preference carrier (§10)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice, target2 } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+    const { session: carol } = harness.makeSession();
+    await bootstrapGroup(alice, bob, harness);
+    await carol.generateKeyPackage("carol-main");
+    const invitation = await alice.addMember("demo", carol.stablePubkey);
+    await alice.syncGroup("demo");
+    await carol.fetchWelcomes();
+    await carol.acceptWelcome(invitation.keyPackageReference, "demo");
+    await bob.syncGroup("demo");
+
+    // alice fails over to the first fallback. bob's stale device never
+    // ingests it and blind-commits to the second — two equal-epoch handoff
+    // commits on different coordinators (§10).
+    await alice.switchCoordinator("demo", target2, { failover: true });
+    await postStaleRoutingCommit({
+      session: bob,
+      relayHub: harness.relayHub,
+      serverPubkey: harness.server3Pubkey,
+      routing: {
+        active: { pubkey: harness.server3Pubkey.toLowerCase(), relayUrls: [] },
+        fallbacks: [
+          { pubkey: harness.server1Pubkey.toLowerCase(), relayUrls: [] },
+          { pubkey: harness.server2Pubkey.toLowerCase(), relayUrls: [] },
+        ],
+        boundaryTips: [],
+      },
+    });
+
+    // A stranded member probes the roster in preference order and converges
+    // on the branch carried by the higher-preference coordinator — the §10
+    // winner rule. The loser's branch is never adopted.
+    const adopted = await carol.discoverCoordinator("demo");
+    expect(adopted?.toLowerCase()).toBe(harness.server2Pubkey.toLowerCase());
+    expect(carol.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server2Pubkey.toLowerCase(),
+    );
+
+    // The winner's branch keeps working; the loser's records never count.
+    await alice.sendMessage("demo", "winner");
+    expect((await carol.syncGroup("demo")).map((m) => m.content)).toEqual([
+      "winner",
     ]);
   }, 15_000);
 });
