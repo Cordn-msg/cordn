@@ -94,9 +94,9 @@ export type coordinatorClient = {
  *
  * - `disabled` (default): plaintext ContextVM events. The method, group id,
  *   cursors and timing are public to relay readers (MLS payloads stay
- *   end-to-end encrypted), and `@contextvm/sdk` only de-duplicates
- *   gift-wrapped events, so a request carried by N relays reaches the
- *   coordinator N times.
+ *   end-to-end encrypted). Since `@contextvm/sdk` 0.14.2 requests are
+ *   de-duplicated by event id in this mode too, so a request carried by
+ *   N relays still reaches the coordinator once.
  * - `required`: NIP-59 gift wraps of the ephemeral kind, so relays do not
  *   store them (the plaintext kind is ephemeral too). The coordinator answers
  *   in kind; the stock server accepts both modes.

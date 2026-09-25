@@ -7,7 +7,7 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@contextvm/mcp-sdk": "^1.30",
-    "@contextvm/sdk": "^0.14.1",
+    "@contextvm/sdk": "^0.14.2",
     "@scure/base": "^2.2.0",
     "better-sqlite3": "^12.9.0",
     "@cordn/coordinator": "workspace:*",

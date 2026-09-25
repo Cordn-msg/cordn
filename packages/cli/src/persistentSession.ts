@@ -40,8 +40,7 @@ export interface OpenPersistentSessionOptions {
   mediaStore?: MediaStore;
   /**
    * Coordinator request transport. "required" gift-wraps every request so
-   * relays see neither the method nor the group id, and lets the transport
-   * de-duplicate a request relayed more than once. Default "disabled".
+   * relays see neither the method nor the group id. Default "disabled".
    */
   transportEncryption?: TransportEncryption;
   onLocalStateAdvance?: CliSessionOptions["onLocalStateAdvance"];

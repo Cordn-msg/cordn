@@ -131,6 +131,12 @@ describe("CliSession", () => {
       sessions.push(restoredBob);
       await restoredBob.restoreSnapshot(snapshot);
 
+      // `@contextvm/sdk` 0.14.2 de-duplicates byte-identical requests by
+      // event id: a fetch (or welcome ack) repeated within the same second as
+      // the pre-snapshot send is dropped and the call hangs until timeout
+      // (see docs/SECURITY.md, "no nonce" caveat). Cross the second boundary.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
       // The first fetch after restart delivers the pending consumed-welcome
       // ack, so the coordinator retires the record instead of re-delivering
       // it (which previously triggered a duplicate re-join).

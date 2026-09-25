@@ -75,10 +75,9 @@ describe("coordinator transport encryption", () => {
         .map((event) => event.kind),
     );
 
-  // Documents the @contextvm/sdk gap: plaintext events are not de-duplicated
-  // by id. Once the SDK de-duplicates them this stores 1, and the test should
-  // be flipped rather than treated as a regression.
-  test("by default a request relayed twice is stored twice", async () => {
+  // @contextvm/sdk >= 0.14.2 de-duplicates plaintext events by id as well,
+  // so a request relayed by N relays is stored once in both transport modes.
+  test("by default a request relayed twice is stored once", async () => {
     const { relayHub, serverPubkey, client } = await setup();
     const posted = await client.PostGroupMessage({
       gid: "g",
@@ -92,7 +91,8 @@ describe("coordinator transport encryption", () => {
     expect(clientKinds(relayHub, serverPubkey)).toEqual(
       new Set([PLAINTEXT_KIND]),
     );
-    expect(stored.messages).toHaveLength(2);
+    expect(stored.messages).toHaveLength(1);
+    expect(stored.messages[0]?.cursor).toBe(posted.cursor);
   });
 
   test("with transport encryption required, requests are gift-wrapped and stored once", async () => {
