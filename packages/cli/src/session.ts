@@ -781,14 +781,31 @@ export class CliSession {
         stablePubkey: this.stablePubkey,
       });
 
+      const routing =
+        metadata.coordinatorRouting ?? group.metadata?.coordinatorRouting;
+      // §4.4: `active` may only move within the declared fallbacks. An update
+      // that breaks the rule is void on receipt (§14) — refuse to author it.
+      const previousRouting = group.metadata?.coordinatorRouting;
+      if (
+        previousRouting &&
+        routing &&
+        routing.active.pubkey !== previousRouting.active.pubkey &&
+        !previousRouting.fallbacks.some(
+          (f) => f.pubkey === routing.active.pubkey,
+        )
+      ) {
+        throw new Error(
+          `Group ${groupAlias} cannot move to ${routing.active.pubkey}: not a declared fallback (coordinator-handoff §4.4)`,
+        );
+      }
+
       const prepared = await updateGroupMetadataExtension({
         state: group.state,
         metadata: {
           ...metadata,
           // The roster is editable here (coordinator-handoff §4.4) but
           // omission means "unchanged": a name edit must not drop it.
-          coordinatorRouting:
-            metadata.coordinatorRouting ?? group.metadata?.coordinatorRouting,
+          coordinatorRouting: routing,
         },
       });
 

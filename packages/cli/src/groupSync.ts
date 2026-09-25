@@ -2,7 +2,7 @@ import {
   createAdminAuthorizationCallback,
   createUnauthorizedAdminRejectionDetail,
 } from "./adminPolicy.ts";
-import type { IncomingMessageCallback } from "ts-mls";
+import type { ClientState, IncomingMessageCallback } from "ts-mls";
 import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
 import { decodeCordnMessageEvent } from "./messageEnvelope.ts";
@@ -25,6 +25,35 @@ export interface GroupIngestionResult {
   appliedPendingCommitMessages: Set<string>;
   rejectedPendingCommitMessages: Set<string>;
   removedLocalMember: boolean;
+}
+
+/** §4.4/§14: a routing update whose new `active` is not a declared fallback
+ *  of the previous state is void — the routing change is discarded (the rest
+ *  of the metadata still applies). Enforced at every metadata adoption so a
+ *  later re-derivation from the group context cannot smuggle it back in. */
+function adoptRoutedMetadata(
+  group: GroupSessionState,
+  state: ClientState,
+  message: { cursor: number; createdAt: number },
+): GroupSessionState["syncIssues"][number] | undefined {
+  const incoming = getCordnGroupMetadataExtension(state);
+  const previous = group.metadata?.coordinatorRouting;
+  const next = incoming?.coordinatorRouting;
+  if (
+    previous &&
+    next &&
+    next.active.pubkey !== previous.active.pubkey &&
+    !previous.fallbacks.some((f) => f.pubkey === next.active.pubkey)
+  ) {
+    group.metadata = { ...incoming, coordinatorRouting: previous };
+    return {
+      cursor: message.cursor,
+      createdAt: message.createdAt,
+      detail: `Void routing update (coordinator-handoff §4.4): ${next.active.pubkey} is not a declared fallback`,
+    };
+  }
+  group.metadata = incoming;
+  return undefined;
 }
 
 function isFormerEpochIssue(detail: string): boolean {
@@ -244,7 +273,9 @@ export async function ingestGroupMessages(params: {
 
     if (processed.kind === "applicationMessage") {
       group.state = processed.newState;
-      group.metadata = getCordnGroupMetadataExtension(processed.newState);
+      // Re-derivation: keep a voided routing void (§4.4/§14). The violation
+      // itself is surfaced once, at the handshake commit that carried it.
+      adoptRoutedMetadata(group, processed.newState, message);
       if (isRemovedFromGroupState(processed.newState)) {
         group.status = "removed";
         group.removedAtCursor = message.cursor;
@@ -312,7 +343,11 @@ export async function ingestGroupMessages(params: {
       pendingOperation.localStateApplied = true;
       appliedPendingCommitMessages.add(message.opaqueMessageBase64);
     }
-    group.metadata = getCordnGroupMetadataExtension(processed.newState);
+    const voidIssue = adoptRoutedMetadata(group, processed.newState, message);
+    if (voidIssue) {
+      group.syncIssues.push(voidIssue);
+      issues.push(voidIssue);
+    }
 
     if (
       isRemovedFromGroupState(processed.newState) ||

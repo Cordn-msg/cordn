@@ -120,6 +120,19 @@ async function createHarness(): Promise<Harness> {
   };
 }
 
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt >= timeoutMs) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 /** A member's device that is behind the cut posts to the closing coordinator
  *  after the routing commit — the §13 "late write" case. The record is held
  *  locally as an outbound message, exactly as a stale device would hold it. */
@@ -711,6 +724,169 @@ describe("coordinator handoff (session)", () => {
     expect((await bob.syncGroup("demo")).map((m) => m.content)).toEqual([
       "after-loss",
     ]);
+  }, 15_000);
+
+  test("a routing update outside the roster is void on receipt, and the author client refuses to build one (§4.4, §14)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+    await bootstrapGroup(alice, bob, harness);
+    const rogue = { pubkey: "44".repeat(32), relayUrls: [] };
+
+    // §4.4 binds update authors: the honest client refuses outright.
+    await expect(
+      alice.updateGroupMetadata("demo", {
+        name: "demo",
+        coordinatorRouting: {
+          active: rogue,
+          fallbacks: [
+            { pubkey: harness.server2Pubkey.toLowerCase(), relayUrls: [] },
+          ],
+          boundaryTips: [],
+        },
+      }),
+    ).rejects.toThrow(/not a declared fallback/);
+
+    // A modified client builds and posts the void update anyway — recipients
+    // discard the routing change (the rest of the metadata still applies).
+    await postStaleRoutingCommit({
+      session: alice,
+      relayHub: harness.relayHub,
+      serverPubkey: harness.server1Pubkey,
+      routing: {
+        active: rogue,
+        fallbacks: [
+          { pubkey: harness.server2Pubkey.toLowerCase(), relayUrls: [] },
+        ],
+        boundaryTips: [],
+      },
+    });
+    await bob.syncGroup("demo");
+
+    expect(bob.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server1Pubkey.toLowerCase(),
+    );
+    expect(
+      bob.getGroup("demo").metadata?.coordinatorRouting?.active.pubkey,
+    ).toBe(harness.server1Pubkey.toLowerCase());
+    expect(
+      bob
+        .getGroup("demo")
+        .syncIssues.some((issue) => /Void routing update/.test(issue.detail)),
+    ).toBe(true);
+  }, 15_000);
+
+  test("a metadata edit may move active within the roster — handoff by another name (§4.4)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+    const one = await bootstrapGroup(alice, bob, harness);
+
+    await alice.updateGroupMetadata("demo", {
+      name: "demo",
+      coordinatorRouting: {
+        active: { pubkey: harness.server2Pubkey.toLowerCase(), relayUrls: [] },
+        fallbacks: [
+          { pubkey: harness.server1Pubkey.toLowerCase(), relayUrls: [] },
+          { pubkey: harness.server3Pubkey.toLowerCase(), relayUrls: [] },
+        ],
+        boundaryTips: [one.id],
+      },
+    });
+
+    await bob.syncGroup("demo");
+    expect(bob.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server2Pubkey.toLowerCase(),
+    );
+    await alice.sendMessage("demo", "moved");
+    expect((await bob.syncGroup("demo")).map((m) => m.content)).toEqual([
+      "moved",
+    ]);
+  }, 15_000);
+
+  test("live watch survives the handoff: backlog replay and live delivery on the new active (§9 step 6)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice, target2 } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+    await bootstrapGroup(alice, bob, harness);
+    await bob.watchGroup("demo");
+    expect(bob.getWatchStatus("demo")).toBe("watching");
+
+    await alice.sendMessage("demo", "before");
+    await waitForCondition(
+      () => bob.listMessages("demo").some((m) => m.content === "before"),
+      5_000,
+    );
+
+    await alice.switchCoordinator("demo", target2, {});
+    await alice.sendMessage("demo", "after");
+
+    // The watch restarts on the new active and replays its backlog, then
+    // delivers live (§9 step 6).
+    await waitForCondition(
+      () => bob.listMessages("demo").some((m) => m.content === "after"),
+      5_000,
+    );
+    expect(bob.getWatchStatus("demo")).toBe("watching");
+    expect(bob.listMessages("demo").map((m) => m.content)).toEqual(
+      expect.arrayContaining(["before", "after"]),
+    );
+    expect(bob.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server2Pubkey.toLowerCase(),
+    );
+  }, 15_000);
+
+  test("welcomes do not migrate: a stranded invitation is lost, its owner starts over on the active (§11)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice, target2 } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+    const { session: carol } = harness.makeSession();
+    await bootstrapGroup(alice, bob, harness);
+    await carol.generateKeyPackage("carol-main");
+    await alice.addMember("demo", carol.stablePubkey);
+    await alice.syncGroup("demo");
+
+    // The old coordinator dies with the Welcome on it.
+    await harness.stopServer1();
+    await alice.switchCoordinator("demo", target2, { failover: true });
+
+    // Not migrated: the dead coordinator is unreachable and the new active
+    // holds nothing for carol.
+    await expect(carol.fetchWelcomes()).rejects.toThrow();
+    expect(await carol.fetchWelcomes(harness.server2Pubkey)).toEqual([]);
+
+    // The owner starts over: an ordinary addMember on the active coordinator.
+    await carol.generateKeyPackage("carol-main-2", {
+      coordinatorKey: harness.server2Pubkey,
+    });
+    const invitation = await alice.addMember("demo", carol.stablePubkey);
+    await alice.syncGroup("demo");
+    await carol.fetchWelcomes(harness.server2Pubkey);
+    await carol.acceptWelcome(invitation.keyPackageReference, "demo");
+
+    // The invitee learned the routing from the Welcome itself (§11).
+    expect(carol.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server2Pubkey.toLowerCase(),
+    );
+  }, 15_000);
+
+  test("a group with no declared roster cannot hand off (§4.4)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice, target2 } = harness.makeSession();
+    await alice.generateKeyPackage("alice-main");
+    await alice.createGroup("plain", {
+      keyPackageAlias: "alice-main",
+      metadata: { name: "plain" },
+    });
+
+    await expect(
+      alice.switchCoordinator("plain", target2, { failover: true }),
+    ).rejects.toThrow(/no declared fallback roster/);
   }, 15_000);
 });
 
