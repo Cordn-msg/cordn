@@ -5,7 +5,17 @@ import {
   getCordnGroupMetadataExtension,
   type CordnGroupMetadata,
 } from "./groupMetadata.ts";
-import { createUnsignedCordnMessageEvent } from "./messageEnvelope.ts";
+import {
+  causalPrevTags,
+  causalTips,
+  createUnsignedCordnMessageEvent,
+  prevLinksOf,
+} from "./messageEnvelope.ts";
+import { adjudicate } from "./countedHistory.ts";
+import type {
+  CoordinatorLocator,
+  CordnCoordinatorRouting,
+} from "./coordinatorRouting.ts";
 import {
   createApplicationMessageBase64,
   decryptGroupPayload,
@@ -43,7 +53,10 @@ import {
   type FetchGroupMessagesOutput,
   type ListAvailableKeyPackagesOutput,
 } from "@cordn/core";
-import { CoordinatorClientRegistry } from "./coordinatorRegistry.ts";
+import {
+  CoordinatorClientRegistry,
+  type CoordinatorTarget,
+} from "./coordinatorRegistry.ts";
 import { ingestGroupMessages } from "./groupSync.ts";
 import type { FetchManyPendingJoinRequestsOutput } from "@cordn/core";
 import type { ConsumedJoinRequestRef, ConsumedWelcomeRef } from "@cordn/core";
@@ -116,6 +129,29 @@ function dedupeBy<T>(values: T[], keyOf: (value: T) => string): T[] {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
+  });
+}
+
+/** The open stream's ordinal: the handoff chain's length (coordinator-handoff
+ *  §2, §4.4). A group with no routing state is at stint 0. Cursors never
+ *  decide anything; this ordinal is the only cursor-derived fact countedness
+ *  uses (§7.1 provenance). */
+function streamOf(group: GroupSessionState): number {
+  return group.stream ?? 0;
+}
+
+// ponytail: probe bound only. Full reachability policy (timeouts, retries) is
+// out of scope per coordinator-handoff §10.1 and belongs to the caller.
+const ROSTER_PROBE_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("coordinator probe timed out")),
+      ms,
+    );
+    timer.unref?.();
+    promise.then(resolve, reject).finally(() => clearTimeout(timer));
   });
 }
 
@@ -745,9 +781,32 @@ export class CliSession {
         stablePubkey: this.stablePubkey,
       });
 
+      const routing =
+        metadata.coordinatorRouting ?? group.metadata?.coordinatorRouting;
+      // §4.4: `active` may only move within the declared fallbacks. An update
+      // that breaks the rule is void on receipt (§14) — refuse to author it.
+      const previousRouting = group.metadata?.coordinatorRouting;
+      if (
+        previousRouting &&
+        routing &&
+        routing.active.pubkey !== previousRouting.active.pubkey &&
+        !previousRouting.fallbacks.some(
+          (f) => f.pubkey === routing.active.pubkey,
+        )
+      ) {
+        throw new Error(
+          `Group ${groupAlias} cannot move to ${routing.active.pubkey}: not a declared fallback (coordinator-handoff §4.4)`,
+        );
+      }
+
       const prepared = await updateGroupMetadataExtension({
         state: group.state,
-        metadata,
+        metadata: {
+          ...metadata,
+          // The roster is editable here (coordinator-handoff §4.4) but
+          // omission means "unchanged": a name edit must not drop it.
+          coordinatorRouting: routing,
+        },
       });
 
       const pendingOperation: PendingEpochOperation = {
@@ -771,9 +830,198 @@ export class CliSession {
 
       this.adoptGroupState(group, prepared.newState);
       pendingOperation.localStateApplied = true;
+      // A metadata edit may itself change `active` (a handoff by another
+      // name, §4.4): rebind exactly as a routing commit would.
+      this.reconcileRouting(group);
 
       return { metadata: group.metadata ?? metadata };
     });
+  }
+
+  /**
+   * Coordinator handoff (spec/applications/coordinator-handoff.md §9, §10):
+   * extend the routing state's cut and move the group
+   * to `target`. A planned handoff (§9) quiesces the closing stream and posts
+   * the commit there — it is that stream's final record. A forced failover
+   * (`options.failover`, §10) skips the unreachable coordinator and posts the
+   * commit to the target — it is the new segment's first counted record
+   * (§7.3). Either way the switch itself happens when the routing commit is
+   * processed (§9 step 6, see `reconcileRouting`), and routing commits carry
+   * no confirmation-side effects (pending-op finalizers are add-member only),
+   * so none is enqueued.
+   */
+  async switchCoordinator(
+    groupAlias: string,
+    target: CoordinatorTarget,
+    options: { failover?: boolean } = {},
+  ): Promise<{ metadata: CordnGroupMetadata; cursor: number }> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      // §9 step 2 (planned only): ingest the closing segment to quiescence
+      // before the cut. A failover's closing coordinator is unreachable — its
+      // cut is approximate (§10.4).
+      if (!options.failover) {
+        await this.catchUpGroupIfNeeded(group);
+      }
+      this.assertGroupIsActive(group);
+      assertCanAdministerGroup({
+        groupAlias,
+        metadata: group.metadata,
+        stablePubkey: this.stablePubkey,
+      });
+      if (!group.metadata) {
+        throw new Error(
+          "Coordinator routing requires group metadata (coordinator-handoff §4)",
+        );
+      }
+
+      const nextKey = this.coordinatorRegistry.register(target);
+      if (nextKey === group.coordinatorKey) {
+        throw new Error(`Group ${groupAlias} is already on that coordinator`);
+      }
+      const to = this.locatorOf(nextKey);
+      if (options.failover) {
+        // §10 step 3: probe the roster in preference order before committing.
+        // Any earlier failover commit is adopted instead — even one on a
+        // fallback other than the chosen target — so competing failovers
+        // converge on one commit instead of forking.
+        const adopted = await this.adoptFromRoster(group);
+        if (adopted && adopted.toLowerCase() !== nextKey.toLowerCase()) {
+          throw new Error(
+            `Group ${groupAlias} already failed over to ${adopted} (coordinator-handoff §10)`,
+          );
+        }
+        if (group.coordinatorKey.toLowerCase() === nextKey.toLowerCase()) {
+          throw new Error(`Group ${groupAlias} is already on that coordinator`);
+        }
+      }
+      const previous = group.metadata.coordinatorRouting;
+      if (!previous) {
+        // §4.4: an absent roster is the group's decision — no handoff exists.
+        throw new Error(
+          `Group ${groupAlias} has no declared fallback roster (coordinator-handoff §4.4)`,
+        );
+      }
+      // §9/§10: the target must be a currently declared fallback — that is
+      // what makes the switch discoverable to members stranded on the old
+      // coordinator (§10.2).
+      if (!previous.fallbacks.some((f) => f.pubkey === to.pubkey)) {
+        throw new Error(
+          `Coordinator ${nextKey} is not a declared fallback of ${groupAlias} (coordinator-handoff §9)`,
+        );
+      }
+
+      // §9 steps 3–5: the cut is the tips of everything ingested, and the
+      // handoff record's `from` is the previous active locator.
+      const routing: CordnCoordinatorRouting = {
+        active: to,
+        // Convenience default: alternates to the new active (the old active
+        // is a known-good one). The roster is ordinary metadata — edit it
+        // through `updateGroupMetadata` like the document (§4.4).
+        fallbacks: dedupeBy(
+          [
+            previous.active,
+            ...previous.fallbacks.filter((f) => f.pubkey !== to.pubkey),
+          ],
+          (locator) => locator.pubkey,
+        ),
+        // §7.1: the cut accumulates every handoff committer's confirmed tips.
+        boundaryTips: dedupeBy(
+          [...previous.boundaryTips, ...causalTips(group.messages)],
+          (tip) => tip,
+        ),
+      };
+
+      const metadata: CordnGroupMetadata = {
+        ...group.metadata,
+        coordinatorRouting: routing,
+      };
+      const prepared = await updateGroupMetadataExtension({
+        state: group.state,
+        metadata,
+      });
+      // Planned: the commit lands on the closing coordinator (its final
+      // record). Failover: it lands on the new one (§10.4).
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        prepared.commitMessageBase64,
+        options.failover ? nextKey : undefined,
+      );
+      this.adoptGroupState(group, prepared.newState);
+      // The author processes its own commit immediately (§9 step 6).
+      this.reconcileRouting(group);
+      return { metadata: group.metadata ?? metadata, cursor: posted.cursor };
+    });
+  }
+
+  /** The configured target for a coordinator, if this session already knows
+   *  it — REPL switching reuses it instead of re-registering a conflicting
+   *  shape (CoordinatorClientRegistry identity rules). */
+  getCoordinatorTarget(serverPubkey: string): CoordinatorTarget | undefined {
+    const key = this.coordinatorRegistry.registeredKeys.find(
+      (candidate) => candidate.toLowerCase() === serverPubkey.toLowerCase(),
+    );
+    return key ? this.coordinatorRegistry.getTarget(key) : undefined;
+  }
+
+  /**
+   * Forced failover discovery (coordinator-handoff §10.2): the binding is
+   * unreachable, so attempt the fallback roster in preference order and adopt
+   * the first coordinator carrying the group's routing state. Returns the
+   * adopted coordinator key, or undefined when no candidate had the group.
+   */
+  async discoverCoordinator(groupAlias: string): Promise<string | undefined> {
+    return this.runGroupOperation(groupAlias, async () =>
+      this.adoptFromRoster(this.getGroup(groupAlias)),
+    );
+  }
+
+  private async adoptFromRoster(
+    group: GroupSessionState,
+  ): Promise<string | undefined> {
+    const gid = this.deriveGroupId(group.state);
+    const routing = group.metadata?.coordinatorRouting;
+    // §10.2: discovery is the declared roster, in preference order — nothing
+    // else. An absent or empty roster means no handoff can exist (§4.4).
+    const candidates = (routing?.fallbacks ?? [])
+      .map((locator) => locator.pubkey)
+      .filter(
+        (key) => key.toLowerCase() !== group.coordinatorKey.toLowerCase(),
+      );
+
+    for (const key of candidates) {
+      // ponytail: sequential probes in preference order (§10.2); a dead
+      // socket consumes the probe bound twice and is skipped.
+      const probe = () =>
+        withTimeout(
+          this.getCoordinatorClient(key).FetchManyGroupMessages({
+            groups: [{ gid }],
+          }),
+          ROSTER_PROBE_TIMEOUT_MS,
+        ).catch(() => undefined);
+      // §10 step 1: one failure must not condemn a live coordinator — a
+      // false-dead probe manufactures forks, so retry once before skipping.
+      const result = (await probe()) ?? (await probe());
+      if (!result || result.messages.length === 0) continue;
+
+      // A non-adopting batch (e.g. an old home's leftover line) must not
+      // contaminate this binding's fetch progression.
+      const savedCursor = group.fetchCursor;
+      const savedLast = group.lastCursor;
+      await this.applyIncomingMessages(group, result.messages, {
+        stream: streamOf(group),
+        originKey: key,
+      });
+      if (
+        group.metadata?.coordinatorRouting?.active.pubkey.toLowerCase() ===
+        key.toLowerCase()
+      ) {
+        return key;
+      }
+      group.fetchCursor = savedCursor;
+      group.lastCursor = savedLast;
+    }
+    return undefined;
   }
 
   async fetchWelcomes(coordinatorKey?: string): Promise<StoredWelcome[]> {
@@ -996,6 +1244,7 @@ export class CliSession {
         event: createUnsignedCordnMessageEvent({
           pubkey: this.stablePubkey,
           content,
+          tags: causalPrevTags(group.messages),
         }),
         authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
       });
@@ -1008,7 +1257,9 @@ export class CliSession {
 
       const stored: StoredMessage = {
         cursor: posted.cursor,
-        createdAt: posted.at,
+        createdAt: outbound.event.created_at,
+        stream: streamOf(group),
+        postedMsgBase64: posted.postedMsgBase64,
         direction: "outbound",
         sender: this.stablePubkey,
         id: outbound.event.id,
@@ -1020,6 +1271,53 @@ export class CliSession {
       group.messages.push(stored);
       group.lastCursor = Math.max(group.lastCursor, posted.cursor);
       return stored;
+    });
+  }
+
+  /**
+   * Re-sends a held envelope unchanged — same `id`, re-sealed only
+   * (coordinator-handoff §6.2) — so a member who missed it can pull it in
+   * (§7.2). Author-only: the envelope `pubkey` must match the MLS sender.
+   */
+  async resendMessage(
+    groupAlias: string,
+    envelopeId: string,
+  ): Promise<{ cursor: number }> {
+    return this.runGroupOperation(groupAlias, async () => {
+      const group = this.getGroup(groupAlias);
+      await this.catchUpGroupIfNeeded(group);
+      this.assertGroupIsActive(group);
+      const held = group.messages.find((message) => message.id === envelopeId);
+      if (!held) {
+        throw new Error(`Unknown envelope id: ${envelopeId}`);
+      }
+      if (held.sender.toLowerCase() !== this.stablePubkey.toLowerCase()) {
+        throw new Error("Only the author may re-send an envelope");
+      }
+
+      const outbound = await createApplicationMessageBase64({
+        state: group.state,
+        event: createUnsignedCordnMessageEvent({
+          pubkey: held.sender,
+          content: held.content,
+          createdAt: held.createdAt,
+          kind: held.kind,
+          tags: held.tags,
+        }),
+        authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
+      });
+      if (outbound.event.id !== envelopeId) {
+        throw new Error("Stored message does not re-derive its envelope id");
+      }
+      group.state = outbound.newState;
+      const posted = await this.postOutboundGroupMessage(
+        group,
+        outbound.opaqueMessageBase64,
+      );
+      // The newest copy's wrapper matches its echo (content-addressed).
+      held.postedMsgBase64 = posted.postedMsgBase64;
+      group.lastCursor = Math.max(group.lastCursor, posted.cursor);
+      return { cursor: posted.cursor };
     });
   }
 
@@ -1069,7 +1367,7 @@ export class CliSession {
         event: createUnsignedCordnMessageEvent({
           pubkey: this.stablePubkey,
           content: params.caption ?? "",
-          tags: [imeta],
+          tags: [...causalPrevTags(group.messages), imeta],
         }),
         authenticatedData: encodeAuthenticatedSender(this.stablePubkey),
       });
@@ -1082,7 +1380,9 @@ export class CliSession {
 
       const stored: StoredMessage = {
         cursor: posted.cursor,
-        createdAt: posted.at,
+        createdAt: outbound.event.created_at,
+        stream: streamOf(group),
+        postedMsgBase64: posted.postedMsgBase64,
         direction: "outbound",
         sender: this.stablePubkey,
         id: outbound.event.id,
@@ -1098,28 +1398,30 @@ export class CliSession {
   }
 
   /**
-   * Fetches and decrypts the media referenced by the `imeta` tag on the message
-   * at `cursor`. Requires a `mediaStore`. Throws if the message has no media
-   * reference or the version is unsupported.
+   * Fetches and decrypts the media referenced by the `imeta` tag on the
+   * message with envelope `messageId`. Requires a `mediaStore`. Throws if the
+   * message has no media reference or the version is unsupported. Envelope ids
+   * are the unambiguous address: cursors are stream-local and repeat across
+   * handoff segments (coordinator-handoff §5).
    */
   async decryptMediaMessage(
     groupAlias: string,
-    cursor: number,
+    messageId: string,
   ): Promise<{ plaintext: Uint8Array; metadata: MediaMetadata }> {
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
       if (!this.mediaStore) {
         throw new Error("No media store configured for this session");
       }
-      const message = group.messages.find((m) => m.cursor === cursor);
+      const message = group.messages.find((m) => m.id === messageId);
       if (!message) {
         throw new Error(
-          `No message at cursor ${cursor} in group ${groupAlias}`,
+          `No message with id ${messageId} in group ${groupAlias}`,
         );
       }
       const ref = findImetaTag(message.tags);
       if (!ref) {
-        throw new Error(`Message at cursor ${cursor} has no media reference`);
+        throw new Error(`Message ${messageId} has no media reference`);
       }
       if (ref.version !== MEDIA_VERSION) {
         throw new Error(`Unsupported media version: ${ref.version}`);
@@ -1147,13 +1449,27 @@ export class CliSession {
 
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
-      const result = await this.fetchRawGroupMessages(
-        this.deriveGroupId(group.state),
-        group.fetchCursor,
-      );
+      const stream = streamOf(group);
+      const originKey = group.coordinatorKey;
+      let result: FetchGroupMessagesOutput;
+      try {
+        result = await this.fetchRawGroupMessages(
+          this.deriveGroupId(group.state),
+          group.fetchCursor,
+        );
+      } catch (error) {
+        // §10: the binding may be unreachable because the group already
+        // failed over. Probe the roster for the new home before giving up.
+        if (!(await this.adoptFromRoster(group))) throw error;
+        result = await this.fetchRawGroupMessages(
+          this.deriveGroupId(group.state),
+          group.fetchCursor,
+        );
+      }
       const { received } = await this.applyIncomingMessages(
         group,
         result.messages,
+        { stream, originKey },
       );
       return received;
     });
@@ -1170,6 +1486,8 @@ export class CliSession {
     const group = this.getGroup(groupAlias);
     this.assertGroupIsActive(group);
     const groupId = this.deriveGroupId(group.state);
+    const stream = streamOf(group);
+    const originKey = group.coordinatorKey;
     let resolveReady!: () => void;
     let rejectReady!: (error: unknown) => void;
     const ready = new Promise<void>((resolve, reject) => {
@@ -1201,7 +1519,10 @@ export class CliSession {
         },
         onMessages: async (messages) => {
           await this.runGroupOperation(groupAlias, async () => {
-            const result = await this.applyIncomingMessages(group, messages);
+            const result = await this.applyIncomingMessages(group, messages, {
+              stream,
+              originKey,
+            });
             this.emitMessageEvent(groupAlias, result.received, result.issues);
           });
         },
@@ -1479,6 +1800,7 @@ export class CliSession {
       return { received: [], issues: [] };
     }
     const localCursor = group.fetchCursor;
+    const stream = streamOf(group);
 
     // Fetch the whole gap (messages after the local cursor). ponytail: one
     // fetch; paginate if real gaps grow large enough to trip a batch limit.
@@ -1513,7 +1835,10 @@ export class CliSession {
       if (range.length === 0) continue;
       // Decrypt this epoch's messages with this epoch's state, then advance.
       group.state = states[i]!;
-      const r = await this.applyIncomingMessages(group, range);
+      const r = await this.applyIncomingMessages(group, range, {
+        stream,
+        originKey: group.coordinatorKey,
+      });
       allReceived.push(...r.received);
       allIssues.push(...r.issues);
     }
@@ -1523,9 +1848,13 @@ export class CliSession {
   }
 
   listMessages(groupAlias: string): StoredMessage[] {
-    return [...this.getGroup(groupAlias).messages].sort(
-      (a, b) => a.cursor - b.cursor,
-    );
+    const group = this.getGroup(groupAlias);
+    const counted = this.countedIds(group);
+    // Cursor order within a stream, stream order across segments (§5: order
+    // is cursor order within a stream; across streams it is client-local).
+    return group.messages
+      .filter((message) => counted.has(message.id))
+      .sort((a, b) => (a.stream ?? 0) - (b.stream ?? 0) || a.cursor - b.cursor);
   }
 
   listSyncIssues(groupAlias: string): SyncIssue[] {
@@ -1537,6 +1866,7 @@ export class CliSession {
   private async postOutboundGroupMessage(
     group: GroupSessionState,
     mlsMessageBase64: string,
+    coordinatorKey?: string,
   ): Promise<{
     cursor: number;
     at: number;
@@ -1556,7 +1886,9 @@ export class CliSession {
         serializedMlsMessage: decodeBase64(mlsMessageBase64),
       })
     ).encryptedBase64;
-    const result = await this.getGroupClient(group).PostGroupMessage({
+    const result = await this.getCoordinatorClient(
+      coordinatorKey ?? group.coordinatorKey,
+    ).PostGroupMessage({
       msg_64,
       gid,
     });
@@ -1690,16 +2022,81 @@ export class CliSession {
     group.metadata = getCordnGroupMetadataExtension(state);
   }
 
+  /** Counted history (coordinator-handoff §7.1): ancestor-closure of every
+   *  cut's `boundary_tips` plus everything fetched from the open stream. */
+  private countedIds(group: GroupSessionState): Set<string> {
+    const routing = group.metadata?.coordinatorRouting;
+    return adjudicate(
+      group.messages.map((message) => ({
+        id: message.id,
+        parents: prevLinksOf(message.tags),
+        // Seed provenance: a copy on the open stream counts (§6.2/§7.2).
+        stream: message.copyStream ?? message.stream ?? 0,
+      })),
+      routing?.boundaryTips ?? [],
+      streamOf(group),
+    ).counted;
+  }
+
+  private locatorOf(coordinatorKey: string): CoordinatorLocator {
+    const target = this.coordinatorRegistry.getTarget(coordinatorKey);
+    return {
+      pubkey: target.serverPubkey.toLowerCase(),
+      relayUrls: [...(target.relays ?? [])],
+    };
+  }
+
+  /**
+   * Coordinator-handoff §9 step 6: a routing commit whose `active` differs
+   * from the group's binding IS the segment switch — rebind, restart fetch
+   * progression, and hand the watch over to the new coordinator.
+   */
+  private reconcileRouting(group: GroupSessionState): void {
+    const active = group.metadata?.coordinatorRouting?.active;
+    if (
+      !active ||
+      active.pubkey.toLowerCase() === group.coordinatorKey.toLowerCase()
+    ) {
+      return;
+    }
+    try {
+      this.coordinatorRegistry.register({
+        serverPubkey: active.pubkey,
+        relays: active.relayUrls.length > 0 ? [...active.relayUrls] : undefined,
+      });
+    } catch {
+      // A pre-configured target (e.g. a live relay handler) wins over the
+      // locator's relay hints.
+    }
+    group.coordinatorKey = active.pubkey;
+    // A new stint: client-local stream ordinal (§5) for provenance stamps.
+    group.stream = (group.stream ?? 0) + 1;
+    group.fetchCursor = 0;
+    group.lastCursor = 0;
+    if (this.isWatching(group.alias)) {
+      // Restarting the watch from inside its own callback would deadlock.
+      queueMicrotask(() => {
+        void this.unwatchGroup(group.alias)
+          .then(() => this.watchGroup(group.alias))
+          .catch(() => undefined);
+      });
+    }
+  }
+
   private async catchUpGroupIfNeeded(group: GroupSessionState): Promise<void> {
     if (this.getWatchStatus(group.alias) === "watching") {
       return;
     }
 
+    const stream = streamOf(group);
     const result = await this.fetchRawGroupMessages(
       this.deriveGroupId(group.state),
       group.fetchCursor,
     );
-    await this.applyIncomingMessages(group, result.messages);
+    await this.applyIncomingMessages(group, result.messages, {
+      stream,
+      originKey: group.coordinatorKey,
+    });
   }
 
   /**
@@ -1723,8 +2120,10 @@ export class CliSession {
     group: GroupSessionState,
     messages: FetchGroupMessagesOutput["messages"],
     options: {
+      stream: number;
+      originKey: string;
       suppressIssue?: (issue: SyncIssue) => boolean;
-    } = {},
+    },
   ): Promise<{
     received: StoredMessage[];
     issues: SyncIssue[];
@@ -1732,10 +2131,11 @@ export class CliSession {
     // Process messages one-at-a-time so that state-advancing commits
     // update the exporter secret before subsequent messages from the
     // new epoch are decrypted.
-    const allReceived: StoredMessage[] = [];
     const allIssues: SyncIssue[] = [];
     const allAppliedPending = new Set<string>();
+    const countedBefore = this.countedIds(group);
     const allRejectedPending = new Set<string>();
+    let stream = options.stream;
 
     const pendingOps = this.store.pendingOperations;
 
@@ -1754,6 +2154,22 @@ export class CliSession {
       if (pendingOp) {
         opaqueMessageBase64 = pendingOp.commitMessageBase64;
       } else {
+        // Self-echo of our own application post, matched by content (§6.2
+        // re-sends re-seal, so `resendMessage` refreshes the stamp): confirm
+        // only, and the fresh copy's stream is provenance the record adopts.
+        // Immune to cursor collisions across streams.
+        const echo = group.messages.find(
+          (stored) => stored.postedMsgBase64 === message.msg_64,
+        );
+        if (echo) {
+          echo.copyStream = Math.max(
+            echo.copyStream ?? echo.stream ?? 0,
+            stream,
+          );
+          group.fetchCursor = Math.max(group.fetchCursor, message.cursor);
+          group.lastCursor = Math.max(group.lastCursor, message.cursor);
+          continue;
+        }
         try {
           const { serializedMlsMessage } = await decryptGroupPayload({
             state: group.state,
@@ -1786,9 +2202,20 @@ export class CliSession {
         getPendingEpochOperation: (opaque: string) =>
           getPendingEpochOperation(pendingOps, group.alias, opaque),
         localStablePubkey: this.stablePubkey,
+        stream,
       });
 
-      allReceived.push(...sync.received);
+      // §7.3 seam: a routing commit that opens a stint on the fetched line
+      // makes the rest of that line the new segment's. Records from a line
+      // that no longer serves the open stream keep this call's stamp.
+      const active = group.metadata?.coordinatorRouting?.active.pubkey;
+      if (
+        active !== undefined &&
+        active.toLowerCase() === options.originKey.toLowerCase()
+      ) {
+        stream = streamOf(group);
+      }
+
       allIssues.push(...sync.issues);
       for (const m of sync.appliedPendingCommitMessages) {
         allAppliedPending.add(m);
@@ -1828,8 +2255,21 @@ export class CliSession {
       });
     }
 
+    // §9 step 6: processing a routing commit that changed `active` is the
+    // segment switch. Runs after the confirmation finalizers so a pending
+    // Welcome is still stored on the coordinator its Commit was posted to.
+    this.reconcileRouting(group);
+
+    const countedNow = this.countedIds(group);
+    // Newly counted since this call started: fresh deliveries plus §7.2
+    // re-ingests of records pulled back in by new linkage. Computed after the
+    // switch so records past a cut in this very batch stay unprocessed (§13).
+    const received = group.messages.filter(
+      (message) => countedNow.has(message.id) && !countedBefore.has(message.id),
+    );
+
     return {
-      received: allReceived,
+      received,
       issues: options.suppressIssue
         ? this.removeSuppressedIssues(
             group,
@@ -1852,6 +2292,8 @@ export class CliSession {
     // Pre-join payloads fail exporter decryption and are skipped naturally;
     // retain decryptable messages sent after the member was added.
     return this.applyIncomingMessages(group, result.messages, {
+      stream: streamOf(group),
+      originKey: group.coordinatorKey,
       suppressIssue: (issue) =>
         issue.createdAt <= welcomeCreatedAt &&
         (issue.detail ===

@@ -1,0 +1,145 @@
+import { describe, expect, test } from "vitest";
+
+import {
+  decodeCordnCoordinatorRouting,
+  encodeCordnCoordinatorRouting,
+  type CordnCoordinatorRouting,
+} from "./coordinatorRouting.ts";
+
+const A = { pubkey: "11".repeat(32), relayUrls: ["wss://a.example"] };
+const B = { pubkey: "22".repeat(32), relayUrls: [] };
+const TIP = "ab".repeat(32);
+
+/** Manual byte builder for decode-side (trust boundary) cases. */
+function bytes(...parts: (number | number[] | Uint8Array)[]): Uint8Array {
+  const flat: number[] = [];
+  for (const part of parts) {
+    flat.push(...(typeof part === "number" ? [part] : Array.from(part)));
+  }
+  return Uint8Array.from(flat);
+}
+
+/** locator = 32-byte pubkey + uint16-prefixed relay blob (empty here). */
+function locator(fill: number): Uint8Array {
+  return bytes(Array(32).fill(fill), [0, 0]);
+}
+
+describe("cordn coordinator routing codec", () => {
+  test("roundtrips v1 routing", () => {
+    const routing: CordnCoordinatorRouting = {
+      active: A,
+      fallbacks: [B, { pubkey: "33".repeat(32), relayUrls: ["wss://c"] }],
+      boundaryTips: [TIP],
+    };
+
+    expect(
+      decodeCordnCoordinatorRouting(encodeCordnCoordinatorRouting(routing)),
+    ).toEqual(routing);
+  });
+
+  test("roundtrips minimal routing", () => {
+    const routing: CordnCoordinatorRouting = {
+      active: A,
+      fallbacks: [B],
+      boundaryTips: [],
+    };
+
+    expect(
+      decodeCordnCoordinatorRouting(encodeCordnCoordinatorRouting(routing)),
+    ).toEqual(routing);
+  });
+
+  test("normalizes pubkeys and envelope ids", () => {
+    const encoded = encodeCordnCoordinatorRouting({
+      active: { pubkey: "AB".repeat(32), relayUrls: [] },
+      fallbacks: [B],
+      boundaryTips: ["CD".repeat(32)],
+    });
+
+    expect(decodeCordnCoordinatorRouting(encoded)).toEqual({
+      active: { pubkey: "ab".repeat(32), relayUrls: [] },
+      fallbacks: [B],
+      boundaryTips: ["cd".repeat(32)],
+    });
+  });
+
+  test("an empty roster is a legal declaration (no handoffs possible)", () => {
+    const routing = { active: A, fallbacks: [], boundaryTips: [] };
+    expect(
+      decodeCordnCoordinatorRouting(encodeCordnCoordinatorRouting(routing)),
+    ).toEqual(routing);
+  });
+
+  test("rejects reserved version 0", () => {
+    const encoded = encodeCordnCoordinatorRouting({
+      active: A,
+      fallbacks: [B],
+      boundaryTips: [],
+    });
+    encoded[0] = 0;
+    encoded[1] = 0;
+
+    expect(() => decodeCordnCoordinatorRouting(encoded)).toThrow(/version/);
+  });
+
+  test("rejects trailing bytes and truncation on v1", () => {
+    const encoded = encodeCordnCoordinatorRouting({
+      active: A,
+      fallbacks: [B],
+      boundaryTips: [],
+    });
+
+    expect(() => decodeCordnCoordinatorRouting(bytes(encoded, [9, 9]))).toThrow(
+      /trailing/,
+    );
+    expect(() =>
+      decodeCordnCoordinatorRouting(encoded.slice(0, encoded.length - 1)),
+    ).toThrow(/end of cordn coordinator routing/);
+  });
+
+  test("tolerates trailing fields of future versions (append-only)", () => {
+    const routing: CordnCoordinatorRouting = {
+      active: A,
+      fallbacks: [B],
+      boundaryTips: [TIP],
+    };
+    const encoded = encodeCordnCoordinatorRouting(routing);
+    encoded[1] = 2; // pretend version 2 appended fields we do not know
+
+    expect(decodeCordnCoordinatorRouting(bytes(encoded, [1, 2, 3]))).toEqual(
+      routing,
+    );
+  });
+
+  test("rejects invalid pubkeys and envelope ids at the trust boundary", () => {
+    expect(() =>
+      encodeCordnCoordinatorRouting({
+        active: { pubkey: "zz", relayUrls: [] },
+        fallbacks: [B],
+        boundaryTips: [],
+      }),
+    ).toThrow(/pubkey/i);
+    expect(() =>
+      encodeCordnCoordinatorRouting({
+        active: A,
+        fallbacks: [B],
+        boundaryTips: ["not-an-id"],
+      }),
+    ).toThrow(/envelope id/);
+
+    // version 1 + locator A + fallbacks[B] + a tips field carrying the
+    // length-prefixed id "hi"
+    expect(() =>
+      decodeCordnCoordinatorRouting(
+        bytes(
+          [0, 1],
+          locator(0x11),
+          [0, 34],
+          locator(0x22),
+          [0, 4],
+          [0, 2, 0x68, 0x69],
+        ),
+      ),
+    ).toThrow(/envelope id/);
+  });
+});

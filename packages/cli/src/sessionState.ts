@@ -63,7 +63,19 @@ export interface KeyPackageSummary {
 
 export interface StoredMessage {
   cursor: number;
+  /** The envelope's `created_at` — the record's own timestamp, kept so the
+   *  envelope re-derives its exact `id` on re-send (coordinator-handoff §6.2). */
   createdAt: number;
+  /** Stream provenance (coordinator-handoff §2/§7.1): the ordinal of the
+   *  segment whose coordinator served this record. Absent = 0 (genesis).
+   *  The home stream — display and §5 ordering key. */
+  stream?: number;
+  /** Newest stream carrying a copy (§6.2 re-sends / §7.2 recovery): a copy on
+   *  the open stream seeds countedness (§7.1). Absent = same as home. */
+  copyStream?: number;
+  /** The encrypted wrapper this record was last posted as. Self-echoes match
+   *  by content (§6.2 re-sends), immune to cursor collisions across streams. */
+  postedMsgBase64?: string;
   direction: "inbound" | "outbound";
   sender: string;
   id: string;
@@ -85,6 +97,9 @@ export interface GroupSessionState {
   metadata?: CordnGroupMetadata;
   status: "active" | "removed";
   removedAtCursor?: number;
+  /** Client-local ordinal of the current stream (coordinator-handoff §5):
+   *  bumped whenever the active coordinator changes. Absent = 0. */
+  stream?: number;
   lastCursor: number;
   fetchCursor: number;
   messages: StoredMessage[];

@@ -119,6 +119,86 @@ describe("REPL command catalog", () => {
 });
 
 describe("executeReplCommand", () => {
+  test("switch-coordinator builds the target from the roster and passes --failover", async () => {
+    const output = new PassThrough();
+    const switchCoordinator = vi
+      .fn()
+      .mockResolvedValue({ metadata: {}, cursor: 4 });
+    const session = {
+      switchCoordinator,
+      getCoordinatorTarget: vi.fn().mockReturnValue(undefined),
+      getGroup: vi.fn().mockReturnValue({
+        metadata: {
+          coordinatorRouting: {
+            active: { pubkey: "11".repeat(32), relayUrls: ["wss://a"] },
+            fallbacks: [{ pubkey: "22".repeat(32), relayUrls: ["wss://b"] }],
+            boundaryTips: [],
+          },
+        },
+      }),
+    } as never;
+
+    await executeReplCommand(
+      "switch-coordinator",
+      ["demo", "22".repeat(32), "--failover"],
+      { session, output },
+    );
+
+    expect(switchCoordinator).toHaveBeenCalledWith(
+      "demo",
+      { serverPubkey: "22".repeat(32), relays: ["wss://b"] },
+      { failover: true },
+    );
+  });
+
+  test("switch-coordinator rejects a coordinator outside the roster", async () => {
+    const output = new PassThrough();
+    const session = {
+      getGroup: vi.fn().mockReturnValue({
+        metadata: {
+          coordinatorRouting: {
+            active: { pubkey: "11".repeat(32), relayUrls: [] },
+            fallbacks: [],
+            boundaryTips: [],
+          },
+        },
+      }),
+    } as never;
+
+    await expect(
+      executeReplCommand("switch-coordinator", ["demo", "33".repeat(32)], {
+        session,
+        output,
+      }),
+    ).rejects.toThrow(/not named by the roster/);
+  });
+
+  test("discover-coordinator reports the adopted home", async () => {
+    const output = new PassThrough();
+    const discoverCoordinator = vi.fn().mockResolvedValue("22".repeat(32));
+    const session = { discoverCoordinator } as never;
+
+    await executeReplCommand("discover-coordinator", ["demo"], {
+      session,
+      output,
+    });
+
+    expect(discoverCoordinator).toHaveBeenCalledWith("demo");
+  });
+
+  test("resend passes the envelope id", async () => {
+    const output = new PassThrough();
+    const resendMessage = vi.fn().mockResolvedValue({ cursor: 7 });
+    const session = { resendMessage } as never;
+
+    await executeReplCommand("resend", ["demo", "ab".repeat(32)], {
+      session,
+      output,
+    });
+
+    expect(resendMessage).toHaveBeenCalledWith("demo", "ab".repeat(32));
+  });
+
   test("supports last-resort and local-only gen-kp flags", async () => {
     const output = new PassThrough();
     const generateKeyPackage = vi.fn().mockResolvedValue({

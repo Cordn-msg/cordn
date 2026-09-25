@@ -2,7 +2,7 @@ import {
   createAdminAuthorizationCallback,
   createUnauthorizedAdminRejectionDetail,
 } from "./adminPolicy.ts";
-import type { IncomingMessageCallback } from "ts-mls";
+import type { ClientState, IncomingMessageCallback } from "ts-mls";
 import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
 import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
 import { decodeCordnMessageEvent } from "./messageEnvelope.ts";
@@ -25,6 +25,35 @@ export interface GroupIngestionResult {
   appliedPendingCommitMessages: Set<string>;
   rejectedPendingCommitMessages: Set<string>;
   removedLocalMember: boolean;
+}
+
+/** §4.4/§14: a routing update whose new `active` is not a declared fallback
+ *  of the previous state is void — the routing change is discarded (the rest
+ *  of the metadata still applies). Enforced at every metadata adoption so a
+ *  later re-derivation from the group context cannot smuggle it back in. */
+function adoptRoutedMetadata(
+  group: GroupSessionState,
+  state: ClientState,
+  message: { cursor: number; createdAt: number },
+): GroupSessionState["syncIssues"][number] | undefined {
+  const incoming = getCordnGroupMetadataExtension(state);
+  const previous = group.metadata?.coordinatorRouting;
+  const next = incoming?.coordinatorRouting;
+  if (
+    previous &&
+    next &&
+    next.active.pubkey !== previous.active.pubkey &&
+    !previous.fallbacks.some((f) => f.pubkey === next.active.pubkey)
+  ) {
+    group.metadata = { ...incoming, coordinatorRouting: previous };
+    return {
+      cursor: message.cursor,
+      createdAt: message.createdAt,
+      detail: `Void routing update (coordinator-handoff §4.4): ${next.active.pubkey} is not a declared fallback`,
+    };
+  }
+  group.metadata = incoming;
+  return undefined;
 }
 
 function isFormerEpochIssue(detail: string): boolean {
@@ -92,9 +121,13 @@ export async function ingestGroupMessages(params: {
     opaqueMessageBase64: string,
   ) => PendingEpochOperation | undefined;
   localStablePubkey: string;
+  /** Stream provenance (coordinator-handoff §2/§7.1): ordinal of the segment
+   *  whose coordinator served this fetch. Defaults to 0 (genesis stream). */
+  stream?: number;
 }): Promise<GroupIngestionResult> {
   const { group, messages, getPendingEpochOperation, localStablePubkey } =
     params;
+  const stream = params.stream ?? 0;
   const received: StoredMessage[] = [];
   const issues: GroupSessionState["syncIssues"] = [];
   const appliedPendingCommitMessages = new Set<string>();
@@ -121,7 +154,12 @@ export async function ingestGroupMessages(params: {
     if (
       group.messages.some(
         (stored) =>
-          stored.direction === "outbound" && stored.cursor === message.cursor,
+          stored.direction === "outbound" &&
+          stored.cursor === message.cursor &&
+          // Cursors are stream-local (coordinator-handoff §5): only the echo
+          // from the same stream may match, or a later line's cursor collides
+          // with an old outbound record and swallows it.
+          (stored.stream ?? 0) === stream,
       )
     ) {
       group.fetchCursor = message.cursor;
@@ -235,7 +273,9 @@ export async function ingestGroupMessages(params: {
 
     if (processed.kind === "applicationMessage") {
       group.state = processed.newState;
-      group.metadata = getCordnGroupMetadataExtension(processed.newState);
+      // Re-derivation: keep a voided routing void (§4.4/§14). The violation
+      // itself is surfaced once, at the handshake commit that carried it.
+      adoptRoutedMetadata(group, processed.newState, message);
       if (isRemovedFromGroupState(processed.newState)) {
         group.status = "removed";
         group.removedAtCursor = message.cursor;
@@ -256,9 +296,26 @@ export async function ingestGroupMessages(params: {
         throw new Error("Cordn message envelope pubkey does not match sender");
       }
 
+      // §6.2: a re-sent envelope is one record — dedupe by id. The fresh
+      // copy's stream is provenance the record adopts (newest copy wins:
+      // stream ordinals grow monotonically); the home stream is untouched.
+      const duplicate = group.messages.find((stored) => stored.id === event.id);
+      if (duplicate) {
+        duplicate.copyStream = Math.max(
+          duplicate.copyStream ?? duplicate.stream ?? 0,
+          stream,
+        );
+        group.fetchCursor = message.cursor;
+        group.lastCursor = Math.max(group.lastCursor, message.cursor);
+        continue;
+      }
+
       const stored: StoredMessage = {
         cursor: message.cursor,
-        createdAt: message.createdAt,
+        // The envelope's own timestamp, so the record re-derives its exact id
+        // on re-send (§6.2). The coordinator's `at` is delivery bookkeeping.
+        createdAt: event.created_at,
+        stream,
         direction: "inbound",
         sender,
         id: event.id,
@@ -286,7 +343,11 @@ export async function ingestGroupMessages(params: {
       pendingOperation.localStateApplied = true;
       appliedPendingCommitMessages.add(message.opaqueMessageBase64);
     }
-    group.metadata = getCordnGroupMetadataExtension(processed.newState);
+    const voidIssue = adoptRoutedMetadata(group, processed.newState, message);
+    if (voidIssue) {
+      group.syncIssues.push(voidIssue);
+      issues.push(voidIssue);
+    }
 
     if (
       isRemovedFromGroupState(processed.newState) ||
