@@ -42,7 +42,10 @@ request-join <gid> [keyPackageAlias] [--coordinator <pubkey>]
 send <message...>    (uses selected group)
 send-to <groupAlias> <message...>
 send-media <filePath> [caption...]   (uses selected group; requires --media-dir)
-save-media [groupAlias] <cursor> [destDir]   (decrypts media to destDir, default .)
+save-media [groupAlias] <envelopeId> [destDir]   (decrypts media to destDir, default .)
+switch-coordinator <groupAlias> <serverPubkey> [--failover]   (handoff to a roster member)
+discover-coordinator [groupAlias]   (probe the roster for the group's home)
+resend <groupAlias> <envelopeId>   (author-only re-send of an unconfirmed record)
 sync [groupAlias]
 sync-all
 watch-all

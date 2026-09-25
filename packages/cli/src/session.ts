@@ -937,6 +937,16 @@ export class CliSession {
     });
   }
 
+  /** The configured target for a coordinator, if this session already knows
+   *  it — REPL switching reuses it instead of re-registering a conflicting
+   *  shape (CoordinatorClientRegistry identity rules). */
+  getCoordinatorTarget(serverPubkey: string): CoordinatorTarget | undefined {
+    const key = this.coordinatorRegistry.registeredKeys.find(
+      (candidate) => candidate.toLowerCase() === serverPubkey.toLowerCase(),
+    );
+    return key ? this.coordinatorRegistry.getTarget(key) : undefined;
+  }
+
   /**
    * Forced failover discovery (coordinator-handoff §10.2): the binding is
    * unreachable, so attempt the fallback roster in preference order and adopt
@@ -1371,28 +1381,30 @@ export class CliSession {
   }
 
   /**
-   * Fetches and decrypts the media referenced by the `imeta` tag on the message
-   * at `cursor`. Requires a `mediaStore`. Throws if the message has no media
-   * reference or the version is unsupported.
+   * Fetches and decrypts the media referenced by the `imeta` tag on the
+   * message with envelope `messageId`. Requires a `mediaStore`. Throws if the
+   * message has no media reference or the version is unsupported. Envelope ids
+   * are the unambiguous address: cursors are stream-local and repeat across
+   * handoff segments (coordinator-handoff §5).
    */
   async decryptMediaMessage(
     groupAlias: string,
-    cursor: number,
+    messageId: string,
   ): Promise<{ plaintext: Uint8Array; metadata: MediaMetadata }> {
     return this.runGroupOperation(groupAlias, async () => {
       const group = this.getGroup(groupAlias);
       if (!this.mediaStore) {
         throw new Error("No media store configured for this session");
       }
-      const message = group.messages.find((m) => m.cursor === cursor);
+      const message = group.messages.find((m) => m.id === messageId);
       if (!message) {
         throw new Error(
-          `No message at cursor ${cursor} in group ${groupAlias}`,
+          `No message with id ${messageId} in group ${groupAlias}`,
         );
       }
       const ref = findImetaTag(message.tags);
       if (!ref) {
-        throw new Error(`Message at cursor ${cursor} has no media reference`);
+        throw new Error(`Message ${messageId} has no media reference`);
       }
       if (ref.version !== MEDIA_VERSION) {
         throw new Error(`Unsupported media version: ${ref.version}`);

@@ -270,7 +270,7 @@ describe("CliSession", () => {
 
       const { plaintext: decrypted, metadata } = await bob.decryptMediaMessage(
         "demo",
-        synced[0]!.cursor,
+        synced[0]!.id,
       );
       expect(decrypted).toEqual(plaintext);
       expect(metadata).toEqual({ mime: "image/png", filename: "photo.png" });

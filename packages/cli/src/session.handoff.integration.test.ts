@@ -30,6 +30,7 @@ interface Harness {
   server1Pubkey: string;
   server2Pubkey: string;
   server3Pubkey: string;
+  stopServer1: () => Promise<void>;
   makeSession: () => {
     session: CliSession;
     target1: CoordinatorTarget;
@@ -63,6 +64,22 @@ async function createHarness(): Promise<Harness> {
   ]);
   const sessions: CliSession[] = [];
   const clients: cordnClient[] = [];
+  const deadServers = new Set<number>();
+  // Death simulation: a stopped coordinator's transport refuses publishes
+  // (connection refused), instead of hanging requests forever.
+  const guard = (
+    server: number,
+    target: CoordinatorTarget,
+  ): CoordinatorTarget => {
+    const handler = target.relayHandler;
+    if (!handler) return target;
+    const publish = handler.publish.bind(handler);
+    handler.publish = (event) =>
+      deadServers.has(server)
+        ? Promise.reject(new Error(`coordinator ${server} is unreachable`))
+        : publish(event);
+    return target;
+  };
 
   return {
     relayHub,
@@ -70,24 +87,28 @@ async function createHarness(): Promise<Harness> {
     server2Pubkey,
     server3Pubkey,
     makeSession() {
-      const target1: CoordinatorTarget = {
+      const target1: CoordinatorTarget = guard(1, {
         serverPubkey: server1Pubkey,
         relayHandler: relayHub.createRelayHandler(),
-      };
-      const target2: CoordinatorTarget = {
+      });
+      const target2: CoordinatorTarget = guard(2, {
         serverPubkey: server2Pubkey,
         relayHandler: relayHub.createRelayHandler(),
-      };
-      const target3: CoordinatorTarget = {
+      });
+      const target3: CoordinatorTarget = guard(3, {
         serverPubkey: server3Pubkey,
         relayHandler: relayHub.createRelayHandler(),
-      };
+      });
       const session = new CliSession({
         defaultCoordinator: target1,
         coordinators: { [server2Pubkey]: target2, [server3Pubkey]: target3 },
       });
       sessions.push(session);
       return { session, target1, target2, target3 };
+    },
+    stopServer1: async () => {
+      deadServers.add(1);
+      await servers[0]!.transport.close();
     },
     close: async () => {
       await Promise.allSettled(sessions.map((session) => session.disconnect()));
@@ -562,11 +583,7 @@ describe("coordinator handoff (session)", () => {
   test("failover prevention: a rival failover commit anywhere in the roster wins over the member's chosen target — no fork is created (§10)", async () => {
     const harness = await createHarness();
     harnesses.push(harness);
-    const {
-      session: alice,
-      target2,
-      target3: aliceTarget3,
-    } = harness.makeSession();
+    const { session: alice, target3: aliceTarget3 } = harness.makeSession();
     const { session: bob, target2: bobTarget2 } = harness.makeSession();
     const one = await bootstrapGroup(alice, bob, harness);
 
@@ -638,6 +655,61 @@ describe("coordinator handoff (session)", () => {
     await alice.sendMessage("demo", "winner");
     expect((await carol.syncGroup("demo")).map((m) => m.content)).toEqual([
       "winner",
+    ]);
+  }, 15_000);
+
+  test("probe liveness: one failed probe must not condemn a live coordinator (§10 step 1)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice } = harness.makeSession();
+    const { session: bob, target2: bobTarget2 } = harness.makeSession();
+    await bootstrapGroup(alice, bob, harness);
+    await bob.switchCoordinator("demo", bobTarget2, { failover: true });
+
+    // alice's first probe of the new home fails transiently — without the
+    // retry she would condemn a live coordinator and land nowhere.
+    const registry = (
+      alice as unknown as {
+        coordinatorRegistry: { getClient(key?: string): cordnClient };
+      }
+    ).coordinatorRegistry;
+    const client = registry.getClient(harness.server2Pubkey);
+    const original = client.FetchManyGroupMessages.bind(client);
+    let failed = false;
+    client.FetchManyGroupMessages = (request) => {
+      if (!failed) {
+        failed = true;
+        return Promise.reject(new Error("transient network error"));
+      }
+      return original(request);
+    };
+
+    const adopted = await alice.discoverCoordinator("demo");
+    expect(failed).toBe(true);
+    expect(adopted?.toLowerCase()).toBe(harness.server2Pubkey.toLowerCase());
+  }, 15_000);
+
+  test("real coordinator loss: sync recovers through the roster and the group carries on (§10)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice, target2 } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+    await bootstrapGroup(alice, bob, harness);
+
+    // server1 dies: its transport refuses everything.
+    await harness.stopServer1();
+
+    // An admin failovers; a stranded member's sync recovers via the roster.
+    await alice.switchCoordinator("demo", target2, { failover: true });
+    await bob.syncGroup("demo");
+    expect(bob.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server2Pubkey.toLowerCase(),
+    );
+
+    // The group carries on as one.
+    await alice.sendMessage("demo", "after-loss");
+    expect((await bob.syncGroup("demo")).map((m) => m.content)).toEqual([
+      "after-loss",
     ]);
   }, 15_000);
 });
