@@ -24,6 +24,10 @@ export type {
   SyncIssue,
 } from "./sessionState.ts";
 export type { CoordinatorTarget } from "./coordinatorRegistry.ts";
+export {
+  TRANSPORT_ENCRYPTION_MODES,
+  type TransportEncryption,
+} from "./coordinatorClient.ts";
 export type { CordnGroupMetadata } from "./groupMetadata.ts";
 export { FileMediaStore, type MediaStore } from "./mediaStore.ts";
 export {

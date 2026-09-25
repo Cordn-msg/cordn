@@ -118,7 +118,7 @@ await opened.persist(); // durable snapshot write; queued writes are serialized
 await opened.close(); // final snapshot, stop ingestion, release the lock
 ```
 
-`openPersistentSession` gives library callers the same guarantees the daemon relies on: exclusive state lock, snapshot restore, identity check, and serialized durable writes. Only one process may hold a given state file, so a library session replaces the daemon for that snapshot — do not run both against the same `--state-file`. The package is Node-only and ships typed `dist/lib` output; see the package README "Library usage" for the full export surface.
+`openPersistentSession` gives library callers the same guarantees the daemon relies on: exclusive state lock, snapshot restore, identity check, and serialized durable writes. Only one process may hold a given state file, so a library session replaces the daemon for that snapshot — do not run both against the same `--state-file`. The package is Node-only and ships typed `dist/lib` output; see the package README "Library usage" for the full export surface. Pass `transportEncryption: "required"` to hide request metadata from relays (see `cordn docs security`) and `coordinators` to reach groups hosted on other coordinators; both apply per open and are not saved in the snapshot.
 
 ## Trust boundary
 

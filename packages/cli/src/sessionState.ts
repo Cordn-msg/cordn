@@ -2,6 +2,7 @@ import type { ClientState, KeyPackage, PrivateKeyPackage } from "ts-mls";
 import type { UnsignedEvent } from "nostr-tools";
 
 import type { PendingWelcome } from "@cordn/core";
+import type { TransportEncryption } from "./coordinatorClient.ts";
 import type { CoordinatorTarget } from "./coordinatorRegistry.ts";
 import type { CordnGroupMetadata } from "./groupMetadata.ts";
 import type { MediaStore } from "./mediaStore.ts";
@@ -13,6 +14,8 @@ export interface CliSessionOptions {
   relayHandler?: import("@contextvm/sdk").RelayHandler;
   defaultCoordinator?: CoordinatorTarget;
   coordinators?: Record<string, CoordinatorTarget>;
+  /** Coordinator request transport; see {@link TransportEncryption}. Default "disabled". */
+  transportEncryption?: TransportEncryption;
   /**
    * Content-addressed store used to publish/fetch encrypted media blobs. When
    * unset, `sendMedia` and `decryptMediaMessage` throw. The media layer is

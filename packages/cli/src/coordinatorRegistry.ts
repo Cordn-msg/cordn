@@ -1,6 +1,6 @@
 import type { NostrTransportOptions, RelayHandler } from "@contextvm/sdk";
 
-import { cordnClient } from "./coordinatorClient.ts";
+import { cordnClient, type TransportEncryption } from "./coordinatorClient.ts";
 
 export interface CoordinatorTarget {
   serverPubkey: string;
@@ -16,6 +16,7 @@ export interface CoordinatorRegistryOptions extends Partial<NostrTransportOption
   serverPubkey?: string;
   defaultCoordinator?: CoordinatorTarget;
   coordinators?: Record<string, CoordinatorTarget>;
+  transportEncryption?: TransportEncryption;
 }
 
 function normalizeRelays(relays?: string[]): string[] {

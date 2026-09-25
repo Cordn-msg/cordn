@@ -38,7 +38,7 @@ relays:
   wss://relay.primal.net
 ```
 
-Override these with `--server-pubkey` and one or more `--relay` options. Persistent snapshots remember the coordinator and relays used to create them. Local development can continue deriving the coordinator public key from `CORDN_SERVER_PRIVATE_KEY` and reading comma-separated `CORDN_RELAY_URLS`.
+Override these with `--server-pubkey` and one or more `--relay` options. Persistent snapshots remember the coordinator and relays used to create them. Local development can continue deriving the coordinator public key from `CORDN_SERVER_PRIVATE_KEY` and reading comma-separated `CORDN_RELAY_URLS`. `--transport-encryption required` (or `CORDN_TRANSPORT_ENCRYPTION=required`) gift-wraps coordinator requests so relays cannot read their metadata; see `cordn docs security`.
 
 ## Quickstart
 
@@ -163,7 +163,10 @@ await opened.close();
 `openPersistentSession` provides exactly what the daemon relies on: an exclusive
 state lock, snapshot restore, identity check, coordinator/relay precedence, and
 a serialized durable-write queue (`persist`, `flush`, `close`). Omit `stateFile`
-for an ephemeral session. Everything else (`CliSession`, snapshot helpers,
+for an ephemeral session. `transportEncryption: "required"` gift-wraps coordinator
+requests, and `coordinators` (keyed by server pubkey, each with its own relays)
+makes further coordinators reachable next to the default one; neither is saved
+in the snapshot, so pass them on every open. Everything else (`CliSession`, snapshot helpers,
 queue helpers, defaults, error classes) is exported from the same barrel.
 
 When consuming the package from a source checkout (for example `link:` to
