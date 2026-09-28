@@ -535,6 +535,13 @@ export class CliSession {
     });
     stored.isLastResort = result.last_resort;
     stored.publishedAt = result.at;
+    // Spec §4.2 `coordinators`: the per-coordinator publish markers,
+    // replicated through the meta document so a linked device restores them
+    // (spec §11.5).
+    const publishedTo = this.resolveCoordinatorKey(options.coordinatorKey);
+    stored.coordinators = [
+      ...new Set([...(stored.coordinators ?? []), publishedTo]),
+    ];
     return stored;
   }
 
@@ -1306,6 +1313,14 @@ export class CliSession {
     group.fetchCursor = entry.cursor;
     group.lastCursor = entry.cursor;
 
+    // Spec §9 relay-hint adoption: record the document's relay hints for this
+    // coordinator when this device has no relay configuration of its own for
+    // it (fill-if-empty; local configuration always wins).
+    this.coordinatorRegistry.adoptCoordinatorRelayHints(
+      entry.coordinator,
+      entry.coordinatorRelays,
+    );
+
     this.store.addGroup(group);
     return group;
   }
@@ -1351,6 +1366,11 @@ export class CliSession {
     // group moved on); discard it. The intended change is lost and the
     // caller may retry. Spec §10 (concurrent sibling Commits).
     this.store.pendingOperations.delete(local.alias);
+    // Spec §9 relay-hint adoption applies to fast-forwarding too.
+    this.coordinatorRegistry.adoptCoordinatorRelayHints(
+      entry.coordinator,
+      entry.coordinatorRelays,
+    );
     return "fast-forwarded";
   }
 
@@ -1421,6 +1441,9 @@ export class CliSession {
       privateKeyPackage: encodeBase64(
         encode(privateKeyPackageEncoder, stored.privateKeyPackage),
       ),
+      ...(stored.coordinators?.length
+        ? { coordinators: [...stored.coordinators] }
+        : {}),
     };
   }
 
@@ -1452,6 +1475,11 @@ export class CliSession {
       keyPackageBase64: entry.keyPackage,
       isLastResort: true,
       consumed: false,
+      // Restore the per-coordinator publish markers (spec §4.2/§11.5) so this
+      // device's next meta publish keeps them (union semantics).
+      ...(entry.coordinators?.length
+        ? { coordinators: [...entry.coordinators] }
+        : {}),
     });
     return true;
   }
@@ -1659,6 +1687,15 @@ export class CliSession {
 
   private resolveCoordinatorKey(coordinatorKey?: string): string {
     return coordinatorKey ?? this.coordinatorRegistry.defaultCoordinatorKey;
+  }
+
+  /**
+   * Spec §4.1 publish side: this session's relay configuration for a
+   * coordinator (registered config only — no session-default fallback),
+   * emitted as the group document's `coordinatorRelays` hint.
+   */
+  coordinatorRelayConfig(coordinatorKey: string): string[] | undefined {
+    return this.coordinatorRegistry.getRelayConfig(coordinatorKey);
   }
 
   private getCoordinatorClient(coordinatorKey?: string) {

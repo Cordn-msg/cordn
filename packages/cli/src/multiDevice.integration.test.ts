@@ -176,6 +176,129 @@ describe("multi-device synchronization", () => {
   });
 
   /**
+   * Spec §4.1/§9 relay hints (multi-device): the group document carries the
+   * publisher's own relay configuration for the coordinator as
+   * `coordinatorRelays`; a device seeding the group adopts the hints when it
+   * has no relay configuration of its own for that coordinator
+   * (fill-if-empty), and locally configured relays always win. Also covers
+   * the spec §4.2 `coordinators` publish markers riding the meta document
+   * (spec §11.5).
+   */
+  test("relay hints ride the group document; adoption fills gaps, never overwrites (spec §4.1/§9)", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-rh-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      // The group's coordinator: reachable through the hub handler while
+      // carrying a self-hosted relay set as its working configuration.
+      const hints = ["wss://relay.example.com", "wss://backup.example.com"];
+      const alice = new CliSession({
+        defaultCoordinator: {
+          serverPubkey,
+          relays: hints,
+          relayHandler: relayHub.createRelayHandler(),
+        },
+        mediaStore,
+      });
+      sessions.push(alice);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      await alice.createGroup("demo", {
+        keyPackageAlias: "kp",
+        metadata: { name: "Demo" },
+      });
+      const gid = alice.deriveGroupId(alice.getGroup("demo").state);
+
+      // Publish side (spec §4.1): the document carries the writer's own relay
+      // configuration for the coordinator.
+      const pub = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
+      const doc = await pullGroupDoc(
+        alice,
+        pub.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(doc.coordinatorRelays).toEqual(hints);
+
+      // Device 2's default coordinator is a different one, so it has no relay
+      // configuration for the group's coordinator: seeding adopts the hints
+      // (fill-if-empty, spec §9).
+      const device2 = new CliSession({
+        privateKey: alice.privateKey,
+        defaultCoordinator: {
+          serverPubkey: await new PrivateKeySigner().getPublicKey(),
+          relays: ["wss://device2-default.example.com"],
+        },
+        mediaStore,
+      });
+      sessions.push(device2);
+      expect(device2.coordinatorRelayConfig(serverPubkey)).toBeUndefined();
+      expect(await reconcileGroupDocument(device2, doc)).toBe("seeded");
+      expect(device2.coordinatorRelayConfig(serverPubkey)).toEqual(hints);
+
+      // Device 3 has its own configuration for the coordinator: local config
+      // wins, the document hint does not overwrite it (spec §9).
+      const local = ["wss://manually-fixed.example.com"];
+      const device3 = new CliSession({
+        privateKey: alice.privateKey,
+        defaultCoordinator: {
+          serverPubkey: await new PrivateKeySigner().getPublicKey(),
+          relays: ["wss://device3-default.example.com"],
+        },
+        coordinators: { [serverPubkey]: { serverPubkey, relays: local } },
+        mediaStore,
+      });
+      sessions.push(device3);
+      expect(await reconcileGroupDocument(device3, doc)).toBe("seeded");
+      expect(device3.coordinatorRelayConfig(serverPubkey)).toEqual(local);
+
+      // Spec §4.2/§11.5: the meta document carries the last-resort key
+      // package's per-coordinator publish markers; a linked device restores
+      // them so its own meta publish keeps them.
+      const kp = await alice.generateKeyPackage("lr", { lastResort: true });
+      expect(kp.isLastResort).toBe(true);
+      expect(kp.coordinators).toEqual([serverPubkey]);
+      const metaPub = await publishMetaDocument({
+        session: alice,
+        mediaStore,
+      });
+      const metaDoc = await pullMetaDoc(
+        alice,
+        metaPub.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(metaDoc.lastResortKeyPackage?.coordinators).toEqual([
+        serverPubkey,
+      ]);
+
+      expect(device2.listKeyPackages()).toHaveLength(0);
+      const { keyPackageLoaded } = await reconcileMetaDocument(
+        device2,
+        metaDoc,
+      );
+      expect(keyPackageLoaded).toBe(true);
+      expect(device2.getLastResortKeyPackage()?.coordinators).toEqual([
+        serverPubkey,
+      ]);
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  /**
    * Scenario C — a sibling Commit converges via document fast-forward.
    *
    * Device 1 commits (metadata update). Device 2 cannot ingest that Commit
