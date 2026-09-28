@@ -52,6 +52,13 @@ export interface StoredKeyPackage {
   isLastResort: boolean;
   publishedAt?: number;
   consumed: boolean;
+  /**
+   * Coordinator public keys this key package was published to — the
+   * per-coordinator publish markers (spec §4.2
+   * `lastResortKeyPackage.coordinators`), replicated through the meta
+   * document and restored on a linked device (spec §11.5).
+   */
+  coordinators?: string[];
 }
 
 export interface KeyPackageSummary {

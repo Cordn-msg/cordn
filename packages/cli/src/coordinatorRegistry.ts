@@ -119,6 +119,39 @@ export class CoordinatorClientRegistry {
     return target;
   }
 
+  /**
+   * Per-coordinator relay configuration only — no synthesized session-default
+   * fallback (unlike {@link getTarget}). This is the publish side of spec
+   * §4.1 `coordinatorRelays`: the writer's own working configuration for that
+   * coordinator, or no hint when there is none.
+   */
+  getRelayConfig(key: string): string[] | undefined {
+    const relays = this.targets.get(key)?.relays;
+    return relays?.length ? [...relays] : undefined;
+  }
+
+  /**
+   * Spec §9 relay-hint adoption (multi-device): record document relay hints
+   * as this device's connection relays for a coordinator it has no relay
+   * configuration of its own for. Locally configured relays or a relay
+   * handler always win — hints fill gaps, they never overwrite, so a manual
+   * correction on one device is not clobbered by a stale hint republished by
+   * another.
+   */
+  adoptCoordinatorRelayHints(key: string, hints?: string[]): void {
+    if (!hints?.length) return;
+    const existing = this.targets.get(key);
+    if (existing?.relays?.length || existing?.relayHandler) return;
+    this.targets.set(key, {
+      serverPubkey: key,
+      ...existing,
+      relays: [...new Set(hints)],
+    });
+    // A client may already be cached against session-default relays; drop it
+    // so the next getClient rebuilds with the adopted hints.
+    this.clients.delete(key);
+  }
+
   getClient(key?: string): cordnClient {
     const target = this.getTarget(key);
     const cacheKey = target.serverPubkey;

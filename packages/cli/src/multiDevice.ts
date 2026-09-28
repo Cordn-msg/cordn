@@ -51,12 +51,20 @@ export interface Tombstone {
 }
 
 /**
- * Last-resort key package entry (spec §4.2). Both fields are the base64 TLS
- * wire form (RFC 9420 §3) — the only MLS serialization.
+ * Last-resort key package entry (spec §4.2). `keyPackage` and
+ * `privateKeyPackage` are the base64 TLS wire form (RFC 9420 §3) — the only
+ * MLS serialization.
  */
 export interface LastResortKeyPackageEntry {
   keyPackage: string;
   privateKeyPackage: string;
+  /**
+   * OPTIONAL (spec §4.2): coordinator public keys this last-resort key package
+   * is currently published to, so a linked device restores its per-coordinator
+   * publish markers and its coordinator list (spec §11.5). Public keys only —
+   * relay hints travel per group (`coordinatorRelays`), not here.
+   */
+  coordinators?: string[];
 }
 
 /**
@@ -69,6 +77,14 @@ export interface GroupDocument {
   type: "group";
   gid: string;
   coordinator: string;
+  /**
+   * OPTIONAL (spec §4.1): relay URLs where `coordinator` is reachable, in the
+   * producer's preference order. Locator hints only (group-ref §4.3
+   * semantics): absent or empty means "no hint", and the consumer connects
+   * using its own relay configuration or discovery. Adopted fill-if-empty on
+   * seed/fast-forward — local relay configuration always wins (spec §9).
+   */
+  coordinatorRelays?: string[];
   issuedAt: number;
   prev?: string;
   clientState: string;
@@ -117,6 +133,13 @@ export interface MultiDeviceSessionView {
   loadLastResortKeyPackage(entry: LastResortKeyPackageEntry): Promise<boolean>;
   /** The account's currently-published last-resort key package, if any. */
   getLastResortKeyPackage(): LastResortKeyPackageEntry | undefined;
+  /**
+   * Spec §4.1 publish side: this session's own relay configuration for a
+   * coordinator (registered config only — no session-default fallback),
+   * emitted as the group document's `coordinatorRelays` hint. Optional so
+   * narrower session views can omit it.
+   */
+  coordinatorRelayConfig?(coordinatorKey: string): string[] | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +201,8 @@ export interface GroupDocumentInput {
   gid: string;
   state: ClientState;
   coordinatorKey: string;
+  /** Relay hints from the session's working configuration (spec §4.1). */
+  coordinatorRelays?: string[];
   fetchCursor: number;
 }
 
@@ -190,6 +215,10 @@ function buildGroupDocument(
     type: "group",
     gid: input.gid,
     coordinator: input.coordinatorKey,
+    // Absent or empty means "no hint" (spec §4.1) — omit rather than emit [].
+    ...(input.coordinatorRelays?.length
+      ? { coordinatorRelays: [...input.coordinatorRelays] }
+      : {}),
     issuedAt: Date.now(),
     prev,
     clientState: encodeBase64(encode(clientStateEncoder, input.state)),
@@ -264,6 +293,7 @@ export async function publishGroupDocument(params: {
       gid,
       state: group.state,
       coordinatorKey: group.coordinatorKey,
+      coordinatorRelays: session.coordinatorRelayConfig?.(group.coordinatorKey),
       fetchCursor: group.fetchCursor,
     },
     prev,

@@ -17,7 +17,7 @@ Multi-device reuses the delivery model of [`spec/03.md`](../03.md) for a separat
 - A user's devices share a single MLS leaf per group: one `ClientState`, one membership, one set of per-epoch secrets.
 - Application messages and Commits authored by other members converge via the per-group ordered delivery stream. A Commit authored by a sibling device (same leaf) does NOT: the committing device re-publishes that group's document, and siblings fast-forward their `ClientState` to the newer epoch from it.
 - State is carried in two sealed, content-addressed document types:
-  - A **group document** snapshots one group's MLS state and delivery cursor. It seeds a group a device lacks, advertises its coordinator, and converges group state (§10). Each group has its own `prev` chain of group documents for lossless offline catch-up (§8.5).
+  - A **group document** snapshots one group's MLS state and delivery cursor. It seeds a group a device lacks, advertises its coordinator (and, optionally, where to reach it), and converges group state (§10). Each group has its own `prev` chain of group documents for lossless offline catch-up (§8.5).
   - A **meta document** carries identity-level state shared across all groups: the account's last-resort key package (so any device can accept Welcomes, §11.5) and the set of soft-delete tombstones (so removals propagate and stick across the fleet, §8).
 - Both document types are encrypted (sealed) with NIP-44 v2 to a per-identity document encryption key (DEK, §7) whose private key travels inside the tip's NIP-44 seal, stored on a content-addressed store chosen by the client, and addressed by `sha256` of the sealed blob. [Blossom](https://github.com/hzrd149/blossom) is RECOMMENDED.
 - A mutable, opaque **tip** (§6) advertises the current document set: one `x`-tagged entry per live group document plus one for the meta document. Devices fetch the tip, verify the owner-signed pointer it carries, fetch only the documents whose addresses changed, decrypt, and reconcile (§8).
@@ -58,6 +58,7 @@ One group document exists per live group, per epoch. It is the carrier of that g
   "prev": "<hex sha256 of the previous group document for this gid>",
   "gid": "<delivery group id, per spec/03 §2>",
   "coordinator": "<coordinator identity or key>",
+  "coordinatorRelays": ["wss://relay.example.com"],
   "clientState": "<base64 of serialized MLS ClientState>",
   "cursor": 0
 }
@@ -70,7 +71,8 @@ Field requirements:
 - `issuedAt` is wall-clock milliseconds and is advisory; it is not a security primitive.
 - `prev` SHOULD be populated with the address (`sha256` of the sealed blob) of the previous group document for the same `gid`. Whenever a device has published a previous group document for a `gid` it SHOULD set `prev` to that document's address: omitting it after a prior publish breaks the catch-up chain for that gap. `prev` forms a per-`gid` hash chain walkable on the immutable content store (§12) and is the mechanism that makes offline catch-up lossless (§8.5); its authenticity is transitive via the owner-endorsed tip (§6), so no per-document signature is needed (§8.5, §13).
 - `gid` is the delivery group identifier ([`spec/03.md`](../03.md) §2), opaque to the coordinator and distinct from the MLS `group_id`.
-- `coordinator` is the coordinator identity or public key that serves `gid`, so a seeded device knows where to fetch the delivery stream.
+- `coordinator` is the coordinator identity or public key that serves `gid`, so a seeded device knows where to fetch the delivery stream. A public key alone does not make the coordinator reachable: a coordinator is reached through a relay set that is per-client configuration and does not travel in any core protocol message.
+- `coordinatorRelays` is OPTIONAL. Zero or more relay URLs (`ws://` or `wss://`) in the producer's preference order, naming where the coordinator identified by `coordinator` is reachable. Semantics follow the group reference's relay hints ([`group-ref.md`](group-ref.md) §4.3): entries are locators only, carrying no trust meaning and no workflow meaning. Absent or empty means "no hint": the consumer connects using its own relay configuration or discovery. The publisher SHOULD populate the field from its own working configuration for that coordinator; a relay-set change is reflected by the next ordinary group-document republish (§10.5) and requires no dedicated republish trigger. A consumer adopts the hints only to fill a gap in its local configuration for that coordinator, never to overwrite it (§9).
 - `clientState` is the base64 encoding of the serialized MLS `ClientState` for that group at the instant the document was written. It is the sole carrier of group presentation state: `CordnGroupMetadata` ([`spec/01.md`](../01.md)) is an MLS GroupContext extension and is therefore already inside `clientState`, so a seeded device reads it from the adopted state and the document does not duplicate it. Outbound payload encryption ([`spec/03.md`](../03.md)) is likewise absent: it is a local sender default each device configures itself, not a group property, and receivers handle both modes per message.
 - `cursor` is the writer's last-processed delivery cursor for that `gid` at the same instant. The `(clientState, cursor)` pair MUST be a consistent snapshot: ingesting the delivery stream up to and including `cursor` MUST leave the writer at the epoch encoded in `clientState`.
 
@@ -88,7 +90,8 @@ Exactly one meta document exists per identity. It carries identity-level state t
   "removed": [{ "gid": "<delivery group id>", "epoch": 7 }],
   "lastResortKeyPackage": {
     "keyPackage": "<base64 of serialized MLS KeyPackage>",
-    "privateKeyPackage": "<base64 of serialized MLS PrivateKeyPackage>"
+    "privateKeyPackage": "<base64 of serialized MLS PrivateKeyPackage>",
+    "coordinators": ["<coordinator public key>"]
   }
 }
 ```
@@ -99,7 +102,7 @@ Field requirements:
 - `issuedAt` is advisory wall-clock milliseconds; it is not a security primitive.
 - The meta document has NO `prev` field. It is a current-state set, not a recovery log; its convergence is the union merge in §8 and its rollback defense is the per-`gid` epoch rule (§8), not a hash chain. Old meta blobs are superseded by the tip and reclaimable (§12).
 - `removed` is OPTIONAL. Each entry is a tombstone `{gid, epoch}`, recording that the identity stopped tracking `gid` when the group was at MLS `epoch`. `epoch` is the ordering primitive for the §8 resolution rule (not a timestamp); rejoin at a higher epoch clears a tombstone.
-- `lastResortKeyPackage` is OPTIONAL. It carries the account's currently-published last-resort key package (RFC 9420 §17.2) so any device can process a Welcome built against it (§11.5). `keyPackage` is the base64-encoded TLS wire form (RFC 9420 §3) of the MLS `KeyPackage`, and `privateKeyPackage` the matching TLS-encoded private key material — the init, leaf-encryption, and signature private keys, all needed at join time, which precedes any `clientState`. (TLS is the only MLS wire serialization; other blobs in this document, notably `clientState`, are library-serialized and intentionally not pinned to a wire format.) RFC 9420 caps a client at one last-resort key package and coordinators cap an account at one, so this is a single object, not an array. Absent when the account has published none; then Welcomes resolve only on the device that published the key package they reference (single-device behavior).
+- `lastResortKeyPackage` is OPTIONAL. It carries the account's currently-published last-resort key package (RFC 9420 §17.2) so any device can process a Welcome built against it (§11.5). `keyPackage` is the base64-encoded TLS wire form (RFC 9420 §3) of the MLS `KeyPackage`, and `privateKeyPackage` the matching TLS-encoded private key material — the init, leaf-encryption, and signature private keys, all needed at join time, which precedes any `clientState`. (TLS is the only MLS wire serialization; other blobs in this document, notably `clientState`, are library-serialized and intentionally not pinned to a wire format.) RFC 9420 caps a client at one last-resort key package and coordinators cap an account at one, so this is a single object, not an array. Absent when the account has published none; then Welcomes resolve only on the device that published the key package they reference (single-device behavior). An OPTIONAL `coordinators` field lists the coordinator public keys the account's last-resort key package is currently published to, so a linked device restores its per-coordinator publish markers and its coordinator list (§11.5). Without it, coordinators are discovered only through group seeding (§9), which never reaches a last-resort published to a coordinator the identity has no groups on. Entries are public keys only and carry no relay hints — relay hints travel per group (§4.1 `coordinatorRelays`), so a coordinator known solely through this field conveys no relay information.
 
 #### 4.3 Inventory Invariant
 
@@ -234,9 +237,11 @@ Seeding installs a group on a device without the Welcome flow defined in [`welco
 To seed a group from its group document:
 
 1. Deserialize `clientState` into a local `ClientState`.
-2. Record `gid` and `coordinator` as the group's routing data, and derive its presentation metadata from the adopted state's `CordnGroupMetadata` GroupContext extension ([`spec/01.md`](../01.md)).
+2. Record `gid`, `coordinator`, and `coordinatorRelays` (when present) as the group's routing data, and derive its presentation metadata from the adopted state's `CordnGroupMetadata` GroupContext extension ([`spec/01.md`](../01.md)).
 3. Set the local delivery cursor for `gid` to the document's `cursor`.
 4. Begin normal fetch progression from `afterCursor = cursor` as defined in [`spec/00.md`](../00.md) §5 and [`spec/03.md`](../03.md).
+
+**Relay-hint adoption (SHOULD).** A device seeding — or fast-forwarding (§8) — a group whose document carries `coordinatorRelays` SHOULD record the hints as its connection relays for that coordinator when it has no relay configuration of its own for it. Locally configured relays always win over document hints: hints fill gaps, they never overwrite, so a manual correction on one device is not clobbered by a stale hint republished by another. Without the hint, a device seeding a group it has never seen knows who the coordinator is but not where it is, and falls back to its own default relays — which do not reach a self-hosted coordinator. Every other state-replication channel already carries these hints (group references, [`group-ref.md`](group-ref.md) §4.3; client backup formats); the group document is the only channel that dropped them.
 
 The `cursor` is the writer's fetch progression, not the membership boundary (that role belongs to the Welcome `after` hint in [`welcome-delivery.md`](welcome-delivery.md) §2). The seeded device inherits the writer's current group state through `clientState` and receives messages posted after `cursor`; messages at or before `cursor` are not re-fetched. This is the intended state-sync trade: a freshly-seeded device converges on group state immediately and on message content from `cursor` forward, without the document carrying message history.
 
@@ -313,7 +318,7 @@ The meta document closes this for the account's durable key package. A last-reso
 
 **Why last-resort, and why one.** A reusable key package needs no consume-and-prune lifecycle (the one-use rule is hygiene, not crypto), which is why the field carries the last-resort package specifically rather than every key package the account has published; one-use key packages stay device-local. RFC 9420 caps a client at one last-resort key package and coordinators cap an account to one, so the field is a single optional object, never an array.
 
-**Lifecycle.** When a device publishes or rotates the account's last-resort key package, it writes the entry into the meta document and re-publishes it (a trigger alongside those in §10.5). Reconcile adopts the meta document's entry, and a device republishing the meta document selects its local entry by preferring one that carries at least one publish claim (newest mint as tie-break, derived from the key package's authenticated lifetime), so an unpublished local mint never displaces the invite surface.
+**Lifecycle.** When a device publishes or rotates the account's last-resort key package, it writes the entry into the meta document and re-publishes it (a trigger alongside those in §10.5). Reconcile adopts the meta document's entry, and a device republishing the meta document selects its local entry by preferring one that carries at least one publish claim (newest mint as tie-break, derived from the key package's authenticated lifetime), so an unpublished local mint never displaces the invite surface. The entry's `coordinators` list (§4.2) is the durable form of those publish claims: a device linked after the fact restores its per-coordinator markers and its coordinator list from it, which group seeding alone cannot provide for a coordinator the identity has no groups on.
 
 Concurrent publishes are converged by an explicit per-coordinator resolution. The coordinator's one-per-account cap replaces a superseded entry on publish but propagates nothing — private key material never flows through the coordinator, so the meta document is the only channel that distributes it. After a meta adoption, each device resolves, per coordinator it knows:
 
