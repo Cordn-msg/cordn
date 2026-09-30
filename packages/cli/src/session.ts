@@ -676,8 +676,7 @@ export class CliSession {
       prepared.pendingOperation.joinAfterCursor = posted.cursor;
       prepared.pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
-      await this.recordCommitRace(group, posted);
-      this.adoptGroupState(group, prepared.newState);
+      await this.adoptOwnCommit(group, prepared.newState, posted);
       prepared.pendingOperation.localStateApplied = true;
 
       // If this add resolved a pending join request the admin had fetched,
@@ -735,8 +734,7 @@ export class CliSession {
       );
       prepared.pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
-      await this.recordCommitRace(group, posted);
-      this.adoptGroupState(group, prepared.newState);
+      await this.adoptOwnCommit(group, prepared.newState, posted);
       prepared.pendingOperation.localStateApplied = true;
       // If add+remove happen before the add self-echo is finalized, never
       // deliver a stale Welcome to the member we just removed.
@@ -788,8 +786,7 @@ export class CliSession {
       );
       pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
-      await this.recordCommitRace(group, posted);
-      this.adoptGroupState(group, prepared.newState);
+      await this.adoptOwnCommit(group, prepared.newState, posted);
       pendingOperation.localStateApplied = true;
 
       return { metadata: group.metadata ?? metadata };
@@ -1403,6 +1400,7 @@ export class CliSession {
         localEpoch - 1n,
         entry,
         address,
+        chain,
       );
       if (decision === "keep") {
         return "skipped";
@@ -1423,6 +1421,7 @@ export class CliSession {
             meets.epoch,
             entry,
             address,
+            chain,
           );
           if (decision === "keep") {
             return "skipped";
@@ -1444,6 +1443,7 @@ export class CliSession {
     // about its own Commit's race no longer describes its state.
     local.branch = undefined;
     local.skippedSiblingCommit = undefined;
+    local.commitPoint = undefined;
 
     // A winning document means a sibling device's Commit won the epoch (or the
     // fork procedure did). Any pending Commit I staged against the old epoch
@@ -1812,6 +1812,25 @@ export class CliSession {
     this.noteFingerprint(group);
   }
 
+  /**
+   * Adopt the state our own Commit produced: gather the race evidence first
+   * (spec §10 step 1, while the pre-Commit state can still read the stream),
+   * then advance, and keep the new state as the epoch's commit point.
+   */
+  private async adoptOwnCommit(
+    group: GroupSessionState,
+    state: ClientState,
+    posted: { cursor: number; postedMsgBase64: string },
+  ): Promise<void> {
+    await this.recordCommitRace(group, posted);
+    this.adoptGroupState(group, state);
+    group.commitPoint = {
+      epoch: state.groupContext.epoch.toString(),
+      cursor: posted.cursor,
+      clientState: encodeBase64(encode(clientStateEncoder, state)),
+    };
+  }
+
   /** Remember the fingerprint of the state the group holds now (spec §10). */
   private noteFingerprint(group: GroupSessionState): string {
     const fingerprint = epochFingerprint(group.state);
@@ -2011,6 +2030,7 @@ export class CliSession {
     forkBase: bigint,
     entry: GroupDocument,
     address: string | undefined,
+    chain: DocumentChainAccess | undefined,
   ): Promise<"adopt" | "keep"> {
     const localEpoch = local.state.groupContext.epoch.toString();
     let adopt: boolean | undefined;
@@ -2033,12 +2053,13 @@ export class CliSession {
         adopt = decided.fingerprint === epochFingerprint(theirs);
         by = decided.by;
       } else {
-        const adopted = local.appliedDocument;
-        adopt =
-          !adopted ||
-          !address ||
-          entry.cursor > adopted.cursor ||
-          (entry.cursor === adopted.cursor && address > adopted.address);
+        adopt = await this.rankBranches(
+          local,
+          forkBase + 1n,
+          entry,
+          address,
+          chain,
+        );
       }
     }
     const winner = adopt
@@ -2051,6 +2072,103 @@ export class CliSession {
       detail: `Fork at epoch ${forkBase.toString()}: this device and another committed from the same epoch; ${adopt ? "adopted the other device's branch" : "kept this device's branch"} (${by})`,
     });
     return adopt ? "adopt" : "keep";
+  }
+
+  /**
+   * Spec §10 step 3, the document rank. With chain access: each branch is
+   * ranked by where its Commit landed — the lowest-cursor document at the
+   * fork epoch on its `prev` chain (the commit point, when the writer chained
+   * it), or this device's own Commit cursor for its side — and the LOWER
+   * cursor wins, the coordinator's order read off the documents. Without
+   * chain access, or when a side has no document at that epoch, the live
+   * documents decide: higher cursor, then greater address. `true` = theirs.
+   */
+  private async rankBranches(
+    local: GroupSessionState,
+    forkEpoch: bigint,
+    entry: GroupDocument,
+    address: string | undefined,
+    chain: DocumentChainAccess | undefined,
+  ): Promise<boolean> {
+    const adopted = local.appliedDocument;
+    if (chain && address) {
+      const theirs = await this.lowestDocumentAtEpoch(
+        { doc: entry, address },
+        forkEpoch,
+        chain,
+      );
+      let ours: { cursor: number; address: string } | undefined;
+      if (adopted) {
+        ours = await this.lowestDocumentAtEpoch(
+          { address: adopted.address },
+          forkEpoch,
+          chain,
+        );
+      }
+      const own = local.commitPoint;
+      if (
+        own &&
+        own.epoch === forkEpoch.toString() &&
+        (!ours || own.cursor < ours.cursor)
+      ) {
+        ours = { cursor: own.cursor, address: "" };
+      }
+      if (theirs && ours) {
+        return (
+          theirs.cursor < ours.cursor ||
+          (theirs.cursor === ours.cursor && theirs.address > ours.address)
+        );
+      }
+    }
+    return (
+      !adopted ||
+      !address ||
+      entry.cursor > adopted.cursor ||
+      (entry.cursor === adopted.cursor && address > adopted.address)
+    );
+  }
+
+  /**
+   * The lowest-cursor document at `epoch` on the chain starting at `start`
+   * (the document itself when given, else fetched by address), walking `prev`
+   * until the chain drops below that epoch. Unreadable chains yield nothing.
+   */
+  private async lowestDocumentAtEpoch(
+    start: { doc?: GroupDocument; address: string },
+    epoch: bigint,
+    chain: DocumentChainAccess,
+  ): Promise<{ cursor: number; address: string } | undefined> {
+    let best: { cursor: number; address: string } | undefined;
+    let doc = start.doc;
+    let address: string | undefined = start.address;
+    for (let hop = 0; hop < 1000 && address; hop++) {
+      if (!doc) {
+        let pulled;
+        try {
+          pulled = await pullDocument({
+            address,
+            mediaStore: chain.mediaStore,
+            addressToUrl: chain.addressToUrl,
+            privateKeyHex: this.privateKey,
+            ownerPubkey: this.stablePubkey,
+          });
+        } catch {
+          return best;
+        }
+        if (pulled.type !== "group") break;
+        doc = pulled;
+      }
+      const decoded = clientStateDecoder(decodeBase64(doc.clientState), 0);
+      if (!decoded) break;
+      const docEpoch = decoded[0].groupContext.epoch;
+      if (docEpoch < epoch) break;
+      if (docEpoch === epoch && (!best || doc.cursor < best.cursor)) {
+        best = { cursor: doc.cursor, address };
+      }
+      address = doc.prev;
+      doc = undefined;
+    }
+    return best;
   }
 
   /**

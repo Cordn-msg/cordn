@@ -129,6 +129,19 @@ export interface GroupSessionState {
    */
   skippedSiblingCommit?: { epoch: string; cursor: number };
   /**
+   * The state right after this device's own Commit produced the current epoch,
+   * at that Commit's stream cursor — the epoch's commit point (spec §8.5 gen-0
+   * state). Published ahead of the live document, once, when the live state
+   * has moved past it, so siblings can open what arrived in between and the
+   * §10 fallback can rank branches by where their Commits landed.
+   */
+  commitPoint?: {
+    epoch: string;
+    cursor: number;
+    clientState: string;
+    published?: boolean;
+  };
+  /**
    * The fork decision recorded for the current epoch (spec §10): the winning
    * branch's fingerprint and what decided it. A decision from evidence is not
    * overturned by the document-rank fallback alone.

@@ -1983,8 +1983,10 @@ describe("multi-device synchronization", () => {
       expect(transcript(alice.getGroup("g").state)).toBe(bobBranch);
       expect(transcript(device2.getGroup(d2alias).state)).not.toBe(bobBranch);
 
-      // device2 syncs after the race (its cursor moves past both Commits);
-      // alice does not. Each publishes its own branch.
+      // device2 syncs after the race (its cursor moves past both Commits and
+      // a message of Bob's it cannot open); alice does not. Each publishes
+      // its own branch.
+      await bob.sendMessage("g", "anyone?");
       await device2.syncGroup(d2alias);
       const pubA = await publishGroupDocument({
         session: alice,
@@ -2030,6 +2032,65 @@ describe("multi-device synchronization", () => {
       await bob.sendMessage("g", "still with you?");
       const atAlice = await alice.syncGroup("g");
       expect(atAlice.map((m) => m.content)).toContain("still with you?");
+
+      // Devices with no evidence (fresh, seeded from either branch) rank the
+      // branches by where their Commits landed, read off the chains: device2
+      // synced past its Commit before publishing, so its chain carries a
+      // commit-point document at the Commit's cursor under the live one;
+      // alice's live document is her commit point. The lower Commit cursor
+      // wins — alice's — although the live-document rank (higher cursor)
+      // favours device2's.
+      const chainB: GroupDocument[] = [];
+      for (let next: string | undefined = pubB.address; next; ) {
+        const doc: GroupDocument = await pullGroupDoc(
+          alice,
+          next,
+          mediaStore,
+          addressToUrl,
+        );
+        chainB.push(doc);
+        next = doc.prev;
+      }
+      const commitPointB = chainB[1];
+      expect(commitPointB?.prev).toBe(pub0.address);
+      expect(commitPointB!.cursor).toBeLessThan(docB.cursor);
+      expect(commitPointB!.cursor).toBeGreaterThan(docA.cursor);
+
+      for (const [seedAddress, thenAddress, thenOutcome] of [
+        [pubB.address, pubA.address, "fork-resolved"],
+        [pubA.address, pubB.address, "skipped"],
+      ] as const) {
+        const device = new CliSession({
+          privateKey: alice.privateKey,
+          serverPubkey,
+          relayHandler: relayHub.createRelayHandler(),
+          mediaStore,
+        });
+        sessions.push(device);
+        const seedDoc = await pullGroupDoc(
+          device,
+          seedAddress,
+          mediaStore,
+          addressToUrl,
+        );
+        expect(await reconcileGroupDocument(device, seedDoc, seedAddress)).toBe(
+          "seeded",
+        );
+        const thenDoc = await pullGroupDoc(
+          device,
+          thenAddress,
+          mediaStore,
+          addressToUrl,
+        );
+        expect(
+          await reconcileGroupDocument(device, thenDoc, thenAddress, {
+            mediaStore,
+            addressToUrl,
+          }),
+        ).toBe(thenOutcome);
+        const state = device.getGroup(device.listGroups()[0]!.alias).state;
+        expect(transcript(state)).toBe(bobBranch);
+      }
     } finally {
       await server.transport.close();
     }

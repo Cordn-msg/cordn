@@ -320,28 +320,72 @@ export async function publishGroupDocument(params: {
   if (!group) {
     throw new MultiDeviceError(`No local group for gid ${gid}`);
   }
-  const prev =
+  let prev =
     params.prev ??
     lastPublishedGroupTip.get(groupChainKey(session.stablePubkey, gid));
-  const doc = buildGroupDocument(
-    {
-      gid,
-      state: group.state,
-      coordinatorKey: group.coordinatorKey,
-      coordinatorRelays: session.coordinatorRelayConfig?.(group.coordinatorKey),
-      fetchCursor: group.fetchCursor,
-    },
-    prev,
+  const coordinatorRelays = session.coordinatorRelayConfig?.(
+    group.coordinatorKey,
   );
-  const sealed = sealDocument(doc, session.privateKey, session.stablePubkey);
-  const blob = Buffer.from(sealed, "utf8");
-  const url = await params.mediaStore.publish(blob);
-  const address = documentAddress(sealed);
+  const seal = async (doc: GroupDocument): Promise<PublishResult> => {
+    const sealed = sealDocument(doc, session.privateKey, session.stablePubkey);
+    const url = await params.mediaStore.publish(Buffer.from(sealed, "utf8"));
+    return { address: documentAddress(sealed), url };
+  };
+
+  // The epoch's commit point (spec §8.5 gen-0 state, §10 fallback rank): the
+  // state right after this device's own Commit, at the Commit's cursor. When
+  // the live state has moved past it, it goes into the chain first so a
+  // sibling's catch-up can open what arrived in between and the branch's
+  // Commit cursor is on record; when it has not, the live document is the
+  // commit point and carries the Commit's cursor itself.
+  const commitPoint = group.commitPoint;
+  const atCommitPoint =
+    commitPoint !== undefined &&
+    commitPoint.epoch === group.state.groupContext.epoch.toString();
+  let cursor = group.fetchCursor;
+  if (atCommitPoint) {
+    if (!commitPoint.published && group.fetchCursor > commitPoint.cursor) {
+      const decoded = clientStateDecoder(
+        decodeBase64(commitPoint.clientState),
+        0,
+      );
+      if (decoded) {
+        const point = await seal(
+          buildGroupDocument(
+            {
+              gid,
+              state: decoded[0],
+              coordinatorKey: group.coordinatorKey,
+              coordinatorRelays,
+              fetchCursor: commitPoint.cursor,
+            },
+            prev,
+          ),
+        );
+        prev = point.address;
+      }
+    }
+    commitPoint.published = true;
+    cursor = Math.max(group.fetchCursor, commitPoint.cursor);
+  }
+
+  const { address, url } = await seal(
+    buildGroupDocument(
+      {
+        gid,
+        state: group.state,
+        coordinatorKey: group.coordinatorKey,
+        coordinatorRelays,
+        fetchCursor: cursor,
+      },
+      prev,
+    ),
+  );
   lastPublishedGroupTip.set(groupChainKey(session.stablePubkey, gid), address);
   // The published document is now this state's identity (spec §10 fork rule).
   group.appliedDocument = {
     address,
-    cursor: group.fetchCursor,
+    cursor,
     fingerprint: epochFingerprint(group.state),
   };
   return { address, url };
