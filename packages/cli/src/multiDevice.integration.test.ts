@@ -2003,6 +2003,138 @@ describe("multi-device synchronization", () => {
   );
 
   /**
+   * The fork rule (§10) fires only at EQUAL epochs. A dead branch that keeps
+   * committing — a repair self-update (§10.1), another metadata change —
+   * overtakes the live branch by epoch number, and the plain §8 forward-only
+   * rule then fast-forwards the live device onto it: no fingerprint is
+   * compared because the epochs differ. Same setup as above (alice's Commit
+   * first, Bob on her branch), but device2 commits again before either device
+   * sees the other's document, so its document is at epoch +2 and alice's
+   * state at +1 "advances" onto the branch Bob dropped.
+   *
+   * What we want: a document whose chain does not pass through the local
+   * state's fingerprint at the local epoch is a fork, whatever its epoch, and
+   * goes through the §10 procedure (here: alice's Commit was sequenced first,
+   * so she keeps her state). Flips once the fork check compares fingerprints
+   * at the common epoch (via the `prev` chain) rather than only at equal
+   * current epochs.
+   */
+  test.fails(
+    "a dead branch that commits again does not fast-forward the live device onto it",
+    async () => {
+      const relayHub = new MockRelayHub();
+      const serverSigner = new PrivateKeySigner();
+      const serverPubkey = await serverSigner.getPublicKey();
+      const mediaStore = new FileMediaStore(
+        await mkdtemp(join(tmpdir(), "cordn-md-fork-overtake-")),
+      );
+      const addressToUrl = (address: string) => `media://${address}`;
+      const server = await connectServer({
+        signer: serverSigner,
+        relayHandler: relayHub.createRelayHandler(),
+      });
+
+      try {
+        const alice = new CliSession({
+          serverPubkey,
+          relayHandler: relayHub.createRelayHandler(),
+          mediaStore,
+        });
+        const bob = new CliSession({
+          serverPubkey,
+          relayHandler: relayHub.createRelayHandler(),
+          mediaStore,
+        });
+        sessions.push(alice, bob);
+        await alice.generateKeyPackage("kp", { localOnly: true });
+        await bob.generateKeyPackage("bob-kp");
+        await alice.createGroup("g", {
+          keyPackageAlias: "kp",
+          metadata: { name: "Demo" },
+        });
+        const invitation = await alice.addMember("g", bob.stablePubkey);
+        await alice.syncGroup("g");
+        await bob.fetchWelcomes();
+        await bob.acceptWelcome(invitation.keyPackageReference, "g");
+        const gid = alice.deriveGroupId(alice.getGroup("g").state);
+        const pub0 = await publishGroupDocument({
+          session: alice,
+          mediaStore,
+          gid,
+        });
+
+        const device2 = new CliSession({
+          privateKey: alice.privateKey,
+          serverPubkey,
+          relayHandler: relayHub.createRelayHandler(),
+          mediaStore,
+        });
+        sessions.push(device2);
+        const doc0 = await pullGroupDoc(
+          device2,
+          pub0.address,
+          mediaStore,
+          addressToUrl,
+        );
+        expect(await reconcileGroupDocument(device2, doc0, pub0.address)).toBe(
+          "seeded",
+        );
+        const d2alias = device2.listGroups()[0]!.alias;
+        const baseEpoch = alice.getGroup("g").state.groupContext.epoch;
+
+        // The race: alice first, device2 second. Bob follows alice.
+        await alice.updateGroupMetadata("g", { name: "FromAlice" });
+        await device2.updateGroupMetadata(d2alias, { name: "FromDevice2" });
+        await bob.syncGroup("g");
+        const transcript = (state: {
+          groupContext: { confirmedTranscriptHash: Uint8Array };
+        }) =>
+          Buffer.from(state.groupContext.confirmedTranscriptHash).toString(
+            "hex",
+          );
+        const bobBranch = transcript(bob.getGroup("g").state);
+        expect(transcript(alice.getGroup("g").state)).toBe(bobBranch);
+        expect(transcript(device2.getGroup(d2alias).state)).not.toBe(bobBranch);
+
+        // The dead branch moves on: device2 commits again before seeing any
+        // document from alice. Its epoch number is now ahead of the live one.
+        await device2.syncGroup(d2alias);
+        await device2.updateGroupMetadata(d2alias, {
+          name: "FromDevice2 again",
+        });
+        expect(device2.getGroup(d2alias).state.groupContext.epoch).toBe(
+          baseEpoch + 2n,
+        );
+        const pubB = await publishGroupDocument({
+          session: device2,
+          mediaStore,
+          gid,
+          prev: pub0.address,
+        });
+        const docB = await pullGroupDoc(
+          alice,
+          pubB.address,
+          mediaStore,
+          addressToUrl,
+        );
+
+        // alice (live, epoch +1) meets the dead branch's epoch +2 document.
+        // Today: plain §8 fast-forward — the fork check never runs because the
+        // epochs are not equal — and the whole identity leaves Bob's group.
+        await reconcileGroupDocument(alice, docB, pubB.address);
+
+        // What we want: alice keeps the branch the group follows.
+        expect(transcript(alice.getGroup("g").state)).toBe(bobBranch);
+        await bob.sendMessage("g", "still with you?");
+        const atAlice = await alice.syncGroup("g");
+        expect(atAlice.map((m) => m.content)).toContain("still with you?");
+      } finally {
+        await server.transport.close();
+      }
+    },
+  );
+
+  /**
    * A document with an undecodable `clientState` is advisory garbage: it must
    * be skipped with ZERO state change even when its rank would win — no
    * adoption, no cursor movement, and the adopted-document identity must not
