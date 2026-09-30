@@ -187,6 +187,12 @@ export async function ingestGroupMessages(params: {
             myLeafIndex >= 0 &&
             senderCapture.leafIndex === myLeafIndex
           ) {
+            // Remembered for the fork rule (spec §10 step 1): a Commit this
+            // device posts from this same epoch afterwards lost the race.
+            group.skippedSiblingCommit = {
+              epoch: group.state.groupContext.epoch.toString(),
+              cursor: message.cursor,
+            };
             continue;
           }
           group.status = "removed";

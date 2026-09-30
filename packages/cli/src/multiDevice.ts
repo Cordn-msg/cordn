@@ -109,6 +109,29 @@ export type MultiDeviceDocument = GroupDocument | MetaDocument;
 // Session view (narrow shape CliSession satisfies structurally)
 // ---------------------------------------------------------------------------
 
+/**
+ * Spec §10 detection: the epoch fingerprint of a state — `epoch`, `treeHash`
+ * and `confirmedTranscriptHash` of the GroupContext (RFC 9420 §5.1), hex. Two
+ * states with the same fingerprint are the same state; two at the same epoch
+ * with different fingerprints are two Commits from one base epoch. A
+ * re-publish of one state changes its content address, never its fingerprint.
+ */
+export function epochFingerprint(state: ClientState): string {
+  const context = state.groupContext;
+  const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+  return `${context.epoch.toString()}:${hex(context.treeHash)}:${hex(context.confirmedTranscriptHash)}`;
+}
+
+/**
+ * How to read a document's `prev` chain (spec §8.5) while reconciling it: lets
+ * a newer-epoch document be checked for descent from the local state (spec §8)
+ * instead of being trusted on its epoch number alone.
+ */
+export interface DocumentChainAccess {
+  mediaStore: MediaStore;
+  addressToUrl: (address: string) => string;
+}
+
 export type ApplyDocumentOutcome =
   | "seeded"
   | "fast-forwarded"
@@ -134,6 +157,7 @@ export interface MultiDeviceSessionView {
   applyDocumentEntry(
     doc: GroupDocument,
     address?: string,
+    chain?: DocumentChainAccess,
   ): Promise<ApplyDocumentOutcome>;
   /**
    * Spec §8 removal: drop a local group whose epoch is ≤ the tombstone epoch;
@@ -315,7 +339,11 @@ export async function publishGroupDocument(params: {
   const address = documentAddress(sealed);
   lastPublishedGroupTip.set(groupChainKey(session.stablePubkey, gid), address);
   // The published document is now this state's identity (spec §10 fork rule).
-  group.appliedDocument = { address, cursor: group.fetchCursor };
+  group.appliedDocument = {
+    address,
+    cursor: group.fetchCursor,
+    fingerprint: epochFingerprint(group.state),
+  };
   return { address, url };
 }
 
@@ -372,8 +400,9 @@ export async function reconcileGroupDocument(
   session: MultiDeviceSessionView,
   doc: GroupDocument,
   address?: string,
+  chain?: DocumentChainAccess,
 ): Promise<ApplyDocumentOutcome> {
-  return session.applyDocumentEntry(doc, address);
+  return session.applyDocumentEntry(doc, address, chain);
 }
 
 /**
