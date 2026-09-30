@@ -109,7 +109,11 @@ export type MultiDeviceDocument = GroupDocument | MetaDocument;
 // Session view (narrow shape CliSession satisfies structurally)
 // ---------------------------------------------------------------------------
 
-export type ApplyDocumentOutcome = "seeded" | "fast-forwarded" | "skipped";
+export type ApplyDocumentOutcome =
+  | "seeded"
+  | "fast-forwarded"
+  | "fork-resolved"
+  | "skipped";
 
 export interface MultiDeviceSessionView {
   readonly stablePubkey: string;
@@ -118,12 +122,19 @@ export interface MultiDeviceSessionView {
   deriveGroupId(state: ClientState): string;
   /**
    * Seed a missing group, fast-forward a present group to a strictly newer
-   * epoch, or skip (advisory). The newer-epoch check is the rollback defense
-   * (spec §8). A sibling device's Commit cannot be ingested via the stream
-   * (shared leaf's UpdatePath invalidates this device's keys), so the new
-   * private keys must travel in the document (spec §10).
+   * epoch, apply the §10 equal-epoch fork winner, or skip (advisory). The
+   * newer-epoch check is the rollback defense (spec §8); the fork rule is the
+   * single exception and only moves up the document-rank order (spec §10). A
+   * sibling device's Commit cannot be ingested via the stream (shared leaf's
+   * UpdatePath invalidates this device's keys), so the new private keys must
+   * travel in the document (spec §10). `address` is the fetched document's
+   * content address: it enables fork detection/tie-break and is recorded as
+   * the adopted document identity.
    */
-  applyDocumentEntry(doc: GroupDocument): Promise<ApplyDocumentOutcome>;
+  applyDocumentEntry(
+    doc: GroupDocument,
+    address?: string,
+  ): Promise<ApplyDocumentOutcome>;
   /**
    * Spec §8 removal: drop a local group whose epoch is ≤ the tombstone epoch;
    * ignore a stale tombstone (local epoch higher) or one for an unknown group.
@@ -303,6 +314,8 @@ export async function publishGroupDocument(params: {
   const url = await params.mediaStore.publish(blob);
   const address = documentAddress(sealed);
   lastPublishedGroupTip.set(groupChainKey(session.stablePubkey, gid), address);
+  // The published document is now this state's identity (spec §10 fork rule).
+  group.appliedDocument = { address, cursor: group.fetchCursor };
   return { address, url };
 }
 
@@ -358,8 +371,9 @@ export async function pullDocument(params: {
 export async function reconcileGroupDocument(
   session: MultiDeviceSessionView,
   doc: GroupDocument,
+  address?: string,
 ): Promise<ApplyDocumentOutcome> {
-  return session.applyDocumentEntry(doc);
+  return session.applyDocumentEntry(doc, address);
 }
 
 /**

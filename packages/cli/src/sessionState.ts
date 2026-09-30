@@ -97,6 +97,13 @@ export interface GroupSessionState {
   removedAtCursor?: number;
   lastCursor: number;
   fetchCursor: number;
+  /**
+   * Identity of the group document this state was adopted from — or that was
+   * published from it (spec §10 equal-epoch fork rule): the document's content
+   * address and publish cursor. Set on seed/fast-forward/fork-resolve and on
+   * publish; it is what the fork tie-break ranks against.
+   */
+  appliedDocument?: { address: string; cursor: number };
   messages: StoredMessage[];
   syncIssues: SyncIssue[];
 }

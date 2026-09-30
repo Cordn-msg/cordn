@@ -1326,23 +1326,28 @@ export class CliSession {
   }
 
   /**
-   * Multi-device reconciliation per entry (spec §8). Seeds a missing group,
-   * fast-forwards a present group to a strictly newer epoch, or skips. The
-   * newer-epoch check is the rollback defense: a replayed or stale tip can
-   * never downgrade an existing group. Fast-forward is required because a
-   * sibling device's Commit cannot be ingested via the delivery stream (the
-   * shared leaf's UpdatePath invalidates this device's keys); only the
-   * serialized ClientState carries the new private keys (spec §10).
+   * Multi-device reconciliation per entry (spec §8/§10). Seeds a missing
+   * group, fast-forwards a present group to a strictly newer epoch, applies
+   * the equal-epoch fork winner, or skips. The newer-epoch check is the
+   * rollback defense: a replayed or stale tip can never downgrade an existing
+   * group. Fast-forward is required because a sibling device's Commit cannot
+   * be ingested via the delivery stream (the shared leaf's UpdatePath
+   * invalidates this device's keys); only the serialized ClientState carries
+   * the new private keys (spec §10).
    */
   async applyDocumentEntry(
     entry: GroupDocument,
-  ): Promise<"seeded" | "fast-forwarded" | "skipped"> {
+    address?: string,
+  ): Promise<"seeded" | "fast-forwarded" | "fork-resolved" | "skipped"> {
     const local = this.listGroups().find(
       (group) => this.deriveGroupId(group.state) === entry.gid,
     );
 
     if (!local) {
-      await this.seedGroupFromEntry(entry);
+      const seeded = await this.seedGroupFromEntry(entry);
+      if (address) {
+        seeded.appliedDocument = { address, cursor: entry.cursor };
+      }
       return "seeded";
     }
 
@@ -1351,27 +1356,51 @@ export class CliSession {
       return "skipped";
     }
     const docEpoch = decoded[0].groupContext.epoch;
-    if (docEpoch <= local.state.groupContext.epoch) {
-      // Not newer: advisory only. Never downgrade local state from the doc.
+    const localEpoch = local.state.groupContext.epoch;
+    let outcome: "fast-forwarded" | "fork-resolved";
+    if (docEpoch < localEpoch) {
+      // Older: advisory only. Never downgrade local state from the doc.
       return "skipped";
+    } else if (docEpoch === localEpoch) {
+      // Equal-epoch fork rule (spec §10): two devices committed from the same
+      // base epoch, so neither state contains the other. Rank = document
+      // cursor, then content address; adopting the winner is the single
+      // forward-only exception and only ever moves up the rank order, so a
+      // replayed stale document loses the tie-break to the adopted one.
+      const adopted = local.appliedDocument;
+      if (!address || !adopted || adopted.address === address) {
+        return "skipped";
+      }
+      const wins =
+        entry.cursor > adopted.cursor ||
+        (entry.cursor === adopted.cursor && address > adopted.address);
+      if (!wins) {
+        return "skipped";
+      }
+      outcome = "fork-resolved";
+    } else {
+      outcome = "fast-forwarded";
     }
 
     local.state = decoded[0];
     local.metadata = getCordnGroupMetadataExtension(decoded[0]);
     local.fetchCursor = Math.max(local.fetchCursor, entry.cursor);
     local.lastCursor = Math.max(local.lastCursor, entry.cursor);
+    if (address) {
+      local.appliedDocument = { address, cursor: entry.cursor };
+    }
 
-    // A newer-epoch document means a sibling device's Commit won the epoch.
-    // Any pending Commit I staged against the old epoch is now stale (the
-    // group moved on); discard it. The intended change is lost and the
-    // caller may retry. Spec §10 (concurrent sibling Commits).
+    // A winning document means a sibling device's Commit won the epoch (or the
+    // fork tie-break did). Any pending Commit I staged against the old epoch
+    // is now stale (the group moved on); discard it. The intended change is
+    // lost and the caller may retry. Spec §10 (concurrent sibling Commits).
     this.store.pendingOperations.delete(local.alias);
     // Spec §9 relay-hint adoption applies to fast-forwarding too.
     this.coordinatorRegistry.adoptCoordinatorRelayHints(
       entry.coordinator,
       entry.coordinatorRelays,
     );
-    return "fast-forwarded";
+    return outcome;
   }
 
   /**
