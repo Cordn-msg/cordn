@@ -1725,4 +1725,214 @@ describe("multi-device synchronization", () => {
       await server.transport.close();
     }
   });
+
+  /**
+   * Spec §10 rank order: the document cursor dominates the content address.
+   * The rank inputs are forced to DISAGREE — the cursor winner holds the
+   * lexicographically SMALLER address — so an implementation that compared
+   * the address first would converge on the wrong branch and fail here.
+   */
+  test("the equal-epoch fork tie-break ranks document cursor above content address", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-rank-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      await alice.createGroup("g", {
+        keyPackageAlias: "kp",
+        metadata: { name: "Demo" },
+      });
+      const gid = alice.deriveGroupId(alice.getGroup("g").state);
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
+
+      const device2 = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(device2);
+      const doc0 = await pullGroupDoc(
+        device2,
+        pub0.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(await reconcileGroupDocument(device2, doc0, pub0.address)).toBe(
+        "seeded",
+      );
+      const d2alias = device2.listGroups()[0]!.alias;
+
+      // Fork at epoch +1.
+      await alice.updateGroupMetadata("g", { name: "FromAlice" });
+      await device2.updateGroupMetadata(d2alias, { name: "FromDevice2" });
+
+      // Force the rank inputs to disagree: alice's document cursor strictly
+      // greater, its address strictly smaller. Re-sealing flips the address
+      // (fresh nonce per seal) until the orders oppose each other.
+      alice.getGroup("g").fetchCursor = 10;
+      device2.getGroup(d2alias).fetchCursor = 1;
+      const pubA = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+        prev: pub0.address,
+      });
+      let pubB = await publishGroupDocument({
+        session: device2,
+        mediaStore,
+        gid,
+        prev: pub0.address,
+      });
+      for (
+        let attempt = 0;
+        attempt < 50 && pubB.address <= pubA.address;
+        attempt += 1
+      ) {
+        pubB = await publishGroupDocument({
+          session: device2,
+          mediaStore,
+          gid,
+          prev: pub0.address,
+        });
+      }
+      expect(pubB.address > pubA.address).toBe(true); // address favors B…
+
+      const docA = await pullGroupDoc(
+        device2,
+        pubA.address,
+        mediaStore,
+        addressToUrl,
+      );
+      const docB = await pullGroupDoc(
+        alice,
+        pubB.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(docA.cursor).toBeGreaterThan(docB.cursor); // …but cursor favors A
+
+      // Cursor dominates: B's holder adopts A despite B's greater address,
+      // and A's holder ignores B despite B's greater address.
+      expect(await reconcileGroupDocument(alice, docB, pubB.address)).toBe(
+        "skipped",
+      );
+      expect(await reconcileGroupDocument(device2, docA, pubA.address)).toBe(
+        "fork-resolved",
+      );
+      expect(
+        getCordnGroupMetadataExtension(alice.getGroup("g").state)?.name,
+      ).toBe("FromAlice");
+      expect(
+        encode(clientStateEncoder, device2.getGroup(d2alias).state),
+      ).toEqual(encode(clientStateEncoder, alice.getGroup("g").state));
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  /**
+   * A document with an undecodable `clientState` is advisory garbage: it must
+   * be skipped with ZERO state change even when its rank would win — no
+   * adoption, no cursor movement, and the adopted-document identity must not
+   * be clobbered.
+   */
+  test("a document with an undecodable clientState is skipped with zero state change", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-garbage-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      await alice.createGroup("g", {
+        keyPackageAlias: "kp",
+        metadata: { name: "Demo" },
+      });
+      const gid = alice.deriveGroupId(alice.getGroup("g").state);
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
+
+      const device2 = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(device2);
+      const doc0 = await pullGroupDoc(
+        device2,
+        pub0.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(await reconcileGroupDocument(device2, doc0, pub0.address)).toBe(
+        "seeded",
+      );
+      const d2alias = device2.listGroups()[0]!.alias;
+      const group = device2.getGroup(d2alias);
+      const before = {
+        state: encode(clientStateEncoder, group.state),
+        fetchCursor: group.fetchCursor,
+        applied: group.appliedDocument,
+      };
+
+      // Garbage bytes, but a rank that WOULD win (cursor 99, top address): a
+      // rank-first implementation would adopt it and fail every assertion.
+      const garbage = {
+        schemaVersion: MULTI_DEVICE_SCHEMA_VERSION,
+        type: "group",
+        gid,
+        coordinator: group.coordinatorKey,
+        issuedAt: Date.now(),
+        prev: pub0.address,
+        clientState: Buffer.from([0xde, 0xad, 0xbe, 0xef]).toString("base64"),
+        cursor: 99,
+      } satisfies GroupDocument;
+      expect(
+        await reconcileGroupDocument(device2, garbage, "z".repeat(64)),
+      ).toBe("skipped");
+
+      expect(encode(clientStateEncoder, group.state)).toEqual(before.state);
+      expect(group.fetchCursor).toBe(before.fetchCursor);
+      expect(group.appliedDocument).toEqual(before.applied);
+    } finally {
+      await server.transport.close();
+    }
+  });
 });
