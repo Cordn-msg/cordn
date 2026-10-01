@@ -142,7 +142,7 @@ export interface GroupSessionState {
     published?: boolean;
   };
   /**
-   * The fork decision recorded for the current epoch (spec §10): the winning
+   * The fork decision recorded for the fork epoch (spec §10): the winning
    * branch's fingerprint and what decided it. A decision from evidence is not
    * overturned by the document-rank fallback alone.
    */
