@@ -2313,4 +2313,200 @@ describe("multi-device synchronization", () => {
       await server.transport.close();
     }
   });
+  test("a republish of one state is not a fork (spec §10 fingerprint identity)", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-repub-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      await alice.createGroup("g", {
+        keyPackageAlias: "kp",
+        metadata: { name: "Demo" },
+      });
+      const gid = alice.deriveGroupId(alice.getGroup("g").state);
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
+
+      const device2 = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(device2);
+      const doc0 = await pullGroupDoc(
+        device2,
+        pub0.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(await reconcileGroupDocument(device2, doc0, pub0.address)).toBe(
+        "seeded",
+      );
+      const d2alias = device2.listGroups()[0]!.alias;
+
+      // Same state re-sealed: fresh nonce ⇒ new content address, identical
+      // fingerprint. The higher cursor would make the address-based rule call
+      // this a fork and adopt it.
+      alice.getGroup("g").fetchCursor = 5;
+      const pub1 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+        prev: pub0.address,
+      });
+      expect(pub1.address).not.toBe(pub0.address);
+      const doc1 = await pullGroupDoc(
+        device2,
+        pub1.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(await reconcileGroupDocument(device2, doc1, pub1.address)).toBe(
+        "skipped",
+      );
+      // Zero state change — and no fork decision was made.
+      expect(device2.getGroup(d2alias).fetchCursor).toBe(0);
+      expect(device2.getGroup(d2alias).forkDecision).toBeUndefined();
+    } finally {
+      await server.transport.close();
+    }
+  });
+
+  /**
+   * Spec §10: a recorded fork decision stands against the rank fallback alone.
+   * The replayed loser outranks the re-published record — without the record
+   * the replay would flip the device back onto the dead branch.
+   */
+  test("a recorded fork decision stands against a replayed loser (spec §10)", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-stick-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      await alice.createGroup("g", {
+        keyPackageAlias: "kp",
+        metadata: { name: "Demo" },
+      });
+      const gid = alice.deriveGroupId(alice.getGroup("g").state);
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
+
+      const device2 = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(device2);
+      const doc0 = await pullGroupDoc(
+        device2,
+        pub0.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(await reconcileGroupDocument(device2, doc0, pub0.address)).toBe(
+        "seeded",
+      );
+      const d2alias = device2.listGroups()[0]!.alias;
+
+      // Fork at epoch +1 with deterministic rank inputs: alice's document
+      // cursor strictly greater, so alice's branch is the winner.
+      await alice.updateGroupMetadata("g", { name: "FromAlice" });
+      await device2.updateGroupMetadata(d2alias, { name: "FromDevice2" });
+      alice.getGroup("g").fetchCursor = 10;
+      device2.getGroup(d2alias).fetchCursor = 7;
+      const pubA = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+        prev: pub0.address,
+      });
+      const pubB = await publishGroupDocument({
+        session: device2,
+        mediaStore,
+        gid,
+        prev: pub0.address,
+      });
+      const docA = await pullGroupDoc(
+        device2,
+        pubA.address,
+        mediaStore,
+        addressToUrl,
+      );
+      const docB = await pullGroupDoc(
+        alice,
+        pubB.address,
+        mediaStore,
+        addressToUrl,
+      );
+
+      // Resolve: cursor 10 beats 7 — both converge on FromAlice, and both
+      // record the decision (winning and losing side alike).
+      expect(await reconcileGroupDocument(alice, docB, pubB.address)).toBe(
+        "skipped",
+      );
+      expect(await reconcileGroupDocument(device2, docA, pubA.address)).toBe(
+        "fork-resolved",
+      );
+      expect(
+        getCordnGroupMetadataExtension(device2.getGroup(d2alias).state)?.name,
+      ).toBe("FromAlice");
+
+      // Re-publish the winning state with a LOW rank (cursor 0, fresh address):
+      // the replayed loser (cursor 7) now outranks the record. The recorded
+      // decision must hold — rank alone must not flip the branch.
+      alice.getGroup("g").fetchCursor = 0;
+      await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+        prev: pubA.address,
+      });
+      expect(await reconcileGroupDocument(alice, docB, pubB.address)).toBe(
+        "skipped",
+      );
+      expect(
+        getCordnGroupMetadataExtension(alice.getGroup("g").state)?.name,
+      ).toBe("FromAlice");
+    } finally {
+      await server.transport.close();
+    }
+  });
 });
