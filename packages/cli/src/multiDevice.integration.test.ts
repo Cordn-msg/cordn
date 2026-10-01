@@ -675,9 +675,15 @@ describe("multi-device synchronization", () => {
         mediaStore,
         addressToUrl,
       );
-      expect(await reconcileGroupDocument(device2, doc3)).toBe(
-        "fast-forwarded",
-      );
+      // Chain access makes this the §8 descent check's `descends` path too:
+      // pub3's chain passes through device2's held base-epoch state, so the
+      // advance is proven (not merely assumed by the forward-only rule).
+      expect(
+        await reconcileGroupDocument(device2, doc3, undefined, {
+          mediaStore,
+          addressToUrl,
+        }),
+      ).toBe("fast-forwarded");
       const d2 = device2.getGroup(d2alias);
       expect(d2.state.groupContext.epoch).toBe(baseEpoch + 3n);
       expect(getCordnGroupMetadataExtension(d2.state)?.name).toBe("E3");
@@ -1654,15 +1660,6 @@ describe("multi-device synchronization", () => {
         addressToUrl,
       );
       expect(pubA.address).not.toBe(pubB.address);
-      // The document rank (spec §10 step 3) is only the fallback; it is what
-      // a device with no evidence computes.
-      const aWins =
-        docA.cursor > docB.cursor ||
-        (docA.cursor === docB.cursor && pubA.address > pubB.address);
-      const device2Branch = encode(
-        clientStateEncoder,
-        device2.getGroup(d2alias).state,
-      );
 
       // Cross-application. Both racing devices hold coordinator-order
       // evidence (spec §10 step 1): alice's Commit reached the coordinator
@@ -1693,15 +1690,16 @@ describe("multi-device synchronization", () => {
       );
 
       // Order independence: fresh devices hold no evidence and the group has
-      // no third-party traffic, so they fall back to the document rank (spec
-      // §10 step 3) — and converge with each other on its winner no matter
-      // which document they apply first.
-      const rankWinner = aWins
-        ? encode(clientStateEncoder, aliceState)
-        : device2Branch;
+      // no third-party traffic, so the verdict is empty and they fall back to
+      // the rank (spec §10 step 3) — WITH chain access, so the rank is the
+      // commit-point tier: alice's Commit was sequenced first, so the lower
+      // commit cursor names her branch — the same branch the step-1 marks
+      // chose (the floor agrees with the stream, §10.3). A flipped direction
+      // (or a missing commit-point document) converges on the wrong branch.
+      const rankWinner = encode(clientStateEncoder, aliceState);
       for (const [seedAddress, thenAddress, thenOutcome] of [
-        [pubA.address, pubB.address, aWins ? "skipped" : "fork-resolved"],
-        [pubB.address, pubA.address, aWins ? "fork-resolved" : "skipped"],
+        [pubA.address, pubB.address, "skipped"],
+        [pubB.address, pubA.address, "fork-resolved"],
       ] as const) {
         const device = new CliSession({
           privateKey: alice.privateKey,
@@ -1716,18 +1714,30 @@ describe("multi-device synchronization", () => {
           mediaStore,
           addressToUrl,
         );
-        expect(await reconcileGroupDocument(device, seedDoc, seedAddress)).toBe(
-          "seeded",
-        );
+        // Chain access is passed so the rank walks the `prev` chains: this
+        // group has no third party, so the verdict fetch is empty and these
+        // fresh devices decide through the COMMIT-POINT tier (spec §10 step 3
+        // primary) — alice's commit-point document must actually be published
+        // and walked for her lower Commit cursor to win, and a flipped
+        // direction converges on the wrong branch.
+        expect(
+          await reconcileGroupDocument(device, seedDoc, seedAddress, {
+            mediaStore,
+            addressToUrl,
+          }),
+        ).toBe("seeded");
         const thenDoc = await pullGroupDoc(
           device,
           thenAddress,
           mediaStore,
           addressToUrl,
         );
-        expect(await reconcileGroupDocument(device, thenDoc, thenAddress)).toBe(
-          thenOutcome,
-        );
+        expect(
+          await reconcileGroupDocument(device, thenDoc, thenAddress, {
+            mediaStore,
+            addressToUrl,
+          }),
+        ).toBe(thenOutcome);
         const state = device.getGroup(device.listGroups()[0]!.alias).state;
         expect(encode(clientStateEncoder, state)).toEqual(rankWinner);
       }
