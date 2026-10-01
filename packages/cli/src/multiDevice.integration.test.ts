@@ -2509,4 +2509,135 @@ describe("multi-device synchronization", () => {
       await server.transport.close();
     }
   });
+
+  test("the third-party verdict names the branch the group follows (spec §10 step 2)", async () => {
+    const relayHub = new MockRelayHub();
+    const serverSigner = new PrivateKeySigner();
+    const serverPubkey = await serverSigner.getPublicKey();
+    const mediaStore = new FileMediaStore(
+      await mkdtemp(join(tmpdir(), "cordn-md-verdict-")),
+    );
+    const addressToUrl = (address: string) => `media://${address}`;
+    const server = await connectServer({
+      signer: serverSigner,
+      relayHandler: relayHub.createRelayHandler(),
+    });
+
+    try {
+      const alice = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      const bob = new CliSession({
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(alice, bob);
+      await alice.generateKeyPackage("kp", { localOnly: true });
+      await bob.generateKeyPackage("bob-kp");
+      await alice.createGroup("g", {
+        keyPackageAlias: "kp",
+        metadata: { name: "Demo" },
+      });
+      const invitation = await alice.addMember("g", bob.stablePubkey);
+      await alice.syncGroup("g");
+      await bob.fetchWelcomes();
+      await bob.acceptWelcome(invitation.keyPackageReference, "g");
+      const gid = alice.deriveGroupId(alice.getGroup("g").state);
+      const pub0 = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+      });
+
+      const device2 = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(device2);
+      const doc0 = await pullGroupDoc(
+        device2,
+        pub0.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(await reconcileGroupDocument(device2, doc0, pub0.address)).toBe(
+        "seeded",
+      );
+      const d2alias = device2.listGroups()[0]!.alias;
+
+      // The race: alice's Commit first, device2's second. Bob follows
+      // delivery order and lands on alice's branch.
+      await alice.updateGroupMetadata("g", { name: "FromAlice" });
+      await device2.updateGroupMetadata(d2alias, { name: "FromDevice2" });
+      await bob.syncGroup("g");
+      const transcript = (state: {
+        groupContext: { confirmedTranscriptHash: Uint8Array };
+      }) =>
+        Buffer.from(state.groupContext.confirmedTranscriptHash).toString("hex");
+      const bobBranch = transcript(bob.getGroup("g").state);
+      expect(bobBranch).toBe(transcript(alice.getGroup("g").state));
+
+      // Each racer publishes its branch; then Bob talks — sealed under the
+      // branch he follows, so only that branch's state can open it.
+      const pubA = await publishGroupDocument({
+        session: alice,
+        mediaStore,
+        gid,
+        prev: pub0.address,
+      });
+      const pubB = await publishGroupDocument({
+        session: device2,
+        mediaStore,
+        gid,
+        prev: pub0.address,
+      });
+      await bob.sendMessage("g", "listen?");
+
+      // A device with no evidence of the race — it never posted a Commit —
+      // seeds from the losing branch and must be moved by the verdict alone.
+      const fresh = new CliSession({
+        privateKey: alice.privateKey,
+        serverPubkey,
+        relayHandler: relayHub.createRelayHandler(),
+        mediaStore,
+      });
+      sessions.push(fresh);
+      const seedDoc = await pullGroupDoc(
+        fresh,
+        pubB.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(await reconcileGroupDocument(fresh, seedDoc, pubB.address)).toBe(
+        "seeded",
+      );
+      const docA = await pullGroupDoc(
+        fresh,
+        pubA.address,
+        mediaStore,
+        addressToUrl,
+      );
+      expect(
+        await reconcileGroupDocument(fresh, docA, pubA.address, {
+          mediaStore,
+          addressToUrl,
+        }),
+      ).toBe("fork-resolved");
+      const freshAlias = fresh.listGroups()[0]!.alias;
+      const freshGroup = fresh.getGroup(freshAlias);
+      expect(transcript(freshGroup.state)).toBe(bobBranch);
+      expect(freshGroup.forkDecision?.by).toBe("third-party");
+
+      // Bob is reachable from the adopted branch.
+      const atFresh = await fresh.syncGroup(freshAlias);
+      expect(atFresh.map((m) => m.content)).toContain("listen?");
+    } finally {
+      await server.transport.close();
+    }
+  });
 });
