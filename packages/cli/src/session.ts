@@ -2032,7 +2032,7 @@ export class CliSession {
     address: string | undefined,
     chain: DocumentChainAccess | undefined,
   ): Promise<"adopt" | "keep"> {
-    const localEpoch = local.state.groupContext.epoch.toString();
+    const forkEpoch = (forkBase + 1n).toString();
     let adopt: boolean | undefined;
     let by: NonNullable<GroupSessionState["forkDecision"]>["by"] = "rank";
     if (local.branch) {
@@ -2048,7 +2048,7 @@ export class CliSession {
     }
     if (adopt === undefined) {
       const decided = local.forkDecision;
-      if (decided && decided.epoch === localEpoch) {
+      if (decided && decided.epoch === forkEpoch) {
         // A recorded decision is not overturned by the rank alone.
         adopt = decided.fingerprint === epochFingerprint(theirs);
         by = decided.by;
@@ -2065,7 +2065,7 @@ export class CliSession {
     const winner = adopt
       ? epochFingerprint(theirs)
       : epochFingerprint(local.state);
-    local.forkDecision = { epoch: localEpoch, fingerprint: winner, by };
+    local.forkDecision = { epoch: forkEpoch, fingerprint: winner, by };
     local.syncIssues.push({
       cursor: local.fetchCursor,
       createdAt: Date.now(),
