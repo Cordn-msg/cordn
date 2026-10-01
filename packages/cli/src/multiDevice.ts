@@ -109,7 +109,34 @@ export type MultiDeviceDocument = GroupDocument | MetaDocument;
 // Session view (narrow shape CliSession satisfies structurally)
 // ---------------------------------------------------------------------------
 
-export type ApplyDocumentOutcome = "seeded" | "fast-forwarded" | "skipped";
+/**
+ * Spec §10 detection: the epoch fingerprint of a state — `epoch`, `treeHash`
+ * and `confirmedTranscriptHash` of the GroupContext (RFC 9420 §5.1), hex. Two
+ * states with the same fingerprint are the same state; two at the same epoch
+ * with different fingerprints are two Commits from one base epoch. A
+ * re-publish of one state changes its content address, never its fingerprint.
+ */
+export function epochFingerprint(state: ClientState): string {
+  const context = state.groupContext;
+  const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+  return `${context.epoch.toString()}:${hex(context.treeHash)}:${hex(context.confirmedTranscriptHash)}`;
+}
+
+/**
+ * How to read a document's `prev` chain (spec §8.5) while reconciling it: lets
+ * a newer-epoch document be checked for descent from the local state (spec §8)
+ * instead of being trusted on its epoch number alone.
+ */
+export interface DocumentChainAccess {
+  mediaStore: MediaStore;
+  addressToUrl: (address: string) => string;
+}
+
+export type ApplyDocumentOutcome =
+  | "seeded"
+  | "fast-forwarded"
+  | "fork-resolved"
+  | "skipped";
 
 export interface MultiDeviceSessionView {
   readonly stablePubkey: string;
@@ -118,12 +145,20 @@ export interface MultiDeviceSessionView {
   deriveGroupId(state: ClientState): string;
   /**
    * Seed a missing group, fast-forward a present group to a strictly newer
-   * epoch, or skip (advisory). The newer-epoch check is the rollback defense
-   * (spec §8). A sibling device's Commit cannot be ingested via the stream
-   * (shared leaf's UpdatePath invalidates this device's keys), so the new
-   * private keys must travel in the document (spec §10).
+   * epoch, apply the §10 equal-epoch fork winner, or skip (advisory). The
+   * newer-epoch check is the rollback defense (spec §8); the fork rule is the
+   * single exception and only moves up the document-rank order (spec §10). A
+   * sibling device's Commit cannot be ingested via the stream (shared leaf's
+   * UpdatePath invalidates this device's keys), so the new private keys must
+   * travel in the document (spec §10). `address` is the fetched document's
+   * content address: it enables fork detection/tie-break and is recorded as
+   * the adopted document identity.
    */
-  applyDocumentEntry(doc: GroupDocument): Promise<ApplyDocumentOutcome>;
+  applyDocumentEntry(
+    doc: GroupDocument,
+    address?: string,
+    chain?: DocumentChainAccess,
+  ): Promise<ApplyDocumentOutcome>;
   /**
    * Spec §8 removal: drop a local group whose epoch is ≤ the tombstone epoch;
    * ignore a stale tombstone (local epoch higher) or one for an unknown group.
@@ -285,24 +320,74 @@ export async function publishGroupDocument(params: {
   if (!group) {
     throw new MultiDeviceError(`No local group for gid ${gid}`);
   }
-  const prev =
+  let prev =
     params.prev ??
     lastPublishedGroupTip.get(groupChainKey(session.stablePubkey, gid));
-  const doc = buildGroupDocument(
-    {
-      gid,
-      state: group.state,
-      coordinatorKey: group.coordinatorKey,
-      coordinatorRelays: session.coordinatorRelayConfig?.(group.coordinatorKey),
-      fetchCursor: group.fetchCursor,
-    },
-    prev,
+  const coordinatorRelays = session.coordinatorRelayConfig?.(
+    group.coordinatorKey,
   );
-  const sealed = sealDocument(doc, session.privateKey, session.stablePubkey);
-  const blob = Buffer.from(sealed, "utf8");
-  const url = await params.mediaStore.publish(blob);
-  const address = documentAddress(sealed);
+  const seal = async (doc: GroupDocument): Promise<PublishResult> => {
+    const sealed = sealDocument(doc, session.privateKey, session.stablePubkey);
+    const url = await params.mediaStore.publish(Buffer.from(sealed, "utf8"));
+    return { address: documentAddress(sealed), url };
+  };
+
+  // The epoch's commit point (spec §8.5 gen-0 state, §10 fallback rank): the
+  // state right after this device's own Commit, at the Commit's cursor. When
+  // the live state has moved past it, it goes into the chain first so a
+  // sibling's catch-up can open what arrived in between and the branch's
+  // Commit cursor is on record; when it has not, the live document is the
+  // commit point and carries the Commit's cursor itself.
+  const commitPoint = group.commitPoint;
+  const atCommitPoint =
+    commitPoint !== undefined &&
+    commitPoint.epoch === group.state.groupContext.epoch.toString();
+  let cursor = group.fetchCursor;
+  if (atCommitPoint) {
+    if (!commitPoint.published && group.fetchCursor > commitPoint.cursor) {
+      const decoded = clientStateDecoder(
+        decodeBase64(commitPoint.clientState),
+        0,
+      );
+      if (decoded) {
+        const point = await seal(
+          buildGroupDocument(
+            {
+              gid,
+              state: decoded[0],
+              coordinatorKey: group.coordinatorKey,
+              coordinatorRelays,
+              fetchCursor: commitPoint.cursor,
+            },
+            prev,
+          ),
+        );
+        prev = point.address;
+      }
+    }
+    commitPoint.published = true;
+    cursor = Math.max(group.fetchCursor, commitPoint.cursor);
+  }
+
+  const { address, url } = await seal(
+    buildGroupDocument(
+      {
+        gid,
+        state: group.state,
+        coordinatorKey: group.coordinatorKey,
+        coordinatorRelays,
+        fetchCursor: cursor,
+      },
+      prev,
+    ),
+  );
   lastPublishedGroupTip.set(groupChainKey(session.stablePubkey, gid), address);
+  // The published document is now this state's identity (spec §10 fork rule).
+  group.appliedDocument = {
+    address,
+    cursor,
+    fingerprint: epochFingerprint(group.state),
+  };
   return { address, url };
 }
 
@@ -358,8 +443,10 @@ export async function pullDocument(params: {
 export async function reconcileGroupDocument(
   session: MultiDeviceSessionView,
   doc: GroupDocument,
+  address?: string,
+  chain?: DocumentChainAccess,
 ): Promise<ApplyDocumentOutcome> {
-  return session.applyDocumentEntry(doc);
+  return session.applyDocumentEntry(doc, address, chain);
 }
 
 /**
