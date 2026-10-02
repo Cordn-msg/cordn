@@ -4,7 +4,7 @@ import {
   decodeCordnCoordinatorRouting,
   encodeCordnCoordinatorRouting,
   type CordnCoordinatorRouting,
-} from "./coordinatorRouting.ts";
+} from "./groupMetadata.ts";
 
 const A = { pubkey: "11".repeat(32), relayUrls: ["wss://a.example"] };
 const B = { pubkey: "22".repeat(32), relayUrls: [] };
@@ -94,7 +94,7 @@ describe("cordn coordinator routing codec", () => {
     );
     expect(() =>
       decodeCordnCoordinatorRouting(encoded.slice(0, encoded.length - 1)),
-    ).toThrow(/end of cordn coordinator routing/);
+    ).toThrow(/Unexpected end/);
   });
 
   test("tolerates trailing fields of future versions (append-only)", () => {

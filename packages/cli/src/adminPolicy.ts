@@ -4,27 +4,15 @@ import {
   type IncomingMessageCallback,
 } from "ts-mls";
 
-import { normalizePubkey, type CordnGroupMetadata } from "./groupMetadata.ts";
+import { isGroupAdmin, type CordnGroupMetadata } from "@cordn/core";
 import { UnauthorizedGroupAdminActionError } from "./sessionErrors.ts";
 import { listGroupMembers } from "./utils/mlsGroupLifecycle.ts";
 
-export function getGroupAdminPubkeys(metadata?: CordnGroupMetadata): string[] {
-  return (metadata?.adminPubkeys ?? []).map(normalizePubkey);
-}
-
-export function isEgalitarianGroup(metadata?: CordnGroupMetadata): boolean {
-  return getGroupAdminPubkeys(metadata).length === 0;
-}
-
-export function isGroupAdmin(params: {
-  metadata?: CordnGroupMetadata;
-  stablePubkey: string;
-}): boolean {
-  const stablePubkey = normalizePubkey(params.stablePubkey);
-  const admins = getGroupAdminPubkeys(params.metadata);
-
-  return admins.length === 0 || admins.includes(stablePubkey);
-}
+export {
+  getGroupAdminPubkeys,
+  isEgalitarianGroup,
+  isGroupAdmin,
+} from "@cordn/core";
 
 export function assertCanAdministerGroup(params: {
   groupAlias: string;
