@@ -18,6 +18,10 @@ import { enqueueInboundMessages } from "./inbox.ts";
 import { welcomeIdentifier } from "./sessionStore.ts";
 import { DEFAULT_COORDINATOR_PUBKEY, DEFAULT_RELAY_URLS } from "./defaults.ts";
 import { readCliDoc } from "./docs.ts";
+import {
+  TRANSPORT_ENCRYPTION_MODES,
+  type TransportEncryption,
+} from "./coordinatorClient.ts";
 
 const { version: cliVersion } = createRequire(import.meta.url)(
   "../package.json",
@@ -40,6 +44,21 @@ function readDefaultRelayUrls(): string[] | undefined {
     .filter((value) => value.length > 0);
 
   return relayUrls.length > 0 ? relayUrls : undefined;
+}
+
+function readTransportEncryption(
+  flag: string | undefined,
+): TransportEncryption | undefined {
+  const value = (
+    flag ?? readOptionalStringEnv("CORDN_TRANSPORT_ENCRYPTION")
+  )?.toLowerCase();
+  if (value === undefined) return undefined;
+  if (!(TRANSPORT_ENCRYPTION_MODES as readonly string[]).includes(value)) {
+    program.error(
+      `--transport-encryption/CORDN_TRANSPORT_ENCRYPTION must be one of: ${TRANSPORT_ENCRYPTION_MODES.join(", ")}`,
+    );
+  }
+  return value as TransportEncryption;
 }
 
 function readDefaultCoordinatorPubkey(): string | undefined {
@@ -67,6 +86,10 @@ program
     "--relay <url>",
     `relay URL to use; repeatable (defaults: ${DEFAULT_RELAY_URLS.join(", ")})`,
     (value, current?: string[]) => [...(current ?? []), value],
+  )
+  .option(
+    "--transport-encryption <mode>",
+    `coordinator request transport: ${TRANSPORT_ENCRYPTION_MODES.join(" | ")}; "required" gift-wraps requests (env CORDN_TRANSPORT_ENCRYPTION; default: disabled)`,
   )
   .option(
     "--media-dir <path>",
@@ -140,6 +163,7 @@ const options = program.opts<{
   privateKeyFile?: string;
   serverPubkey?: string;
   relay?: string[];
+  transportEncryption?: string;
   mediaDir?: string;
   stateFile?: string;
   stateKeyFile?: string;
@@ -193,6 +217,10 @@ if (
   program.error("state/key .json files cannot be inside queue directories");
 }
 
+const transportEncryption = readTransportEncryption(
+  options.transportEncryption,
+);
+
 const filePrivateKey = options.privateKeyFile
   ? (await readFile(options.privateKeyFile, "utf8")).trim()
   : undefined;
@@ -213,6 +241,7 @@ try {
     mediaStore: options.mediaDir
       ? new FileMediaStore(options.mediaDir)
       : undefined,
+    transportEncryption,
   });
 } catch (error) {
   if (

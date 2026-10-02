@@ -1,6 +1,6 @@
 {
   "name": "@cordn/cli",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Persistent MLS client for Cordn: interactive commands, encrypted state, and durable agent inbox/outbox queues.",
   "type": "module",
   "license": "MIT",
@@ -66,7 +66,7 @@
   },
   "dependencies": {
     "@contextvm/mcp-sdk": "^1.30",
-    "@contextvm/sdk": "^0.14.1",
+    "@contextvm/sdk": "^0.14.2",
     "@cordn/core": "workspace:*",
     "@noble/ciphers": "^2.2.0",
     "commander": "^14.0.3",

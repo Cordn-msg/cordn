@@ -33,8 +33,8 @@ importers:
         specifier: ^1.30
         version: 1.30.0(zod@4.6.5)
       '@contextvm/sdk':
-        specifier: ^0.14.1
-        version: 0.14.1(typescript@5.9.3)
+        specifier: ^0.14.2
+        version: 0.14.2(typescript@5.9.3)
       '@cordn/core':
         specifier: workspace:*
         version: link:../core
@@ -116,8 +116,8 @@ importers:
         specifier: ^1.30
         version: 1.30.0(zod@4.6.5)
       '@contextvm/sdk':
-        specifier: ^0.14.1
-        version: 0.14.1(typescript@5.9.3)
+        specifier: ^0.14.2
+        version: 0.14.2(typescript@5.9.3)
       '@cordn/coordinator':
         specifier: workspace:*
         version: link:../coordinator
@@ -153,8 +153,8 @@ importers:
   packages/test-utils:
     dependencies:
       '@contextvm/sdk':
-        specifier: ^0.14.1
-        version: 0.14.1(typescript@5.9.3)
+        specifier: ^0.14.2
+        version: 0.14.2(typescript@5.9.3)
       '@cordn/core':
         specifier: workspace:*
         version: link:../core
@@ -256,8 +256,8 @@ packages:
     peerDependencies:
       zod: ^3.25 || ^4.0
 
-  '@contextvm/sdk@0.14.1':
-    resolution: {integrity: sha512-MiOBCWI6+vZs8u1Wra4JVrm8SNpbGPPQbNrj4Tr+8CzWwXNCq5VluAXHfV+ikN6XyhYqgpC6Iyo7l85MDLAZjQ==}
+  '@contextvm/sdk@0.14.2':
+    resolution: {integrity: sha512-ZxXDW3mIcaxHGmamObui6ZlZvR309hjywel3qBFxLxh9LEu3MvN8zknPxB0Nkx9WDTIXxS+CFwAN7bQz3d/Snw==}
     engines: {bun: '>=1.2.0'}
 
   '@emnapi/core@1.10.0':
@@ -1889,7 +1889,7 @@ snapshots:
       zod: 4.6.5
       zod-to-json-schema: 3.25.2(zod@4.6.5)
 
-  '@contextvm/sdk@0.14.1(typescript@5.9.3)':
+  '@contextvm/sdk@0.14.2(typescript@5.9.3)':
     dependencies:
       '@contextvm/mcp-sdk': 1.30.0(zod@4.6.5)
       '@noble/hashes': 2.4.0

@@ -28,6 +28,10 @@ export type {
   CoordinatorLocator,
   CordnCoordinatorRouting,
 } from "./coordinatorRouting.ts";
+export {
+  TRANSPORT_ENCRYPTION_MODES,
+  type TransportEncryption,
+} from "./coordinatorClient.ts";
 export type { CordnGroupMetadata } from "./groupMetadata.ts";
 export { FileMediaStore, type MediaStore } from "./mediaStore.ts";
 export {
