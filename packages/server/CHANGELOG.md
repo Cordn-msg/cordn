@@ -1,5 +1,13 @@
 # @cordn/server
 
+## 0.5.9
+
+### Patch Changes
+
+- Updated dependencies [f1b1e9e]
+  - @cordn/core@0.6.0
+  - @cordn/coordinator@0.5.6
+
 ## 0.5.8
 
 ### Patch Changes

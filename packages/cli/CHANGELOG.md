@@ -1,5 +1,83 @@
 # @cordn/cli
 
+## 0.9.0
+
+### Minor Changes
+
+- f1b1e9e: feat(cli): coordinator handoff reference client (spec/applications/coordinator-handoff.md)
+
+  Preferred coordinator + fallback roster as group metadata (declared at birth
+  or by admin metadata edits), roster-gated switching with planned and failover
+  semantics, prevention-first failover, counted history with per-stream cursors
+  and soft gaps, prev-linked envelopes with send-window siblings, and the
+  §4.4/§14 void of routing updates that move `active` outside the declared
+  fallbacks — enforced at every metadata adoption and surfaced as a sync
+  issue. REPL: switch-coordinator, discover-coordinator, resend.
+
+- 5130632: feat(cli): fork resolution by evidence, descent check for newer-epoch documents (spec §8/§10)
+  - Fork detection compares epoch fingerprints (`epoch`, `treeHash`,
+    `confirmedTranscriptHash`), not content addresses: a re-publish of the
+    same state is advisory, never a fork.
+  - Resolution follows the §10 procedure: coordinator order first (each
+    Commit records, right after posting, whether a competing Commit from the
+    shared leaf preceded it — `branch` live/dead), then a third-party verdict
+    (messages past the cursor tried under both branches; one from another
+    leaf that opens under exactly one branch decides), then the rank as the
+    fallback — by where each branch's Commit landed, read off the `prev`
+    chains (lowest document cursor at the fork epoch, lower wins), with the
+    live-document rank only where a side has no document there or the chains
+    cannot be read. Decisions are recorded per epoch and not overturned by
+    the rank alone; every fork is surfaced as a sync issue.
+  - `publishGroupDocument` chains the epoch's commit-point document (the
+    state right after this device's own Commit, at the Commit's cursor) under
+    the live one whenever the live state has moved past it, once per epoch —
+    spec §8.5 gen-0 state for a sibling's catch-up, and the branch's Commit
+    cursor for the rank.
+  - A newer-epoch document is checked for descent when its `prev` chain can
+    be read (`reconcileGroupDocument(..., chain)`): a chain that meets a state
+    this device held at an earlier epoch, but not its current one, is a fork
+    that has moved on and goes through the same procedure instead of a plain
+    fast-forward.
+
+- 5181208: feat(cli): fetch-liveness contract and document identity tracking (spec §8/§10)
+
+  A failed document fetch was not contractually distinguishable from a
+  completed reconcile, so a caller could record a `gid` as reconciled after a
+  failed pull and never retry it.
+  - `applyDocumentEntry` / `reconcileGroupDocument` accept the document's
+    content `address` and report the `"fork-resolved"` outcome; a failed fetch
+    leaves local state untouched and a retry of the same address converges
+    (spec §8 fetch liveness — a failed pull is never a completed reconcile).
+  - `GroupSessionState` records `appliedDocument` (address, publish cursor,
+    state fingerprint) on seed/fast-forward/fork-resolve and on
+    `publishGroupDocument`, so a locally created group is rankable too.
+
+  The fork rule itself (fingerprint detection, evidence-first resolution,
+  commit-point rank, descent check) is described in
+  `multi-device-fork-evidence`.
+
+- dafbecf: feat(cli): multi-device relay hints + last-resort publish markers (spec §4.1/§4.2/§9)
+
+  The group document's `coordinator` named who serves `gid` but not where to
+  reach them, so a device seeding a self-hosted coordinator fell back to
+  session-default relays and the delivery stream never opened.
+  - `GroupDocument` gains the OPTIONAL `coordinatorRelays` hint (locator-only,
+    group-ref §4.3 semantics). `publishGroupDocument` populates it from the
+    session's registered relay configuration for that coordinator.
+  - Seeding and fast-forwarding adopt hints fill-if-empty: a device with no
+    relay configuration of its own for the coordinator records them as its
+    connection relays; locally configured relays or a relay handler always win
+    (spec §9).
+  - `LastResortKeyPackageEntry` gains the OPTIONAL `coordinators` list (spec
+    §4.2): the per-coordinator publish markers recorded at
+    `publishKeyPackage`, carried in the meta document, and restored on a
+    linked device (spec §11.5).
+
+### Patch Changes
+
+- Updated dependencies [f1b1e9e]
+  - @cordn/core@0.6.0
+
 ## 0.8.0
 
 ### Minor Changes
