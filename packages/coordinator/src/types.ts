@@ -15,6 +15,7 @@ export interface PublishedKeyPackageRecord {
 
 export interface WelcomeQueueRecord {
   targetStablePubkey: string;
+  senderStablePubkey?: string;
   keyPackageReference: string;
   welcome: Welcome;
   createdAt: number;
@@ -55,6 +56,7 @@ export interface PublishKeyPackageInput {
 
 export interface StoreWelcomeInput {
   targetStablePubkey: string;
+  senderStablePubkey?: string;
   keyPackageReference: string;
   welcome: Welcome;
   joinAfterCursor?: number;

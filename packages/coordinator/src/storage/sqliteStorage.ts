@@ -44,6 +44,7 @@ interface KeyPackageRow {
 
 interface WelcomeRow {
   target_stable_pubkey: string;
+  sender_stable_pubkey: string | null;
   key_package_reference: string;
   welcome_bytes: Buffer;
   created_at: number;
@@ -101,7 +102,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     KeyPackageRow
   >;
   private readonly storeWelcomeStatement: Database.Statement<
-    [string, string, Buffer, number, number | null]
+    [string, string | null, string, Buffer, number, number | null]
   >;
   private readonly fetchPendingWelcomesStatement: Database.Statement<
     [string],
@@ -219,6 +220,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       CREATE TABLE IF NOT EXISTS welcomes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         target_stable_pubkey TEXT NOT NULL,
+        sender_stable_pubkey TEXT,
         key_package_reference TEXT NOT NULL,
         welcome_bytes BLOB NOT NULL,
         created_at INTEGER NOT NULL
@@ -250,6 +252,11 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
     if (!welcomesColumns.some((col) => col.name === "join_after_cursor")) {
       this.database.exec(
         "ALTER TABLE welcomes ADD COLUMN join_after_cursor INTEGER",
+      );
+    }
+    if (!welcomesColumns.some((col) => col.name === "sender_stable_pubkey")) {
+      this.database.exec(
+        "ALTER TABLE welcomes ADD COLUMN sender_stable_pubkey TEXT",
       );
     }
 
@@ -366,21 +373,22 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
       "DELETE FROM key_packages WHERE id = ?",
     );
     this.storeWelcomeStatement = this.database.prepare<
-      [string, string, Buffer, number, number | null]
+      [string, string | null, string, Buffer, number, number | null]
     >(`
       INSERT INTO welcomes (
         target_stable_pubkey,
+        sender_stable_pubkey,
         key_package_reference,
         welcome_bytes,
         created_at,
         join_after_cursor
-      ) VALUES (?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?)
     `);
     this.fetchPendingWelcomesStatement = this.database.prepare<
       [string],
       WelcomeRow & { id: number }
     >(`
-      SELECT id, target_stable_pubkey, key_package_reference, welcome_bytes, created_at, join_after_cursor
+      SELECT id, target_stable_pubkey, sender_stable_pubkey, key_package_reference, welcome_bytes, created_at, join_after_cursor
       FROM welcomes
       WHERE target_stable_pubkey = ?
       ORDER BY id ASC
@@ -694,6 +702,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   storeWelcome(record: WelcomeQueueRecord): WelcomeQueueRecord {
     this.storeWelcomeStatement.run(
       record.targetStablePubkey,
+      record.senderStablePubkey ?? null,
       record.keyPackageReference,
       Buffer.from(encodeWelcome(record.welcome)),
       record.createdAt,
@@ -877,6 +886,7 @@ export class SqliteCoordinatorStorage implements CoordinatorStorage {
   private mapWelcomeRow(row: WelcomeRow): WelcomeQueueRecord {
     return {
       targetStablePubkey: row.target_stable_pubkey,
+      senderStablePubkey: row.sender_stable_pubkey ?? undefined,
       keyPackageReference: row.key_package_reference,
       welcome: decodeWelcome(toUint8Array(row.welcome_bytes)),
       createdAt: row.created_at,
