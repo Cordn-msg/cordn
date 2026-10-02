@@ -15,7 +15,8 @@ vi.mock("./utils/mlsMessages.ts", () => ({
     new TextDecoder().decode(bytes),
 }));
 
-vi.mock("./groupMetadata.ts", () => ({
+vi.mock("./groupMetadata.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./groupMetadata.ts")>()),
   getCordnGroupMetadataExtension: () => undefined,
 }));
 

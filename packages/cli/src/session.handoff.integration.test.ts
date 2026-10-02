@@ -777,6 +777,45 @@ describe("coordinator handoff (session)", () => {
     ).toBe(true);
   }, 15_000);
 
+  test("the void survives local commits built on the poisoned state (§14)", async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const { session: alice } = harness.makeSession();
+    const { session: bob } = harness.makeSession();
+    const { session: carol } = harness.makeSession();
+    await bootstrapGroup(alice, bob, harness);
+    const rogue = { pubkey: "44".repeat(32), relayUrls: [] };
+
+    // A modified client posts a void routing update: bob voids the change,
+    // but the adopted MLS state still carries the rogue routing in its
+    // group-context extension.
+    await postStaleRoutingCommit({
+      session: alice,
+      relayHub: harness.relayHub,
+      serverPubkey: harness.server1Pubkey,
+      routing: {
+        active: rogue,
+        fallbacks: [
+          { pubkey: harness.server2Pubkey.toLowerCase(), relayUrls: [] },
+        ],
+        boundaryTips: [],
+      },
+    });
+    await bob.syncGroup("demo");
+
+    // A local Commit built on that state re-derives metadata without
+    // rewriting the extension (a membership change). The void must hold:
+    // a re-derivation can never re-install the voided routing.
+    await carol.generateKeyPackage("carol-main");
+    await bob.addMember("demo", carol.stablePubkey);
+    expect(
+      bob.getGroup("demo").metadata?.coordinatorRouting?.active.pubkey,
+    ).toBe(harness.server1Pubkey.toLowerCase());
+    expect(bob.getGroup("demo").coordinatorKey.toLowerCase()).toBe(
+      harness.server1Pubkey.toLowerCase(),
+    );
+  }, 15_000);
+
   test("a metadata edit may move active within the roster — handoff by another name (§4.4)", async () => {
     const harness = await createHarness();
     harnesses.push(harness);

@@ -3,6 +3,7 @@ import { type ClientState } from "ts-mls";
 import { assertCanAdministerGroup } from "./adminPolicy.ts";
 import {
   getCordnGroupMetadataExtension,
+  metadataWithVoidedRouting,
   type CordnGroupMetadata,
 } from "./groupMetadata.ts";
 import {
@@ -1753,7 +1754,22 @@ export class CliSession {
     }
 
     local.state = theirs;
-    local.metadata = getCordnGroupMetadataExtension(theirs);
+    // §4.4/§14: an adopted document can carry a routing change the group
+    // voided (a branch that authored one); the fork procedure adopts the
+    // state, never the voided routing.
+    const routed = metadataWithVoidedRouting(
+      local.metadata,
+      getCordnGroupMetadataExtension(theirs),
+    );
+    local.metadata = routed.metadata;
+    if (routed.voided) {
+      local.syncIssues.push({
+        cursor: local.lastCursor,
+        createdAt: Math.floor(Date.now() / 1000),
+        detail:
+          "Void routing update (coordinator-handoff §4.4): not a declared fallback",
+      });
+    }
     local.fetchCursor = Math.max(local.fetchCursor, entry.cursor);
     local.lastCursor = Math.max(local.lastCursor, entry.cursor);
     const fingerprint = this.noteFingerprint(local);
@@ -2140,7 +2156,13 @@ export class CliSession {
 
   private adoptGroupState(group: GroupSessionState, state: ClientState): void {
     group.state = state;
-    group.metadata = getCordnGroupMetadataExtension(state);
+    // §4.4/§14: a state can carry a routing change the group voided (a rogue
+    // commit, or a branch that authored one); a re-derivation from the group
+    // context must never re-install it.
+    group.metadata = metadataWithVoidedRouting(
+      group.metadata,
+      getCordnGroupMetadataExtension(state),
+    ).metadata;
     this.noteFingerprint(group);
   }
 

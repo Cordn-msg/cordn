@@ -233,6 +233,25 @@ export function getCordnGroupMetadataExtension(
   return decodeCordnGroupMetadata(extension.extensionData as Uint8Array);
 }
 
+export function metadataWithVoidedRouting(
+  previous: CordnGroupMetadata | undefined,
+  incoming: CordnGroupMetadata | undefined,
+): { metadata: CordnGroupMetadata | undefined; voided: boolean } {
+  const old = previous?.coordinatorRouting;
+  const next = incoming?.coordinatorRouting;
+  if (
+    old &&
+    next &&
+    next.active.pubkey !== old.active.pubkey &&
+    !old.fallbacks.some((f) => f.pubkey === next.active.pubkey)
+  ) {
+    // §4.4/§14: `active` may only move within the declared fallbacks; the
+    // routing change is void — the rest of the metadata still applies.
+    return { metadata: { ...incoming, coordinatorRouting: old }, voided: true };
+  }
+  return { metadata: incoming, voided: false };
+}
+
 export function createCordnMetadataCapabilities(): Capabilities {
   const capabilities = defaultCapabilities();
 

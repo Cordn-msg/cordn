@@ -4,7 +4,10 @@ import {
 } from "./adminPolicy.ts";
 import type { ClientState, IncomingMessageCallback } from "ts-mls";
 import type { PendingEpochOperation } from "./pendingEpochOperations.ts";
-import { getCordnGroupMetadataExtension } from "./groupMetadata.ts";
+import {
+  getCordnGroupMetadataExtension,
+  metadataWithVoidedRouting,
+} from "./groupMetadata.ts";
 import { decodeCordnMessageEvent } from "./messageEnvelope.ts";
 import type { GroupSessionState, StoredMessage } from "./sessionState.ts";
 import {
@@ -37,23 +40,16 @@ function adoptRoutedMetadata(
   message: { cursor: number; createdAt: number },
 ): GroupSessionState["syncIssues"][number] | undefined {
   const incoming = getCordnGroupMetadataExtension(state);
-  const previous = group.metadata?.coordinatorRouting;
-  const next = incoming?.coordinatorRouting;
-  if (
-    previous &&
-    next &&
-    next.active.pubkey !== previous.active.pubkey &&
-    !previous.fallbacks.some((f) => f.pubkey === next.active.pubkey)
-  ) {
-    group.metadata = { ...incoming, coordinatorRouting: previous };
-    return {
-      cursor: message.cursor,
-      createdAt: message.createdAt,
-      detail: `Void routing update (coordinator-handoff §4.4): ${next.active.pubkey} is not a declared fallback`,
-    };
+  const routed = metadataWithVoidedRouting(group.metadata, incoming);
+  group.metadata = routed.metadata;
+  if (!routed.voided) {
+    return undefined;
   }
-  group.metadata = incoming;
-  return undefined;
+  return {
+    cursor: message.cursor,
+    createdAt: message.createdAt,
+    detail: `Void routing update (coordinator-handoff §4.4): ${incoming?.coordinatorRouting?.active.pubkey} is not a declared fallback`,
+  };
 }
 
 function isFormerEpochIssue(detail: string): boolean {
