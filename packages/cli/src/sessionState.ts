@@ -97,6 +97,60 @@ export interface GroupSessionState {
   removedAtCursor?: number;
   lastCursor: number;
   fetchCursor: number;
+  /**
+   * Identity of the group document this state was adopted from — or that was
+   * published from it (spec §10): the document's content address and publish
+   * cursor, and the epoch fingerprint of the state it carried. Set on
+   * seed/fast-forward/fork-resolve and on publish; the document-rank fallback
+   * ranks against it.
+   */
+  appliedDocument?: { address: string; cursor: number; fingerprint?: string };
+  /**
+   * Epoch fingerprints (spec §10 detection: `epoch`, `treeHash`,
+   * `confirmedTranscriptHash` of the GroupContext, hex) of the states this
+   * device has held, keyed by epoch. What a document's `prev` chain is compared
+   * against to tell an advance on our branch from a fork that moved on.
+   */
+  epochFingerprints?: Record<string, string>;
+  /**
+   * Which side of a shared-leaf race this device's state is on (spec §10 step
+   * 1, coordinator order), learned right after posting a Commit by replaying
+   * what the coordinator stored before it: `live` — no competing Commit from
+   * the shared leaf preceded ours at the base epoch, so the group applied
+   * ours; `dead` — one did, so the group applied the sibling's and this state
+   * is on a branch nobody else follows until a document of theirs is adopted.
+   * Cleared whenever a document is adopted.
+   */
+  branch?: { kind: "live" | "dead"; sinceEpoch: string };
+  /**
+   * The last Commit from this device's own shared leaf that ingestion skipped
+   * (a sibling's, spec §10), at the epoch it was skipped in. A Commit posted
+   * from that same epoch afterwards lost the race to it.
+   */
+  skippedSiblingCommit?: { epoch: string; cursor: number };
+  /**
+   * The state right after this device's own Commit produced the current epoch,
+   * at that Commit's stream cursor — the epoch's commit point (spec §8.5 gen-0
+   * state). Published ahead of the live document, once, when the live state
+   * has moved past it, so siblings can open what arrived in between and the
+   * §10 fallback can rank branches by where their Commits landed.
+   */
+  commitPoint?: {
+    epoch: string;
+    cursor: number;
+    clientState: string;
+    published?: boolean;
+  };
+  /**
+   * The fork decision recorded for the fork epoch (spec §10): the winning
+   * branch's fingerprint and what decided it. A decision from evidence is not
+   * overturned by the document-rank fallback alone.
+   */
+  forkDecision?: {
+    epoch: string;
+    fingerprint: string;
+    by: "coordinator-order" | "third-party" | "rank";
+  };
   messages: StoredMessage[];
   syncIssues: SyncIssue[];
 }

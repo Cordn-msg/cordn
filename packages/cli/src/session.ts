@@ -85,10 +85,12 @@ import {
 import { decodeKeyPackage, decodePrivateKeyPackage } from "@cordn/core";
 import type {
   ChainStep,
+  DocumentChainAccess,
   GroupDocument,
   LastResortKeyPackageEntry,
   Tombstone,
 } from "./multiDevice.ts";
+import { epochFingerprint, pullDocument } from "./multiDevice.ts";
 import {
   DuplicateGroupAliasError,
   MissingLocalKeyPackageForWelcomeError,
@@ -201,6 +203,14 @@ interface GroupWatchHandle {
   status: GroupWatchStatus;
   lastError?: string;
 }
+
+function cloneClientState(state: ClientState): ClientState {
+  const decoded = clientStateDecoder(encode(clientStateEncoder, state), 0);
+  if (!decoded) throw new Error("ClientState did not round-trip");
+  return decoded[0];
+}
+
+const RETAINED_FINGERPRINTS = 16;
 
 export class CliSession {
   readonly privateKey: string;
@@ -666,7 +676,7 @@ export class CliSession {
       prepared.pendingOperation.joinAfterCursor = posted.cursor;
       prepared.pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
-      this.adoptGroupState(group, prepared.newState);
+      await this.adoptOwnCommit(group, prepared.newState, posted);
       prepared.pendingOperation.localStateApplied = true;
 
       // If this add resolved a pending join request the admin had fetched,
@@ -724,7 +734,7 @@ export class CliSession {
       );
       prepared.pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
-      this.adoptGroupState(group, prepared.newState);
+      await this.adoptOwnCommit(group, prepared.newState, posted);
       prepared.pendingOperation.localStateApplied = true;
       // If add+remove happen before the add self-echo is finalized, never
       // deliver a stale Welcome to the member we just removed.
@@ -776,7 +786,7 @@ export class CliSession {
       );
       pendingOperation.postedMsgBase64 = posted.postedMsgBase64;
 
-      this.adoptGroupState(group, prepared.newState);
+      await this.adoptOwnCommit(group, prepared.newState, posted);
       pendingOperation.localStateApplied = true;
 
       return { metadata: group.metadata ?? metadata };
@@ -1326,23 +1336,30 @@ export class CliSession {
   }
 
   /**
-   * Multi-device reconciliation per entry (spec §8). Seeds a missing group,
-   * fast-forwards a present group to a strictly newer epoch, or skips. The
-   * newer-epoch check is the rollback defense: a replayed or stale tip can
-   * never downgrade an existing group. Fast-forward is required because a
-   * sibling device's Commit cannot be ingested via the delivery stream (the
-   * shared leaf's UpdatePath invalidates this device's keys); only the
-   * serialized ClientState carries the new private keys (spec §10).
+   * Multi-device reconciliation per entry (spec §8/§10). Seeds a missing
+   * group, fast-forwards a present group to a strictly newer epoch, applies
+   * the equal-epoch fork winner, or skips. The newer-epoch check is the
+   * rollback defense: a replayed or stale tip can never downgrade an existing
+   * group. Fast-forward is required because a sibling device's Commit cannot
+   * be ingested via the delivery stream (the shared leaf's UpdatePath
+   * invalidates this device's keys); only the serialized ClientState carries
+   * the new private keys (spec §10).
    */
   async applyDocumentEntry(
     entry: GroupDocument,
-  ): Promise<"seeded" | "fast-forwarded" | "skipped"> {
+    address?: string,
+    chain?: DocumentChainAccess,
+  ): Promise<"seeded" | "fast-forwarded" | "fork-resolved" | "skipped"> {
     const local = this.listGroups().find(
       (group) => this.deriveGroupId(group.state) === entry.gid,
     );
 
     if (!local) {
-      await this.seedGroupFromEntry(entry);
+      const seeded = await this.seedGroupFromEntry(entry);
+      const fingerprint = this.noteFingerprint(seeded);
+      if (address) {
+        seeded.appliedDocument = { address, cursor: entry.cursor, fingerprint };
+      }
       return "seeded";
     }
 
@@ -1350,28 +1367,95 @@ export class CliSession {
     if (!decoded) {
       return "skipped";
     }
-    const docEpoch = decoded[0].groupContext.epoch;
-    if (docEpoch <= local.state.groupContext.epoch) {
-      // Not newer: advisory only. Never downgrade local state from the doc.
+    const theirs = decoded[0];
+    const docEpoch = theirs.groupContext.epoch;
+    const localEpoch = local.state.groupContext.epoch;
+    const localFingerprint = this.noteFingerprint(local);
+    let outcome: "fast-forwarded" | "fork-resolved";
+    if (docEpoch < localEpoch) {
+      // Older: advisory only. Never downgrade local state from the doc.
       return "skipped";
+    } else if (docEpoch === localEpoch) {
+      // Same epoch number: the same state (a re-publish — nothing to adopt),
+      // or two Commits from one base epoch (spec §10). The epoch fingerprint
+      // tells them apart; the content address cannot, since a re-seal changes
+      // it while carrying the same state.
+      if (epochFingerprint(theirs) === localFingerprint) {
+        if (
+          address &&
+          (!local.appliedDocument ||
+            entry.cursor > local.appliedDocument.cursor)
+        ) {
+          local.appliedDocument = {
+            address,
+            cursor: entry.cursor,
+            fingerprint: localFingerprint,
+          };
+        }
+        return "skipped";
+      }
+      const decision = await this.resolveFork(
+        local,
+        theirs,
+        localEpoch - 1n,
+        entry,
+        address,
+        chain,
+      );
+      if (decision === "keep") {
+        return "skipped";
+      }
+      outcome = "fork-resolved";
+    } else {
+      // Newer epoch: an advance on our branch, or a branch that forked from
+      // ours and has since committed on (spec §8 — the forward-only rule
+      // alone would carry this device onto it). The `prev` chain tells,
+      // when it can be read.
+      outcome = "fast-forwarded";
+      if (chain) {
+        const meets = await this.chainMeetsLocal(local, entry, chain);
+        if (meets.kind === "forkedAt") {
+          const decision = await this.resolveFork(
+            local,
+            theirs,
+            meets.epoch,
+            entry,
+            address,
+            chain,
+          );
+          if (decision === "keep") {
+            return "skipped";
+          }
+          outcome = "fork-resolved";
+        }
+      }
     }
 
-    local.state = decoded[0];
-    local.metadata = getCordnGroupMetadataExtension(decoded[0]);
+    local.state = theirs;
+    local.metadata = getCordnGroupMetadataExtension(theirs);
     local.fetchCursor = Math.max(local.fetchCursor, entry.cursor);
     local.lastCursor = Math.max(local.lastCursor, entry.cursor);
+    const fingerprint = this.noteFingerprint(local);
+    if (address) {
+      local.appliedDocument = { address, cursor: entry.cursor, fingerprint };
+    }
+    // The adopted document says where the group is; what this device knew
+    // about its own Commit's race no longer describes its state.
+    local.branch = undefined;
+    local.skippedSiblingCommit = undefined;
+    local.commitPoint = undefined;
 
-    // A newer-epoch document means a sibling device's Commit won the epoch.
-    // Any pending Commit I staged against the old epoch is now stale (the
-    // group moved on); discard it. The intended change is lost and the
-    // caller may retry. Spec §10 (concurrent sibling Commits).
+    // A winning document means a sibling device's Commit won the epoch (or the
+    // fork procedure did). Any pending Commit I staged against the old epoch
+    // is now stale (the group moved on); discard it. The intended change is
+    // lost and the caller may retry. Spec §10 (concurrent sibling Commits).
     this.store.pendingOperations.delete(local.alias);
     // Spec §9 relay-hint adoption applies to fast-forwarding too.
     this.coordinatorRegistry.adoptCoordinatorRelayHints(
       entry.coordinator,
       entry.coordinatorRelays,
     );
-    return "fast-forwarded";
+    return outcome;
   }
 
   /**
@@ -1725,6 +1809,416 @@ export class CliSession {
   private adoptGroupState(group: GroupSessionState, state: ClientState): void {
     group.state = state;
     group.metadata = getCordnGroupMetadataExtension(state);
+    this.noteFingerprint(group);
+  }
+
+  /**
+   * Adopt the state our own Commit produced: gather the race evidence first
+   * (spec §10 step 1, while the pre-Commit state can still read the stream),
+   * then advance, and keep the new state as the epoch's commit point.
+   */
+  private async adoptOwnCommit(
+    group: GroupSessionState,
+    state: ClientState,
+    posted: { cursor: number; postedMsgBase64: string },
+  ): Promise<void> {
+    await this.recordCommitRace(group, posted);
+    this.adoptGroupState(group, state);
+    group.commitPoint = {
+      epoch: state.groupContext.epoch.toString(),
+      cursor: posted.cursor,
+      clientState: encodeBase64(encode(clientStateEncoder, state)),
+    };
+  }
+
+  /** Remember the fingerprint of the state the group holds now (spec §10). */
+  private noteFingerprint(group: GroupSessionState): string {
+    const fingerprint = epochFingerprint(group.state);
+    const retained = { ...(group.epochFingerprints ?? {}) };
+    retained[group.state.groupContext.epoch.toString()] = fingerprint;
+    const epochs = Object.keys(retained)
+      .map((epoch) => BigInt(epoch))
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const epoch of epochs.slice(
+      0,
+      Math.max(0, epochs.length - RETAINED_FINGERPRINTS),
+    )) {
+      delete retained[epoch.toString()];
+    }
+    group.epochFingerprints = retained;
+    return fingerprint;
+  }
+
+  /**
+   * Spec §10 step 1 (coordinator order), gathered while it still can be: right
+   * after posting a Commit and before adopting its state, replay what the
+   * coordinator stored before our post against the pre-Commit state. A Commit
+   * from our own shared leaf in there — a sibling's, which the replay skips as
+   * the stream cannot apply it — or anything that moves the epoch means the
+   * group applied that Commit first and ours is on a dead branch. Nothing
+   * before ours means the group applied ours. Once the state advances the
+   * competing Commit is sealed under a key this device no longer holds, so
+   * the question cannot be asked later; a fetch failure leaves it open.
+   */
+  private async recordCommitRace(
+    group: GroupSessionState,
+    posted: { cursor: number; postedMsgBase64: string },
+  ): Promise<void> {
+    const baseEpoch = group.state.groupContext.epoch;
+    this.noteFingerprint(group);
+    let lost: boolean | undefined;
+    if (group.skippedSiblingCommit?.epoch === baseEpoch.toString()) {
+      lost = true;
+    } else {
+      try {
+        const result = await this.fetchRawGroupMessages(
+          this.deriveGroupId(group.state),
+          group.fetchCursor,
+        );
+        const earlier = result.messages.filter(
+          (message) =>
+            message.cursor < posted.cursor &&
+            message.msg_64 !== posted.postedMsgBase64,
+        );
+        if (earlier.length === 0) {
+          lost = false;
+        } else {
+          const probe = this.probeGroup(group, group.state);
+          await this.ingestOnProbe(probe, earlier);
+          lost =
+            probe.state.groupContext.epoch !== baseEpoch ||
+            probe.skippedSiblingCommit !== undefined;
+        }
+      } catch {
+        lost = undefined;
+      }
+    }
+    if (lost === undefined) return;
+    const sinceEpoch = (baseEpoch + 1n).toString();
+    if (lost) {
+      group.branch = { kind: "dead", sinceEpoch };
+    } else if (group.branch?.kind !== "dead") {
+      // A win on a branch the group does not follow changes nothing.
+      group.branch = { kind: "live", sinceEpoch };
+    }
+  }
+
+  /** A throwaway copy of the group holding `state`, for replays without side effects. */
+  private probeGroup(
+    group: GroupSessionState,
+    state: ClientState,
+  ): GroupSessionState {
+    const cloned = cloneClientState(state);
+    return {
+      ...group,
+      state: cloned,
+      metadata: getCordnGroupMetadataExtension(cloned) ?? group.metadata,
+      messages: [...group.messages],
+      syncIssues: [],
+      skippedSiblingCommit: undefined,
+    };
+  }
+
+  /** Unseal and ingest `messages` on a probe; pending operations are not consulted. */
+  private async ingestOnProbe(
+    probe: GroupSessionState,
+    messages: FetchGroupMessagesOutput["messages"],
+  ): Promise<StoredMessage[]> {
+    const received: StoredMessage[] = [];
+    for (const message of messages) {
+      let opaqueMessageBase64: string;
+      try {
+        const { serializedMlsMessage } = await decryptGroupPayload({
+          state: probe.state,
+          encryptedBase64: message.msg_64,
+        });
+        opaqueMessageBase64 = encodeBase64(serializedMlsMessage);
+      } catch {
+        continue;
+      }
+      try {
+        const sync = await ingestGroupMessages({
+          group: probe,
+          messages: [
+            {
+              cursor: message.cursor,
+              createdAt: message.at,
+              opaqueMessageBase64,
+            },
+          ],
+          getPendingEpochOperation: () => undefined,
+          localStablePubkey: this.stablePubkey,
+        });
+        received.push(...sync.received);
+      } catch {
+        continue;
+      }
+    }
+    return received;
+  }
+
+  /**
+   * Spec §10 step 2 (third-party verdict): which branch do the other members
+   * follow? Fetch past the local cursor and run each message under both
+   * branches; the first message from a third party — an application message
+   * from another leaf, or a Commit that applies — that opens under exactly one
+   * branch names it. A Commit or a message from our own shared leaf carries no
+   * signal. `true` = theirs, `false` = ours, `undefined` = nothing to judge.
+   */
+  private async thirdPartyVerdict(
+    local: GroupSessionState,
+    theirs: ClientState,
+  ): Promise<boolean | undefined> {
+    let messages: FetchGroupMessagesOutput["messages"];
+    try {
+      messages = (
+        await this.fetchRawGroupMessages(
+          this.deriveGroupId(local.state),
+          local.fetchCursor,
+        )
+      ).messages;
+    } catch {
+      return undefined;
+    }
+    const ours = this.probeGroup(local, local.state);
+    const other = this.probeGroup(local, theirs);
+    const signalOn = async (
+      probe: GroupSessionState,
+      message: FetchGroupMessagesOutput["messages"][number],
+    ): Promise<"opens" | "closed" | "signal"> => {
+      try {
+        await decryptGroupPayload({
+          state: probe.state,
+          encryptedBase64: message.msg_64,
+        });
+      } catch {
+        return "closed";
+      }
+      const before = probe.state.groupContext.epoch;
+      const received = await this.ingestOnProbe(probe, [message]);
+      const thirdParty =
+        received.some((m) => m.sender !== this.stablePubkey) ||
+        probe.state.groupContext.epoch !== before;
+      return thirdParty ? "signal" : "opens";
+    };
+    for (const message of [...messages].sort((a, b) => a.cursor - b.cursor)) {
+      if (
+        local.messages.some(
+          (stored) =>
+            stored.direction === "outbound" && stored.cursor === message.cursor,
+        )
+      ) {
+        continue;
+      }
+      const onOurs = await signalOn(ours, message);
+      const onTheirs = await signalOn(other, message);
+      if (onTheirs === "signal" && onOurs === "closed") return true;
+      if (onOurs === "signal" && onTheirs === "closed") return false;
+    }
+    return undefined;
+  }
+
+  /**
+   * Spec §10 resolution for a fork between the local state and `theirs`
+   * (two Commits from `forkBase`): coordinator-order evidence, then the
+   * third-party verdict, then the document rank. Records the decision and
+   * surfaces the fork as a sync issue either way.
+   */
+  private async resolveFork(
+    local: GroupSessionState,
+    theirs: ClientState,
+    forkBase: bigint,
+    entry: GroupDocument,
+    address: string | undefined,
+    chain: DocumentChainAccess | undefined,
+  ): Promise<"adopt" | "keep"> {
+    const forkEpoch = (forkBase + 1n).toString();
+    let adopt: boolean | undefined;
+    let by: NonNullable<GroupSessionState["forkDecision"]>["by"] = "rank";
+    if (local.branch) {
+      adopt = local.branch.kind === "dead";
+      by = "coordinator-order";
+    }
+    if (adopt === undefined) {
+      const verdict = await this.thirdPartyVerdict(local, theirs);
+      if (verdict !== undefined) {
+        adopt = verdict;
+        by = "third-party";
+      }
+    }
+    if (adopt === undefined) {
+      const decided = local.forkDecision;
+      if (decided && decided.epoch === forkEpoch) {
+        // A recorded decision is not overturned by the rank alone.
+        adopt = decided.fingerprint === epochFingerprint(theirs);
+        by = decided.by;
+      } else {
+        adopt = await this.rankBranches(
+          local,
+          forkBase + 1n,
+          entry,
+          address,
+          chain,
+        );
+      }
+    }
+    const winner = adopt
+      ? epochFingerprint(theirs)
+      : epochFingerprint(local.state);
+    local.forkDecision = { epoch: forkEpoch, fingerprint: winner, by };
+    local.syncIssues.push({
+      cursor: local.fetchCursor,
+      createdAt: Date.now(),
+      detail: `Fork at epoch ${forkBase.toString()}: this device and another committed from the same epoch; ${adopt ? "adopted the other device's branch" : "kept this device's branch"} (${by})`,
+    });
+    return adopt ? "adopt" : "keep";
+  }
+
+  /**
+   * Spec §10 step 3, the document rank. With chain access: each branch is
+   * ranked by where its Commit landed — the lowest-cursor document at the
+   * fork epoch on its `prev` chain (the commit point, when the writer chained
+   * it), or this device's own Commit cursor for its side — and the LOWER
+   * cursor wins, the coordinator's order read off the documents. Without
+   * chain access, or when a side has no document at that epoch, the live
+   * documents decide: higher cursor, then greater address. `true` = theirs.
+   */
+  private async rankBranches(
+    local: GroupSessionState,
+    forkEpoch: bigint,
+    entry: GroupDocument,
+    address: string | undefined,
+    chain: DocumentChainAccess | undefined,
+  ): Promise<boolean> {
+    const adopted = local.appliedDocument;
+    if (chain && address) {
+      const theirs = await this.lowestDocumentAtEpoch(
+        { doc: entry, address },
+        forkEpoch,
+        chain,
+      );
+      let ours: { cursor: number; address: string } | undefined;
+      if (adopted) {
+        ours = await this.lowestDocumentAtEpoch(
+          { address: adopted.address },
+          forkEpoch,
+          chain,
+        );
+      }
+      const own = local.commitPoint;
+      if (
+        own &&
+        own.epoch === forkEpoch.toString() &&
+        (!ours || own.cursor < ours.cursor)
+      ) {
+        ours = { cursor: own.cursor, address: "" };
+      }
+      if (theirs && ours) {
+        return (
+          theirs.cursor < ours.cursor ||
+          (theirs.cursor === ours.cursor && theirs.address > ours.address)
+        );
+      }
+    }
+    return (
+      !adopted ||
+      !address ||
+      entry.cursor > adopted.cursor ||
+      (entry.cursor === adopted.cursor && address > adopted.address)
+    );
+  }
+
+  /**
+   * The lowest-cursor document at `epoch` on the chain starting at `start`
+   * (the document itself when given, else fetched by address), walking `prev`
+   * until the chain drops below that epoch. Unreadable chains yield nothing.
+   */
+  private async lowestDocumentAtEpoch(
+    start: { doc?: GroupDocument; address: string },
+    epoch: bigint,
+    chain: DocumentChainAccess,
+  ): Promise<{ cursor: number; address: string } | undefined> {
+    let best: { cursor: number; address: string } | undefined;
+    let doc = start.doc;
+    let address: string | undefined = start.address;
+    for (let hop = 0; hop < 1000 && address; hop++) {
+      if (!doc) {
+        let pulled;
+        try {
+          pulled = await pullDocument({
+            address,
+            mediaStore: chain.mediaStore,
+            addressToUrl: chain.addressToUrl,
+            privateKeyHex: this.privateKey,
+            ownerPubkey: this.stablePubkey,
+          });
+        } catch {
+          return best;
+        }
+        if (pulled.type !== "group") break;
+        doc = pulled;
+      }
+      const decoded = clientStateDecoder(decodeBase64(doc.clientState), 0);
+      if (!decoded) break;
+      const docEpoch = decoded[0].groupContext.epoch;
+      if (docEpoch < epoch) break;
+      if (docEpoch === epoch && (!best || doc.cursor < best.cursor)) {
+        best = { cursor: doc.cursor, address };
+      }
+      address = doc.prev;
+      doc = undefined;
+    }
+    return best;
+  }
+
+  /**
+   * Spec §8 descent check for a newer-epoch document: walk its `prev` chain
+   * down to the local epoch or below and compare fingerprints with the states
+   * this device held. `descends` — the chain passes through our state at our
+   * epoch, a plain advance; `forkedAt` — the chain meets a state we held at an
+   * earlier epoch, so their branch left ours there and has since moved on;
+   * `unknown` — no shared epoch found, or the chain could not be read.
+   */
+  private async chainMeetsLocal(
+    local: GroupSessionState,
+    entry: GroupDocument,
+    chain: DocumentChainAccess,
+  ): Promise<
+    | { kind: "descends" }
+    | { kind: "forkedAt"; epoch: bigint }
+    | { kind: "unknown" }
+  > {
+    const localEpoch = local.state.groupContext.epoch;
+    const held = local.epochFingerprints ?? {};
+    let address = entry.prev;
+    for (let hop = 0; hop < 1000 && address; hop++) {
+      let doc;
+      try {
+        doc = await pullDocument({
+          address,
+          mediaStore: chain.mediaStore,
+          addressToUrl: chain.addressToUrl,
+          privateKeyHex: this.privateKey,
+          ownerPubkey: this.stablePubkey,
+        });
+      } catch {
+        return { kind: "unknown" };
+      }
+      if (doc.type !== "group" || doc.gid !== entry.gid) break;
+      const decoded = clientStateDecoder(decodeBase64(doc.clientState), 0);
+      if (!decoded) break;
+      const epoch = decoded[0].groupContext.epoch;
+      if (epoch <= localEpoch) {
+        const ours = held[epoch.toString()];
+        if (ours !== undefined && ours === epochFingerprint(decoded[0])) {
+          return epoch === localEpoch
+            ? { kind: "descends" }
+            : { kind: "forkedAt", epoch };
+        }
+      }
+      address = doc.prev;
+    }
+    return { kind: "unknown" };
   }
 
   private async catchUpGroupIfNeeded(group: GroupSessionState): Promise<void> {
