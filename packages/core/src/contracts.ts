@@ -79,6 +79,7 @@ export const pendingWelcomeSchema = z.object({
   welcome_64: z.string(),
   at: z.number(),
   after: z.number().int().positive().optional(),
+  sender_pk: z.string().optional(),
 });
 
 export const consumedWelcomeRefSchema = z.object({

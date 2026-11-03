@@ -232,6 +232,7 @@ export class Coordinator {
       .reduce((at, record) => Math.max(at, record.createdAt + 1), this.now());
     const record: WelcomeQueueRecord = {
       targetStablePubkey: input.targetStablePubkey,
+      senderStablePubkey: input.senderStablePubkey,
       keyPackageReference: input.keyPackageReference,
       welcome: input.welcome,
       createdAt,
