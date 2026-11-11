@@ -24,6 +24,10 @@ export type {
   SyncIssue,
 } from "./sessionState.ts";
 export type { CoordinatorTarget } from "./coordinatorRegistry.ts";
+export type {
+  CoordinatorLocator,
+  CordnCoordinatorRouting,
+} from "./coordinatorRouting.ts";
 export {
   TRANSPORT_ENCRYPTION_MODES,
   type TransportEncryption,

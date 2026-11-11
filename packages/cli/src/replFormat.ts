@@ -271,7 +271,22 @@ export const REPL_COMMAND_HELP = [
   {
     names: ["save-media"],
     usage:
-      "save-media [groupAlias] <cursor> [destDir]   (decrypts media to destDir, default .)",
+      "save-media [groupAlias] <envelopeId> [destDir]   (decrypts media to destDir, default .)",
+  },
+  {
+    names: ["switch-coordinator"],
+    usage:
+      "switch-coordinator <groupAlias> <serverPubkey> [--failover]   (handoff to a roster member)",
+  },
+  {
+    names: ["discover-coordinator"],
+    usage:
+      "discover-coordinator [groupAlias]   (probe the roster for the group's home)",
+  },
+  {
+    names: ["resend"],
+    usage:
+      "resend <groupAlias> <envelopeId>   (author-only re-send of an unconfirmed record)",
   },
   { names: ["sync"], usage: "sync [groupAlias]" },
   { names: ["sync-all"], usage: "sync-all" },

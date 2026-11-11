@@ -585,38 +585,93 @@ export async function executeReplCommand(
     }
     case "save-media": {
       let alias: string | undefined;
-      let cursorArg: string | undefined;
+      let messageId: string | undefined;
       let destDir = ".";
       const first = args[0];
       if (!first)
         throw new CliUsageError(
-          "Usage: save-media [groupAlias] <cursor> [destDir]",
+          "Usage: save-media [groupAlias] <envelopeId> [destDir]",
         );
-      if (/^\d+$/.test(first)) {
-        cursorArg = first;
+      if (/^[0-9a-f]{64}$/i.test(first)) {
+        messageId = first;
         alias = selectedGroupAlias;
         if (args[1]) destDir = args[1];
       } else {
         alias = first;
-        cursorArg = args[1];
+        messageId = args[1];
         if (args[2]) destDir = args[2];
       }
       if (!alias)
         throw new CliUsageError(
           "No selected group. Use `use <groupAlias>` first.",
         );
-      if (!cursorArg)
+      if (!messageId)
         throw new CliUsageError(
-          "Usage: save-media [groupAlias] <cursor> [destDir]",
+          "Usage: save-media [groupAlias] <envelopeId> [destDir]",
         );
       const { plaintext, metadata } = await session.decryptMediaMessage(
         alias,
-        Number(cursorArg),
+        messageId,
       );
       const destPath = join(destDir, metadata.filename);
       await writeFile(destPath, plaintext);
       output.write(
         `${colorize("saved media", ansi.green)} ${colorize(destPath, ansi.bold)} (${plaintext.length} bytes)\n`,
+      );
+      break;
+    }
+    case "switch-coordinator": {
+      const [alias, serverPubkey] = positionalArgs;
+      if (!alias || !serverPubkey) {
+        throw new CliUsageError(
+          "Usage: switch-coordinator <groupAlias> <serverPubkey> [--failover]",
+        );
+      }
+      // The roster is the only declaration of where the group may go (§4.4):
+      // the target must be named by it.
+      const routing = session.getGroup(alias).metadata?.coordinatorRouting;
+      const locator = [routing?.active, ...(routing?.fallbacks ?? [])].find(
+        (entry) =>
+          entry && entry.pubkey.toLowerCase() === serverPubkey.toLowerCase(),
+      );
+      if (!locator) {
+        throw new CliUsageError(
+          `Coordinator ${serverPubkey} is not named by the roster of ${alias} (coordinator-handoff §4.4)`,
+        );
+      }
+      const target = session.getCoordinatorTarget(serverPubkey) ?? {
+        serverPubkey: locator.pubkey,
+        relays: locator.relayUrls,
+      };
+      const result = await session.switchCoordinator(alias, target, {
+        failover: args.includes("--failover"),
+      });
+      output.write(
+        `${colorize("switched", ansi.green)} ${alias} -> ${formatFullCredentialLabel(serverPubkey)} cursor=${result.cursor}\n`,
+      );
+      break;
+    }
+    case "discover-coordinator": {
+      const alias = positionalArgs[0] ?? selectedGroupAlias;
+      if (!alias) {
+        throw new CliUsageError("Usage: discover-coordinator [groupAlias]");
+      }
+      const adopted = await session.discoverCoordinator(alias);
+      output.write(
+        adopted
+          ? `${colorize("group home", ansi.green)} ${alias} -> ${formatFullCredentialLabel(adopted)}\n`
+          : `no roster member carries ${alias}\n`,
+      );
+      break;
+    }
+    case "resend": {
+      const [alias, envelopeId] = positionalArgs;
+      if (!alias || !envelopeId) {
+        throw new CliUsageError("Usage: resend <groupAlias> <envelopeId>");
+      }
+      const result = await session.resendMessage(alias, envelopeId);
+      output.write(
+        `${colorize("resent", ansi.green)} ${envelopeId} cursor=${result.cursor}\n`,
       );
       break;
     }

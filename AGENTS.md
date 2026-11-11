@@ -18,7 +18,8 @@ Packages (`packages/*`):
 
 - [`@cordn/core`](packages/core/src/) — shared foundation: wire contracts
   (zod schemas + types + method names), leaf codecs (base64, MLS framing,
-  last-resort key-package extension), and consumed-ref value types.
+  last-resort key-package extension, group metadata + coordinator routing),
+  and consumed-ref value types.
   Transport-agnostic, dependency-light. Everything depends on this.
 - [`@cordn/coordinator`](packages/coordinator/src/) — core delivery-service
   state and behavior (key-package store, welcome/join-request queues, per-group
