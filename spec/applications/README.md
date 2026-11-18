@@ -95,3 +95,4 @@ Do not write an application specification when:
 - [`join-requests.md`](join-requests.md) — Coordinator-mediated join request signaling for shareable group links
 - [`group-ref.md`](group-ref.md) — Bech32-encoded group reference (`cordn1…`) carrying a delivery `gid` plus optional coordinator public key and relay hints for interoperable, checksummed group sharing
 - [`welcome-delivery.md`](welcome-delivery.md) — Coordinator-mediated Welcome delivery and the invitee membership-boundary cursor hint
+- [`calendar-events.md`](calendar-events.md) — NIP-52 calendar events and RSVPs as addressable sealed group messages: one implicit calendar per group, in-place revisions, author cancellation, and one latest-wins RSVP per account
